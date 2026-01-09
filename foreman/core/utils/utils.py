@@ -41,8 +41,14 @@ async def _create_job_in_database(job_id: str, total_tasks: int):
     print(f"Created job {job_id} in database")
 
 
-async def _create_worker_in_database(worker_id: str):
-    """Create worker in database if it doesn't exist"""
+async def _create_worker_in_database(worker_id: str, device_specs: dict = None):
+    """
+    Create worker in database if it doesn't exist, or update with device specs
+    
+    Args:
+        worker_id: Worker identifier
+        device_specs: Dictionary containing device specifications
+    """
 
     # Create a new session for this operation
     async with db_session() as session:
@@ -51,10 +57,14 @@ async def _create_worker_in_database(worker_id: str):
         existing_worker_ids = [w.id for w in workers]
 
         if worker_id not in existing_worker_ids:
-            await create_worker(session, worker_id)
+            # Create new worker with device specs
+            await create_worker(session, worker_id, device_specs=device_specs)
             print(f"Created worker {worker_id} in database")
         else:
-            # Worker exists, ensure it's marked as online
+            # Worker exists, update device specs and mark as online
+            if device_specs:
+                await update_worker_device_specs(session, worker_id, device_specs)
+                print(f"Updated device specs for worker {worker_id}")
             await update_worker_status(session, worker_id, "online")
             print(f"Worker {worker_id} already exists in database, marked as online")
 
