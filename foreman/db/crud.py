@@ -25,13 +25,73 @@ async def create_task(session: AsyncSession, task_id: str, job_id: str) -> TaskM
     return task
 
 
-async def create_worker(session: AsyncSession, worker_id: str) -> WorkerModel:
-    """Create a new worker"""
-    worker = WorkerModel(id=worker_id)
+async def create_worker(session: AsyncSession, worker_id: str, device_specs: dict = None) -> WorkerModel:
+    """
+    Create a new worker with optional device specifications
+    
+    Args:
+        session: Database session
+        worker_id: Worker identifier
+        device_specs: Optional dictionary with device specifications
+    """
+    worker_data = {"id": worker_id}
+    
+    # Add device specs if provided
+    if device_specs:
+        worker_data.update({
+            "device_type": device_specs.get("device_type"),
+            "os_type": device_specs.get("os_type"),
+            "os_version": device_specs.get("os_version"),
+            "cpu_model": device_specs.get("cpu_model"),
+            "cpu_cores": device_specs.get("cpu_cores"),
+            "cpu_threads": device_specs.get("cpu_threads"),
+            "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
+            "ram_total_mb": device_specs.get("ram_total_mb"),
+            "ram_available_mb": device_specs.get("ram_available_mb"),
+            "gpu_model": device_specs.get("gpu_model"),
+            "battery_level": device_specs.get("battery_level"),
+            "is_charging": device_specs.get("is_charging"),
+            "network_type": device_specs.get("network_type"),
+            "python_version": device_specs.get("python_version"),
+        })
+    
+    worker = WorkerModel(**worker_data)
     session.add(worker)
     await session.commit()
     await session.refresh(worker)
     return worker
+
+
+async def update_worker_device_specs(session: AsyncSession, worker_id: str, device_specs: dict):
+    """
+    Update worker device specifications
+    
+    Args:
+        session: Database session
+        worker_id: Worker identifier
+        device_specs: Dictionary with device specifications
+    """
+    update_data = {
+        "device_type": device_specs.get("device_type"),
+        "os_type": device_specs.get("os_type"),
+        "os_version": device_specs.get("os_version"),
+        "cpu_model": device_specs.get("cpu_model"),
+        "cpu_cores": device_specs.get("cpu_cores"),
+        "cpu_threads": device_specs.get("cpu_threads"),
+        "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
+        "ram_total_mb": device_specs.get("ram_total_mb"),
+        "ram_available_mb": device_specs.get("ram_available_mb"),
+        "gpu_model": device_specs.get("gpu_model"),
+        "battery_level": device_specs.get("battery_level"),
+        "is_charging": device_specs.get("is_charging"),
+        "network_type": device_specs.get("network_type"),
+        "python_version": device_specs.get("python_version"),
+        "connected_at": datetime.now(),
+    }
+    
+    stmt = update(WorkerModel).where(WorkerModel.id == worker_id).values(**update_data)
+    await session.execute(stmt)
+    await session.commit()
 
 
 async def get_job(session: AsyncSession, job_id: str) -> Optional[JobModel]:
