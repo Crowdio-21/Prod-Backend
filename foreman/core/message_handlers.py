@@ -199,14 +199,26 @@ class WorkerMessageHandler:
         """
         try:
             worker_id = message.data["worker_id"]
+            device_specs = message.data.get("device_specs", {})
 
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
+            
+            # Log device specs if available
+            if device_specs:
+                device_type = device_specs.get("device_type", "Unknown")
+                os_info = f"{device_specs.get('os_type', 'Unknown')} {device_specs.get('os_version', '')}"
+                cpu = device_specs.get("cpu_model", "Unknown")
+                ram = device_specs.get("ram_total_mb")
+                ram_info = f"{ram:.0f} MB" if ram else "Unknown"
+                print(f"  📱 Device: {device_type} | OS: {os_info}")
+                print(f"  🖥️  CPU: {cpu}")
+                print(f"  💾 RAM: {ram_info}")
 
             # Register worker
             self.connection_manager.add_worker(worker_id, websocket)
 
-            # Create worker in database if it doesn't exist
-            await _create_worker_in_database(worker_id)
+            # Create or update worker in database with device specs
+            await _create_worker_in_database(worker_id, device_specs)
 
             # Update worker status in database
             await _update_worker_status(worker_id, "online")

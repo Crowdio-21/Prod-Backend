@@ -212,4 +212,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Kaggle datasets and cache
+dataset_cache.json
+customer_sentiment_results.json
+customer_sentiment_report.txt
+
  

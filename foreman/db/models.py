@@ -61,8 +61,27 @@ class WorkerModel(Base):
     current_task_id = Column(String, nullable=True)
     total_tasks_completed = Column(Integer, default=0)
     total_tasks_failed = Column(Integer, default=0)
-    #device specs could be added here (CPU, RAM, etc.), battery draining, network speed, uptime
-    #entering time and exit time could be added here
+    
+    # Device specifications
+    device_type = Column(String, nullable=True)  # PC or Android
+    os_type = Column(String, nullable=True)  # Windows, Linux, macOS, Android
+    os_version = Column(String, nullable=True)
+    cpu_model = Column(String, nullable=True)
+    cpu_cores = Column(Integer, nullable=True)
+    cpu_threads = Column(Integer, nullable=True)
+    cpu_frequency_mhz = Column(Float, nullable=True)
+    ram_total_mb = Column(Float, nullable=True)
+    ram_available_mb = Column(Float, nullable=True)
+    gpu_model = Column(String, nullable=True)
+    battery_level = Column(Float, nullable=True)  # For Android/laptops
+    is_charging = Column(Boolean, nullable=True)
+    network_type = Column(String, nullable=True)  # WiFi, Cellular, Ethernet
+    python_version = Column(String, nullable=True)
+    
+    # Connection tracking
+    first_connected_at = Column(DateTime, default=datetime.now)
+    connected_at = Column(DateTime, default=datetime.now)
+    disconnected_at = Column(DateTime, nullable=True)
     
 
 
