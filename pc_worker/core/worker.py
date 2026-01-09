@@ -90,10 +90,28 @@ class FastAPIWorker:
 
             print(f"✅ Connected to foreman as {self.config.worker_id}")
 
-            # Send initial ready message
+            # Collect device specifications
+            print("📊 Collecting device specifications...")
+            try:
+                from common.device_info import get_device_specs, format_device_specs_summary
+                device_specs = get_device_specs()
+                print(f"\n{format_device_specs_summary(device_specs)}\n")
+            except Exception as e:
+                print(f"⚠️ Could not collect full device specs: {e}")
+                try:
+                    from common.device_info import get_lightweight_device_specs
+                    device_specs = get_lightweight_device_specs()
+                except:
+                    device_specs = {}
+                    print("⚠️ Using minimal device info")
+
+            # Send initial ready message with device specs
             ready_message = Message(
                 msg_type=MessageType.WORKER_READY,
-                data={"worker_id": self.config.worker_id},
+                data={
+                    "worker_id": self.config.worker_id,
+                    "device_specs": device_specs
+                },
             )
             await self.websocket.send(ready_message.to_json())
 
