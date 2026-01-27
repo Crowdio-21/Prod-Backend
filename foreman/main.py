@@ -83,6 +83,10 @@ app.include_router(api.websockets.router)
 app.include_router(api.scheduler_routes.router)
 app.include_router(api.checkpoint_routes.router)
 
+# Include evaluation routes
+from .api import evaluation_routes
+app.include_router(evaluation_routes.router)
+
 
 if __name__ == "__main__":
     import uvicorn

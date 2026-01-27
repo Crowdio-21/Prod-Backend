@@ -19,14 +19,15 @@ router = APIRouter(
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard():
-    """Dashboard page"""
-    # Read the content of the HTML file
+    """Dashboard page with evaluation charts"""
     import os
-    dashboard_path = os.path.join(os.path.dirname(__file__), "temp_dashboard.html")
-    with open(dashboard_path, "r") as f:
+    # Use the new dashboard with charts
+    dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+    if not os.path.exists(dashboard_path):
+        # Fallback to temp dashboard if new one doesn't exist
+        dashboard_path = os.path.join(os.path.dirname(__file__), "temp_dashboard.html")
+    with open(dashboard_path, "r", encoding="utf-8") as f:
         html_content = f.read()
-
-    # Return the Temporary Dashboard
     return html_content
 
 

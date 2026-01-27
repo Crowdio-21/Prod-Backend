@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CROWDio Foreman Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f0f2f5;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        h1 { 
+            color: #1a1a2e; 
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: #fff;
+            border: none;
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #666;
+            transition: all 0.2s;
+        }
+        .tab:hover { background: #e8e8e8; }
+        .tab.active { 
+            background: #3498db; 
+            color: white;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        /* Stats Cards */
+        .stats { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); 
+            gap: 15px; 
+            margin-bottom: 25px; 
+        }
+        .stat-card { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 12px; 
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: transform 0.2s;
+        }
+        .stat-card:hover { transform: translateY(-2px); }
+        .stat-number { 
+            font-size: 2em; 
+            font-weight: bold; 
+            color: #2c3e50; 
+        }
+        .stat-label { color: #7f8c8d; margin-top: 5px; font-size: 0.9em; }
+        .stat-card.highlight { border-left: 4px solid #3498db; }
+        .stat-card.success { border-left: 4px solid #27ae60; }
+        .stat-card.warning { border-left: 4px solid #f39c12; }
+        
+        /* Charts Section */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .chart-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .chart-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .chart-container {
+            position: relative;
+            height: 250px;
+        }
+        
+        /* Metrics Cards */
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .metric-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .metric-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1em;
+        }
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .metric-item:last-child { border-bottom: none; }
+        .metric-label { color: #7f8c8d; }
+        .metric-value { font-weight: 600; color: #2c3e50; }
+        .metric-value.good { color: #27ae60; }
+        .metric-value.warning { color: #f39c12; }
+        .metric-value.bad { color: #e74c3c; }
+        
+        /* Tables */
+        .section { margin-bottom: 25px; }
+        .section h2 { 
+            color: #2c3e50;
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        th, td { padding: 12px 15px; text-align: left; }
+        th { 
+            background: #f8f9fa; 
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 0.85em;
+            text-transform: uppercase;
+        }
+        td { border-bottom: 1px solid #eee; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: #f8f9fa; }
+        
+        /* Status Badges */
+        .status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+        .status-pending { background: #ffeaa7; color: #d68910; }
+        .status-running { background: #81ecec; color: #00838f; }
+        .status-completed { background: #a5d6a7; color: #2e7d32; }
+        .status-failed { background: #ef9a9a; color: #c62828; }
+        .status-online { background: #a5d6a7; color: #2e7d32; }
+        .status-offline { background: #ef9a9a; color: #c62828; }
+        .status-busy { background: #ffeaa7; color: #d68910; }
+        
+        /* Job row click */
+        .job-row { cursor: pointer; }
+        .job-row:hover { background: #e3f2fd !important; }
+        
+        /* Refresh indicator */
+        .refresh-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #3498db;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .refresh-indicator.show { opacity: 1; }
+        
+        /* Loading spinner */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            color: #7f8c8d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CROWDio Foreman Dashboard</h1>
+        
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('overview')">Overview</button>
+            <button class="tab" onclick="showTab('evaluation')">Evaluation</button>
+            <button class="tab" onclick="showTab('jobs')">Jobs</button>
+            <button class="tab" onclick="showTab('workers')">Workers</button>
+        </div>
+        
+        <!-- Overview Tab -->
+        <div id="overview-tab" class="tab-content active">
+            <div class="stats" id="stats">
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="total-jobs">-</div>
+                    <div class="stat-label">Total Jobs</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="completed-jobs">-</div>
+                    <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-number" id="running-jobs">-</div>
+                    <div class="stat-label">Running</div>
+                </div>
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="online-workers">-</div>
+                    <div class="stat-label">Workers Online</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="throughput">-</div>
+                    <div class="stat-label">Avg Throughput</div>
+                </div>
+            </div>
+            
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Recent Job Throughput</h3>
+                    <div class="chart-container">
+                        <canvas id="throughputChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Load Distribution</h3>
+                    <div class="chart-container">
+                        <canvas id="loadChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Recent Jobs</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Throughput</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-jobs-body"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Evaluation Tab -->
+        <div id="evaluation-tab" class="tab-content">
+            <div class="stats">
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="eval-throughput">-</div>
+                    <div class="stat-label">Avg Throughput (tasks/s)</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="eval-fairness">-</div>
+                    <div class="stat-label">Jain's Fairness Index</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-number" id="eval-cv">-</div>
+                    <div class="stat-label">Load CoV</div>
+                </div>
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="eval-avg-task">-</div>
+                    <div class="stat-label">Avg Task Time (s)</div>
+                </div>
+            </div>
+            
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Job Throughput Comparison</h3>
+                    <div class="chart-container">
+                        <canvas id="evalThroughputChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Job Execution Times</h3>
+                    <div class="chart-container">
+                        <canvas id="evalExecTimeChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Worker Task Distribution</h3>
+                    <div class="chart-container">
+                        <canvas id="workerTasksChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Task Time per Job</h3>
+                    <div class="chart-container">
+                        <canvas id="taskTimeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="metrics-row">
+                <div class="metric-card">
+                    <h3>Performance Metrics</h3>
+                    <div class="metric-item">
+                        <span class="metric-label">Total Tasks Completed</span>
+                        <span class="metric-value" id="perf-tasks">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Avg Job Completion Time</span>
+                        <span class="metric-value" id="perf-job-time">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Avg Task Execution Time</span>
+                        <span class="metric-value" id="perf-task-time">-</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <h3>Load Balancing</h3>
+                    <div class="metric-item">
+                        <span class="metric-label">Most Loaded Worker</span>
+                        <span class="metric-value" id="lb-most">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Least Loaded Worker</span>
+                        <span class="metric-value" id="lb-least">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Imbalance Ratio</span>
+                        <span class="metric-value" id="lb-imbalance">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Jobs Tab -->
+        <div id="jobs-tab" class="tab-content">
+            <div class="section">
+                <h2>All Jobs</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Status</th>
+                            <th>Tasks</th>
+                            <th>Progress</th>
+                            <th>Throughput</th>
+                            <th>Duration</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-body"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Workers Tab -->
+        <div id="workers-tab" class="tab-content">
+            <div class="section">
+                <h2>Workers</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Worker ID</th>
+                            <th>Status</th>
+                            <th>Device</th>
+                            <th>CPU Cores</th>
+                            <th>RAM</th>
+                            <th>Tasks Done</th>
+                            <th>Failed</th>
+                            <th>Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workers-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <div class="refresh-indicator" id="refresh-indicator">Refreshing...</div>
+    
+    <script>
+        // Chart instances
+        let throughputChart, loadChart, evalThroughputChart, evalExecTimeChart, workerTasksChart, taskTimeChart;
+        
+        // Chart colors
+        const colors = {
+            primary: '#3498db',
+            success: '#27ae60',
+            warning: '#f39c12',
+            danger: '#e74c3c',
+            purple: '#9b59b6',
+            teal: '#1abc9c'
+        };
+        
+        // Initialize charts
+        function initCharts() {
+            // Overview - Throughput Chart
+            const throughputCtx = document.getElementById('throughputChart');
+            if (throughputCtx) {
+                throughputChart = new Chart(throughputCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Throughput (tasks/s)', data: [], backgroundColor: colors.primary }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Overview - Load Distribution Chart
+            const loadCtx = document.getElementById('loadChart');
+            if (loadCtx) {
+                loadChart = new Chart(loadCtx, {
+                    type: 'doughnut',
+                    data: { labels: [], datasets: [{ data: [], backgroundColor: [colors.primary, colors.success, colors.warning, colors.purple, colors.teal] }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Throughput Chart
+            const evalThroughputCtx = document.getElementById('evalThroughputChart');
+            if (evalThroughputCtx) {
+                evalThroughputChart = new Chart(evalThroughputCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Throughput (tasks/s)', data: [], backgroundColor: colors.success }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Execution Time Chart
+            const evalExecCtx = document.getElementById('evalExecTimeChart');
+            if (evalExecCtx) {
+                evalExecTimeChart = new Chart(evalExecCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Execution Time (s)', data: [], backgroundColor: colors.warning }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Worker Tasks Chart
+            const workerTasksCtx = document.getElementById('workerTasksChart');
+            if (workerTasksCtx) {
+                workerTasksChart = new Chart(workerTasksCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            { label: 'Completed', data: [], backgroundColor: colors.success },
+                            { label: 'Failed', data: [], backgroundColor: colors.danger }
+                        ]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } } }
+                });
+            }
+            
+            // Evaluation - Task Time Chart
+            const taskTimeCtx = document.getElementById('taskTimeChart');
+            if (taskTimeCtx) {
+                taskTimeChart = new Chart(taskTimeCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            { label: 'Avg', data: [], borderColor: colors.primary, fill: false },
+                            { label: 'Min', data: [], borderColor: colors.success, fill: false },
+                            { label: 'Max', data: [], borderColor: colors.danger, fill: false }
+                        ]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+        }
+        
+        // Tab switching
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+            
+            if (tabName === 'evaluation') {
+                loadEvaluationData();
+            }
+        }
+        
+        // Show refresh indicator
+        function showRefreshing() {
+            const indicator = document.getElementById('refresh-indicator');
+            indicator.classList.add('show');
+            setTimeout(() => indicator.classList.remove('show'), 1000);
+        }
+        
+        // Load stats
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('total-jobs').textContent = stats.total_jobs;
+                document.getElementById('running-jobs').textContent = stats.running_jobs;
+                document.getElementById('completed-jobs').textContent = stats.completed_jobs;
+                document.getElementById('online-workers').textContent = stats.online_workers || 0;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+        
+        // Load throughput history for overview chart
+        async function loadThroughputHistory() {
+            try {
+                const response = await fetch('/api/evaluation/throughput-history?limit=10');
+                const data = await response.json();
+                
+                if (throughputChart && data.labels.length > 0) {
+                    throughputChart.data.labels = data.labels;
+                    throughputChart.data.datasets[0].data = data.throughputs;
+                    throughputChart.update();
+                    
+                    // Update avg throughput stat
+                    const avg = data.throughputs.reduce((a, b) => a + b, 0) / data.throughputs.length;
+                    document.getElementById('throughput').textContent = avg.toFixed(2);
+                }
+            } catch (error) {
+                console.error('Error loading throughput:', error);
+            }
+        }
+        
+        // Load load distribution for overview
+        async function loadLoadDistribution() {
+            try {
+                const response = await fetch('/api/evaluation/load-distribution');
+                const data = await response.json();
+                
+                if (loadChart && data.labels.length > 0) {
+                    loadChart.data.labels = data.labels.map(l => l.substring(0, 8));
+                    loadChart.data.datasets[0].data = data.data;
+                    loadChart.update();
+                }
+            } catch (error) {
+                console.error('Error loading load distribution:', error);
+            }
+        }
+        
+        // Load evaluation data
+        async function loadEvaluationData() {
+            try {
+                const response = await fetch('/api/evaluation/metrics');
+                const data = await response.json();
+                
+                // Update stats
+                document.getElementById('eval-throughput').textContent = data.performance.overall_throughput.toFixed(2);
+                document.getElementById('eval-fairness').textContent = data.load_balancing.jains_fairness_index.toFixed(3);
+                document.getElementById('eval-cv').textContent = data.load_balancing.coefficient_of_variation.toFixed(3);
+                document.getElementById('eval-avg-task').textContent = data.performance.avg_task_execution_time.toFixed(2);
+                
+                // Update metric cards
+                document.getElementById('perf-tasks').textContent = data.performance.completed_tasks;
+                document.getElementById('perf-job-time').textContent = data.performance.avg_job_completion_time.toFixed(2) + 's';
+                document.getElementById('perf-task-time').textContent = data.performance.avg_task_execution_time.toFixed(2) + 's';
+                
+                const mostLoaded = data.load_balancing.most_loaded_worker;
+                const leastLoaded = data.load_balancing.least_loaded_worker;
+                document.getElementById('lb-most').textContent = mostLoaded ? mostLoaded.substring(0, 12) : '-';
+                document.getElementById('lb-least').textContent = leastLoaded ? leastLoaded.substring(0, 12) : '-';
+                document.getElementById('lb-imbalance').textContent = (data.load_balancing.load_imbalance_ratio * 100).toFixed(1) + '%';
+                
+                // Update charts
+                const charts = data.charts;
+                
+                if (evalThroughputChart) {
+                    evalThroughputChart.data.labels = charts.job_throughput.labels;
+                    evalThroughputChart.data.datasets[0].data = charts.job_throughput.data;
+                    evalThroughputChart.update();
+                }
+                
+                if (evalExecTimeChart) {
+                    evalExecTimeChart.data.labels = charts.job_execution_time.labels;
+                    evalExecTimeChart.data.datasets[0].data = charts.job_execution_time.data;
+                    evalExecTimeChart.update();
+                }
+                
+                if (workerTasksChart) {
+                    workerTasksChart.data.labels = charts.worker_tasks.labels;
+                    workerTasksChart.data.datasets[0].data = charts.worker_tasks.completed;
+                    workerTasksChart.data.datasets[1].data = charts.worker_tasks.failed;
+                    workerTasksChart.update();
+                }
+                
+                if (taskTimeChart) {
+                    taskTimeChart.data.labels = charts.task_time_distribution.labels;
+                    taskTimeChart.data.datasets[0].data = charts.task_time_distribution.avg;
+                    taskTimeChart.data.datasets[1].data = charts.task_time_distribution.min;
+                    taskTimeChart.data.datasets[2].data = charts.task_time_distribution.max;
+                    taskTimeChart.update();
+                }
+            } catch (error) {
+                console.error('Error loading evaluation data:', error);
+            }
+        }
+        
+        // Load jobs
+        async function loadJobs() {
+            try {
+                const response = await fetch('/api/jobs');
+                const jobs = await response.json();
+                
+                // Recent jobs (overview)
+                const recentBody = document.getElementById('recent-jobs-body');
+                recentBody.innerHTML = '';
+                
+                jobs.slice(0, 5).forEach(job => {
+                    const row = document.createElement('tr');
+                    row.className = 'job-row';
+                    const progress = job.total_tasks > 0 ? Math.round((job.completed_tasks / job.total_tasks) * 100) : 0;
+                    const throughput = job.completed_at && job.created_at ? 
+                        (job.completed_tasks / ((new Date(job.completed_at) - new Date(job.created_at)) / 1000)).toFixed(2) : '-';
+                    
+                    row.innerHTML = `
+                        <td>${job.id.substring(0, 12)}...</td>
+                        <td><span class="status status-${job.status}">${job.status}</span></td>
+                        <td>${progress}% (${job.completed_tasks}/${job.total_tasks})</td>
+                        <td>${throughput} t/s</td>
+                        <td>${new Date(job.created_at).toLocaleString()}</td>
+                    `;
+                    recentBody.appendChild(row);
+                });
+                
+                // All jobs
+                const jobsBody = document.getElementById('jobs-body');
+                jobsBody.innerHTML = '';
+                
+                jobs.forEach(job => {
+                    const row = document.createElement('tr');
+                    const progress = job.total_tasks > 0 ? Math.round((job.completed_tasks / job.total_tasks) * 100) : 0;
+                    
+                    let duration = '-';
+                    let throughput = '-';
+                    if (job.completed_at && job.created_at) {
+                        const durSec = (new Date(job.completed_at) - new Date(job.created_at)) / 1000;
+                        duration = durSec.toFixed(1) + 's';
+                        throughput = (job.completed_tasks / durSec).toFixed(2) + ' t/s';
+                    }
+                    
+                    row.innerHTML = `
+                        <td>${job.id.substring(0, 16)}...</td>
+                        <td><span class="status status-${job.status}">${job.status}</span></td>
+                        <td>${job.completed_tasks}/${job.total_tasks}</td>
+                        <td>${progress}%</td>
+                        <td>${throughput}</td>
+                        <td>${duration}</td>
+                        <td>${new Date(job.created_at).toLocaleString()}</td>
+                    `;
+                    jobsBody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading jobs:', error);
+            }
+        }
+        
+        // Load workers
+        async function loadWorkers() {
+            try {
+                const response = await fetch('/api/workers');
+                const workers = await response.json();
+                
+                const tbody = document.getElementById('workers-body');
+                tbody.innerHTML = '';
+                
+                workers.forEach(worker => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${worker.id.substring(0, 16)}...</td>
+                        <td><span class="status status-${worker.status}">${worker.status}</span></td>
+                        <td>${worker.device_type || '-'}</td>
+                        <td>${worker.cpu_cores || '-'}</td>
+                        <td>${worker.ram_total_mb ? Math.round(worker.ram_total_mb) + ' MB' : '-'}</td>
+                        <td>${worker.total_tasks_completed}</td>
+                        <td>${worker.total_tasks_failed}</td>
+                        <td>${new Date(worker.last_seen).toLocaleString()}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading workers:', error);
+            }
+        }
+        
+        // Refresh all data
+        async function refreshAll() {
+            showRefreshing();
+            await Promise.all([
+                loadStats(),
+                loadJobs(),
+                loadWorkers(),
+                loadThroughputHistory(),
+                loadLoadDistribution()
+            ]);
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            refreshAll();
+            
+            // Refresh every 5 seconds
+            setInterval(refreshAll, 5000);
+        });
+    </script>
+</body>
+</html>
