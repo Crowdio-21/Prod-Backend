@@ -10,8 +10,12 @@ DATABASE_URL = "sqlite+aiosqlite:///./crowdcompute.db"
 engine = create_async_engine(DATABASE_URL, echo=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# Alias for convenience
+async_session = AsyncSessionLocal
+
 # Base class for models
 Base = declarative_base()
+
 
 # Database functions
 async def get_db():
@@ -22,10 +26,16 @@ async def get_db():
         finally:
             await session.close()
 
+
 @asynccontextmanager
 async def db_session():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+# Alias for convenience
+get_db_session = db_session
+
 
 async def init_db():
     """Initialize database tables"""
