@@ -14,53 +14,61 @@ from typing import Optional
 from foreman.db.base import get_db_session
 from foreman.db.models import TaskModel, JobModel
 
+# Module-level router for compatibility
+router = APIRouter(prefix="/api/checkpoints", tags=["checkpoints"])
+
 
 def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
     """
     Create checkpoint API routes
-    
+
     Args:
         checkpoint_manager: CheckpointManager instance
         checkpoint_recovery_manager: CheckpointRecoveryManager instance
-        
+
     Returns:
         FastAPI APIRouter with checkpoint endpoints
     """
-    router = APIRouter(prefix="/api/checkpoints", tags=["checkpoints"])
-    
-    @router.get("/jobs/{job_id}")
+    checkpoint_router = APIRouter(prefix="/api/checkpoints", tags=["checkpoints"])
+
+    @checkpoint_router.get("/jobs/{job_id}")
     async def get_job_checkpoint_progress(
-        job_id: str,
-        session: AsyncSession = Depends(get_db_session)
+        job_id: str, session: AsyncSession = Depends(get_db_session)
     ):
         """
         Get checkpoint progress for all tasks in a job
-        
+
         Returns overall progress and per-task checkpoint info.
         """
         try:
             job = await session.get(JobModel, job_id)
             if not job:
                 raise HTTPException(status_code=404, detail="Job not found")
-            
+
             tasks_with_checkpoints = []
             total_progress = 0
             checkpoint_count = 0
-            
+
             for task in job.tasks:
                 if task.base_checkpoint_data:
-                    tasks_with_checkpoints.append({
-                        "task_id": task.id,
-                        "progress_percent": task.progress_percent,
-                        "checkpoint_count": task.checkpoint_count,
-                        "last_checkpoint_at": task.last_checkpoint_at.isoformat() if task.last_checkpoint_at else None,
-                        "base_checkpoint_size": task.base_checkpoint_size
-                    })
+                    tasks_with_checkpoints.append(
+                        {
+                            "task_id": task.id,
+                            "progress_percent": task.progress_percent,
+                            "checkpoint_count": task.checkpoint_count,
+                            "last_checkpoint_at": (
+                                task.last_checkpoint_at.isoformat()
+                                if task.last_checkpoint_at
+                                else None
+                            ),
+                            "base_checkpoint_size": task.base_checkpoint_size,
+                        }
+                    )
                     total_progress += task.progress_percent
                     checkpoint_count += task.checkpoint_count
-            
+
             avg_progress = total_progress / len(job.tasks) if job.tasks else 0
-            
+
             return {
                 "job_id": job_id,
                 "job_status": job.status,
@@ -68,18 +76,17 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
                 "tasks_with_checkpoints": len(tasks_with_checkpoints),
                 "average_progress_percent": avg_progress,
                 "total_checkpoints_taken": checkpoint_count,
-                "tasks": tasks_with_checkpoints
+                "tasks": tasks_with_checkpoints,
             }
-        
+
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-    
-    @router.get("/tasks/{task_id}")
+
+    @checkpoint_router.get("/tasks/{task_id}")
     async def get_task_checkpoint_info(
-        task_id: str,
-        session: AsyncSession = Depends(get_db_session)
+        task_id: str, session: AsyncSession = Depends(get_db_session)
     ):
         """
         Get detailed checkpoint information for a specific task
@@ -88,17 +95,18 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
             task = await session.get(TaskModel, task_id)
             if not task:
                 raise HTTPException(status_code=404, detail="Task not found")
-            
+
             if not task.base_checkpoint_data:
                 return {
                     "task_id": task_id,
                     "has_checkpoint": False,
-                    "message": "No checkpoint available for this task"
+                    "message": "No checkpoint available for this task",
                 }
-            
+
             import json
+
             deltas = json.loads(task.delta_checkpoints or "[]")
-            
+
             return {
                 "task_id": task_id,
                 "job_id": task.job_id,
@@ -108,24 +116,27 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
                 "checkpoint_count": task.checkpoint_count,
                 "base_checkpoint_size_bytes": task.base_checkpoint_size,
                 "delta_count": len(deltas),
-                "last_checkpoint_at": task.last_checkpoint_at.isoformat() if task.last_checkpoint_at else None,
+                "last_checkpoint_at": (
+                    task.last_checkpoint_at.isoformat()
+                    if task.last_checkpoint_at
+                    else None
+                ),
                 "storage_path": task.checkpoint_storage_path,
-                "deltas": deltas[:5]  # Show last 5 deltas
+                "deltas": deltas[:5],  # Show last 5 deltas
             }
-        
+
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-    
-    @router.post("/tasks/{task_id}/force-checkpoint")
+
+    @checkpoint_router.post("/tasks/{task_id}/force-checkpoint")
     async def force_checkpoint_cleanup(
-        task_id: str,
-        session: AsyncSession = Depends(get_db_session)
+        task_id: str, session: AsyncSession = Depends(get_db_session)
     ):
         """
         Force cleanup of checkpoint data for a task (debugging)
-        
+
         Use with caution - will delete checkpoint data for recovery.
         Only use on completed or failed tasks.
         """
@@ -133,27 +144,27 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
             task = await session.get(TaskModel, task_id)
             if not task:
                 raise HTTPException(status_code=404, detail="Task not found")
-            
+
             if task.status not in ["completed", "failed"]:
                 raise HTTPException(
                     status_code=400,
-                    detail="Can only cleanup checkpoints for completed/failed tasks"
+                    detail="Can only cleanup checkpoints for completed/failed tasks",
                 )
-            
+
             success = await checkpoint_manager.cleanup_checkpoint(session, task_id)
-            
+
             return {
                 "task_id": task_id,
                 "action": "checkpoint_cleanup",
-                "success": success
+                "success": success,
             }
-        
+
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-    
-    @router.get("/storage-info/{task_id}")
+
+    @checkpoint_router.get("/storage-info/{task_id}")
     async def get_checkpoint_storage_info(task_id: str):
         """
         Get storage location and size info for a task's checkpoints
@@ -163,5 +174,5 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
             return info
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-    
-    return router
+
+    return checkpoint_router
