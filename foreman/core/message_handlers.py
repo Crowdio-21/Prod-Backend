@@ -131,8 +131,12 @@ class WorkerMessageHandler:
     """
 
     def __init__(
-        self, connection_manager, job_manager, task_dispatcher, completion_handler,
-        checkpoint_manager: CheckpointManager = None
+        self,
+        connection_manager,
+        job_manager,
+        task_dispatcher,
+        completion_handler,
+        checkpoint_manager: CheckpointManager = None,
     ):
         """
         Initialize worker message handler
@@ -168,6 +172,9 @@ class WorkerMessageHandler:
             await self._handle_task_error(message, websocket)
         elif message.type == MessageType.PONG:
             await self._handle_pong(message, websocket)
+        elif message.type == MessageType.WORKER_HEARTBEAT:
+            # Fallback for workers sending heartbeat instead of PONG
+            await self._handle_pong(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
         else:
@@ -175,7 +182,7 @@ class WorkerMessageHandler:
 
     async def _handle_pong(self, message: Message, websocket: WebSocketServerProtocol):
         """
-        Handle pong from worker (heartbeat response)
+        Handle pong from worker (heartbeat response + performance metrics)
 
         Args:
             message: Pong message
@@ -186,6 +193,48 @@ class WorkerMessageHandler:
         if worker_id:
             # Update worker's last seen time in database
             await _update_worker_status(worker_id, "online")
+
+            # Update performance metrics if provided
+            if "performance_metrics" in message.data:
+                metrics = message.data["performance_metrics"]
+                await self._update_worker_performance_metrics(worker_id, metrics)
+
+    async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
+        """
+        Update worker performance metrics in database
+
+        Args:
+            worker_id: Worker identifier
+            metrics: Performance metrics dictionary
+        """
+        try:
+            from foreman.db.base import async_session
+            from foreman.db.models import WorkerModel
+            from sqlalchemy import select, update
+            from datetime import datetime
+
+            async with async_session() as session:
+                # Update worker performance fields
+                stmt = (
+                    update(WorkerModel)
+                    .where(WorkerModel.id == worker_id)
+                    .values(
+                        cpu_usage_percent=metrics.get("cpu_usage_percent"),
+                        ram_available_mb=metrics.get("ram_available_mb"),
+                        battery_level=metrics.get("battery_level"),
+                        is_charging=metrics.get("is_charging"),
+                        network_speed_mbps=metrics.get("network_speed_mbps"),
+                        storage_available_gb=metrics.get("storage_available_gb"),
+                        last_performance_update=datetime.now(),
+                    )
+                )
+                await session.execute(stmt)
+                await session.commit()
+
+        except Exception as e:
+            print(
+                f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}"
+            )
 
     async def _handle_worker_ready(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -202,7 +251,7 @@ class WorkerMessageHandler:
             device_specs = message.data.get("device_specs", {})
 
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
-            
+
             # Log device specs if available
             if device_specs:
                 device_type = device_specs.get("device_type", "Unknown")
@@ -376,11 +425,13 @@ class WorkerMessageHandler:
             import traceback
 
             traceback.print_exc()
-    
-    async def _handle_task_checkpoint(self, message: Message, websocket: WebSocketServerProtocol):
+
+    async def _handle_task_checkpoint(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
         """
         Handle checkpoint message from worker (incremental state save)
-        
+
         Args:
             message: Task checkpoint message
             websocket: Worker websocket connection
@@ -393,23 +444,26 @@ class WorkerMessageHandler:
             progress_percent = message.data["progress_percent"]
             checkpoint_id = message.data["checkpoint_id"]
             compression_type = message.data.get("compression_type", "gzip")
-            
+
             # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-            
+
             if not worker_id:
                 print(f"WorkerMessageHandler: Could not find worker for checkpoint")
                 return
-            
+
             # Convert hex back to bytes
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
-            
-            print(f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
-                  f"for task {task_id} (size: {len(checkpoint_data_bytes)} bytes, "
-                  f"progress: {progress_percent}%)")
-            
+
+            print(
+                f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
+                f"for task {task_id} (size: {len(checkpoint_data_bytes)} bytes, "
+                f"progress: {progress_percent}%)"
+            )
+
             # Get database session and store checkpoint
             from foreman.db.base import get_db_session
+
             async with get_db_session() as session:
                 success = await self.checkpoint_manager.store_checkpoint(
                     session=session,
@@ -419,22 +473,30 @@ class WorkerMessageHandler:
                     delta_data_bytes=checkpoint_data_bytes,
                     progress_percent=progress_percent,
                     checkpoint_id=checkpoint_id,
-                    compression_type=compression_type
+                    compression_type=compression_type,
                 )
-            
+
             if success:
-                print(f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}")
-                
+                print(
+                    f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}"
+                )
+
                 # Send acknowledgment to worker
                 from common.protocol import create_checkpoint_ack_message
+
                 ack_msg = create_checkpoint_ack_message(task_id, job_id, checkpoint_id)
                 await websocket.send(ack_msg.to_json())
             else:
-                print(f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}")
-        
+                print(
+                    f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}"
+                )
+
         except KeyError as e:
-            print(f"WorkerMessageHandler: Missing required field in checkpoint message: {e}")
+            print(
+                f"WorkerMessageHandler: Missing required field in checkpoint message: {e}"
+            )
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
             import traceback
+
             traceback.print_exc()
