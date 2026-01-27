@@ -69,6 +69,7 @@ class TaskDispatcher:
 
         for task in pending_tasks:
             available_workers = self.connection_manager.get_available_workers()
+            
 
             if not available_workers:
                 print(
@@ -229,32 +230,66 @@ class TaskDispatcher:
 
     async def _get_all_workers(self) -> Dict[str, Worker]:
         """
-        Get all worker objects for scheduler with their statistics
+        Get all worker objects with EXTENDED device specifications for MCDM
 
-        Returns:
-            Dictionary mapping worker_id to Worker objects
+        Returns workers with:
+        - Basic stats: tasks_completed, tasks_failed, status
+        - Device specs: cpu_cores, cpu_frequency, ram, battery
+        - Performance: cpu_usage, success_rate, avg_duration
         """
         all_worker_ids = self.connection_manager.get_all_worker_ids()
         workers = {}
 
-        # Import here to avoid circular dependency
-        from .utils import _get_worker_stats
+        # Import here to avoid circular dependency (explicit module path)
+        from foreman.core.utils.utils import _get_worker_stats_extended
 
         for worker_id in all_worker_ids:
             try:
-                # Get worker stats from database
-                stats = await _get_worker_stats(worker_id)
+                # Fetch COMPLETE worker data including device specs
+                stats = await _get_worker_stats_extended(worker_id)
 
                 if stats:
+                    # Calculate success rate
+                    completed = stats.get("tasks_completed", 0)
+                    failed = stats.get("tasks_failed", 0)
+                    total = completed + failed
+                    success_rate = completed / total if total > 0 else 1.0
+
                     workers[worker_id] = Worker(
                         id=worker_id,
                         status=stats.get("status", "online"),
-                        tasks_completed=stats.get("tasks_completed", 0),
-                        tasks_failed=stats.get("tasks_failed", 0),
+                        tasks_completed=completed,
+                        tasks_failed=failed,
                         current_task_id=stats.get("current_task_id"),
+                        # Device specifications
+                        cpu_cores=stats.get("cpu_cores", 1),
+                        cpu_threads=stats.get("cpu_threads", 1),
+                        cpu_frequency_mhz=stats.get("cpu_frequency_mhz", 1000.0),
+                        cpu_usage_percent=stats.get("cpu_usage_percent", 0.0),
+                        cpu_model=stats.get("cpu_model"),
+                        ram_total_mb=stats.get("ram_total_mb", 1024.0),
+                        ram_available_mb=stats.get("ram_available_mb", 512.0),
+                        # Battery/Power
+                        battery_level=stats.get("battery_level", 100.0),
+                        is_charging=stats.get("is_charging", True),
+                        # Network
+                        network_type=stats.get("network_type", "WiFi"),
+                        network_speed_mbps=stats.get("network_speed_mbps", 10.0),
+                        # Performance metrics
+                        avg_task_duration_sec=stats.get("avg_task_duration_sec", 0.0),
+                        success_rate=success_rate,
+                        # GPU
+                        gpu_available=stats.get("gpu_available", False),
+                        gpu_model=stats.get("gpu_model"),
+                        # Storage
+                        storage_available_gb=stats.get("storage_available_gb", 0.0),
+                        # Device info
+                        device_type=stats.get("device_type"),
+                        os_type=stats.get("os_type"),
+                        os_version=stats.get("os_version"),
                     )
                 else:
-                    # Worker exists but no stats yet
+                    # Worker exists but no stats yet - use defaults
                     workers[worker_id] = Worker(
                         id=worker_id,
                         status="online",
@@ -266,7 +301,10 @@ class TaskDispatcher:
                 print(
                     f"TaskDispatcher: Error getting stats for worker {worker_id}: {e}"
                 )
-                # Create basic worker object
+                import traceback
+
+                traceback.print_exc()
+                # Create basic worker object with defaults
                 workers[worker_id] = Worker(
                     id=worker_id,
                     status="online",
