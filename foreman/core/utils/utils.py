@@ -44,7 +44,7 @@ async def _create_job_in_database(job_id: str, total_tasks: int):
 async def _create_worker_in_database(worker_id: str, device_specs: dict = None):
     """
     Create worker in database if it doesn't exist, or update with device specs
-    
+
     Args:
         worker_id: Worker identifier
         device_specs: Dictionary containing device specifications
@@ -150,7 +150,7 @@ async def _complete_task_if_assigned(task_id: str, worker_id: str, result: str):
 
 
 async def _get_worker_stats(worker_id: str):
-    """Get worker statistics from database"""
+    """Get worker statistics from database (basic version - for backward compatibility)"""
     from ...db.models import WorkerModel
     from sqlalchemy import select
 
@@ -168,3 +168,67 @@ async def _get_worker_stats(worker_id: str):
                 "current_task_id": worker.current_task_id,
             }
         return None
+
+
+async def _get_worker_stats_extended(worker_id: str):
+    """
+    Get EXTENDED worker statistics including device specs for MCDM
+
+    Args:
+        worker_id: Worker identifier
+
+    Returns:
+        Dictionary with complete worker data including:
+        - Basic: status, tasks_completed, tasks_failed
+        - Device: cpu_cores, cpu_frequency, ram_total, ram_available
+        - Performance: cpu_usage, avg_task_duration, success_rate
+        - Battery: battery_level, is_charging
+        - Network: network_type, network_speed
+        - GPU: gpu_available, gpu_model
+        - Storage: storage_available
+    """
+    from ...db.models import WorkerModel
+    from sqlalchemy import select
+
+    async with db_session() as session:
+        result = await session.execute(select(WorkerModel).filter_by(id=worker_id))
+        worker = result.scalar_one_or_none()
+
+        if not worker:
+            return {}
+
+        return {
+            # Basic stats
+            "status": worker.status,
+            "tasks_completed": worker.total_tasks_completed or 0,
+            "tasks_failed": worker.total_tasks_failed or 0,
+            "current_task_id": worker.current_task_id,
+            # CPU
+            "cpu_cores": worker.cpu_cores or 1,
+            "cpu_threads": worker.cpu_threads or 1,
+            "cpu_frequency_mhz": worker.cpu_frequency_mhz or 1000.0,
+            "cpu_usage_percent": worker.cpu_usage_percent or 0.0,
+            "cpu_model": worker.cpu_model,
+            # RAM
+            "ram_total_mb": worker.ram_total_mb or 1024.0,
+            "ram_available_mb": worker.ram_available_mb or 512.0,
+            # Battery
+            "battery_level": worker.battery_level or 100.0,
+            "is_charging": (
+                worker.is_charging if worker.is_charging is not None else True
+            ),
+            # Network
+            "network_type": worker.network_type or "WiFi",
+            "network_speed_mbps": worker.network_speed_mbps or 10.0,
+            # GPU
+            "gpu_available": worker.gpu_available or False,
+            "gpu_model": worker.gpu_model,
+            # Storage
+            "storage_available_gb": worker.storage_available_gb or 0.0,
+            # Performance
+            "avg_task_duration_sec": worker.avg_task_duration_sec or 0.0,
+            # Device info
+            "device_type": worker.device_type,
+            "os_type": worker.os_type,
+            "os_version": worker.os_version,
+        }
