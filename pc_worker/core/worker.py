@@ -36,18 +36,34 @@ class FastAPIWorker:
             "tasks_failed": 0,
             "total_execution_time": 0.0,
             "started_at": datetime.now(),
+            "task_durations": [],  # Track individual task durations for MCDM
         }
 
         # Build FastAPI application with routes and dashboard
         self.app = create_app(self)
 
     # ---------- Public serialization helpers ----------
+    def get_success_rate(self) -> float:
+        """Calculate task success rate (0-1)"""
+        total = self.stats["tasks_completed"] + self.stats["tasks_failed"]
+        if total == 0:
+            return 1.0  # Default to 100% if no tasks yet
+        return self.stats["tasks_completed"] / total
+
+    def get_average_task_duration(self) -> float:
+        """Calculate average task duration in seconds"""
+        if not self.stats["task_durations"]:
+            return 0.0
+        return sum(self.stats["task_durations"]) / len(self.stats["task_durations"])
+
     def _stats_for_json(self) -> Dict[str, Any]:
         return {
             "tasks_completed": self.stats["tasks_completed"],
             "tasks_failed": self.stats["tasks_failed"],
             "total_execution_time": self.stats["total_execution_time"],
             "started_at": self.stats["started_at"].isoformat(),
+            "success_rate": self.get_success_rate(),
+            "avg_task_duration_sec": self.get_average_task_duration(),
         }
 
     def serialize_status(self) -> Dict[str, Any]:
@@ -93,13 +109,18 @@ class FastAPIWorker:
             # Collect device specifications
             print("📊 Collecting device specifications...")
             try:
-                from common.device_info import get_device_specs, format_device_specs_summary
+                from common.device_info import (
+                    get_device_specs,
+                    format_device_specs_summary,
+                )
+
                 device_specs = get_device_specs()
                 print(f"\n{format_device_specs_summary(device_specs)}\n")
             except Exception as e:
                 print(f"⚠️ Could not collect full device specs: {e}")
                 try:
                     from common.device_info import get_lightweight_device_specs
+
                     device_specs = get_lightweight_device_specs()
                 except:
                     device_specs = {}
@@ -108,10 +129,7 @@ class FastAPIWorker:
             # Send initial ready message with device specs
             ready_message = Message(
                 msg_type=MessageType.WORKER_READY,
-                data={
-                    "worker_id": self.config.worker_id,
-                    "device_specs": device_specs
-                },
+                data={"worker_id": self.config.worker_id, "device_specs": device_specs},
             )
             await self.websocket.send(ready_message.to_json())
 
@@ -141,16 +159,38 @@ class FastAPIWorker:
             if message.type == MessageType.ASSIGN_TASK:
                 await self._handle_task_assignment(message)
             elif message.type == MessageType.PING:
-                # Respond to ping
-                pong_message = Message(
-                    msg_type=MessageType.PONG, data={"worker_id": self.config.worker_id}
-                )
-                await self.websocket.send(pong_message.to_json())
+                # Respond to ping with performance metrics
+                await self._handle_ping()
             else:
                 print(f"Unknown message type: {message.type}")
 
         except Exception as e:
             print(f"❌ Error handling message: {e}")
+
+    async def _handle_ping(self):
+        """Handle PING message and respond with PONG + performance metrics"""
+        try:
+            # Collect current performance metrics
+            from common.device_info import get_performance_metrics
+
+            metrics = get_performance_metrics()
+
+            # Send PONG with metrics
+            pong_message = Message(
+                msg_type=MessageType.PONG,
+                data={
+                    "worker_id": self.config.worker_id,
+                    "performance_metrics": metrics,
+                },
+            )
+            await self.websocket.send(pong_message.to_json())
+        except Exception as e:
+            # Fallback to simple PONG if metrics collection fails
+            print(f"⚠️ Could not collect performance metrics: {e}")
+            pong_message = Message(
+                msg_type=MessageType.PONG, data={"worker_id": self.config.worker_id}
+            )
+            await self.websocket.send(pong_message.to_json())
 
     async def _handle_task_assignment(self, message: Message):
         """Handle a task assignment from foreman"""
@@ -231,6 +271,7 @@ class FastAPIWorker:
             # Update stats
             self.stats["tasks_completed"] += 1
             self.stats["total_execution_time"] += execution_time
+            self.stats["task_durations"].append(execution_time)  # Track for average
 
             return result
 
@@ -270,13 +311,18 @@ class FastAPIWorker:
                 await asyncio.sleep(1)
 
     async def heartbeat(self):
-        """Send periodic heartbeat to foreman"""
+        """Send periodic heartbeat to foreman (as PONG with metrics)"""
         while self.is_connected:
             try:
                 if self.websocket:
-                    # Send heartbeat
+                    # Collect performance metrics
+                    from common.device_info import get_performance_metrics
+
+                    metrics = get_performance_metrics()
+
+                    # Send heartbeat as PONG with performance metrics
                     heartbeat_message = Message(
-                        msg_type=MessageType.WORKER_HEARTBEAT,
+                        msg_type=MessageType.PONG,
                         data={
                             "worker_id": self.config.worker_id,
                             "status": "online",
@@ -285,6 +331,7 @@ class FastAPIWorker:
                                 if self.current_task
                                 else None
                             ),
+                            **metrics,  # Include performance metrics
                         },
                     )
                     await self.websocket.send(heartbeat_message.to_json())
