@@ -108,35 +108,18 @@ class WebSocketManager:
 
                 except Exception as e:
                     print(
-                        f"🔴 [DISCONNECT DEBUG] Error handling message for {client_type} {worker_id_debug}: {e}"
+                        f"[DISCONNECT DEBUG] Error handling message for {client_type} {worker_id_debug}: {e}"
                     )
                     import traceback
 
                     traceback.print_exc()
-                    print(
-                        f"🔴 [DISCONNECT DEBUG] Breaking connection due to message handling error"
-                    )
-                    break
-
-            # If we exit the loop normally (no exception), it means the client/worker closed the connection
-            print(
-                f"🟡 [DISCONNECT DEBUG] Message loop ended for {client_type} {worker_id_debug} - connection closed by remote"
-            )
-
-        except websockets.exceptions.ConnectionClosed as e:
-            print(
-                f"🔴 [DISCONNECT DEBUG] WebSocket connection closed for {client_type} {worker_id_debug}: code={e.code}, reason={e.reason}"
-            )
-        except Exception as e:
-            print(
-                f"🔴 [DISCONNECT DEBUG] Unexpected exception for {client_type} {worker_id_debug}: {e}"
-            )
-            import traceback
-
-            traceback.print_exc()
+                    # Don't break - continue listening for messages
+                    
+        except websockets.exceptions.ConnectionClosed:
+            print("WebSocket connection closed")
         finally:
             print(
-                f"🔴 [CLEANUP] Cleaning up connection for {client_type} {worker_id_debug}"
+                f"[CLEANUP] Cleaning up connection for {client_type} {worker_id_debug}"
             )
             await self._cleanup_connection(websocket, client_type)
 
@@ -158,21 +141,21 @@ class WebSocketManager:
                 # Check if this worker has any pending tasks that haven't been received yet
                 pending_tasks = await self._get_worker_pending_tasks(worker_id)
                 print(
-                    f"🔴 [CLEANUP DEBUG] Worker {worker_id} disconnecting with {len(pending_tasks)} pending tasks: {pending_tasks}"
+                    f"[CLEANUP DEBUG] Worker {worker_id} disconnecting with {len(pending_tasks)} pending tasks: {pending_tasks}"
                 )
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")
             else:
                 print(
-                    f"🔴 [CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
+                    f"[CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
                 )
 
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
             if job_id:
-                print(f"🔴 [CLEANUP DEBUG] Client for job {job_id} disconnected")
+                print(f"[CLEANUP DEBUG] Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
-
+                
     async def _get_worker_pending_tasks(self, worker_id: str) -> list:
         """Get list of pending task IDs for a worker (for debugging)"""
         try:
@@ -191,7 +174,30 @@ class WebSocketManager:
         except Exception as e:
             print(f"⚠️ [CLEANUP DEBUG] Error getting pending tasks: {e}")
             return []
-
+    
+    async def ping_workers(self):
+        """Periodically ping workers to keep connections alive"""
+        while True:
+            try:
+                await asyncio.sleep(130)  # Ping every 30 seconds
+                
+                ping_message = create_ping_message()
+                worker_ids = self.connection_manager.get_all_worker_ids()
+                
+                for worker_id in worker_ids:
+                    websocket = self.connection_manager.get_worker_websocket(worker_id)
+                    if websocket:
+                        try:
+                            await websocket.send(ping_message.to_json())
+                        except Exception:
+                            # Worker connection is dead, will be cleaned up
+                            pass
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in ping task: {e}")
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get current WebSocket manager stats"""
         return self.connection_manager.get_stats()

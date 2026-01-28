@@ -46,6 +46,9 @@ class CheckpointHandler:
             get_state_callback: Function to retrieve current state dict
             send_checkpoint_callback: Function to send checkpoint message
         """
+        # Reset state for new task
+        self.reset()
+        
         self.checkpoint_task = asyncio.create_task(
             self._checkpoint_loop(task_id, get_state_callback, send_checkpoint_callback)
         )
@@ -73,14 +76,23 @@ class CheckpointHandler:
         2. Compute delta from last checkpoint
         3. Send to foreman asynchronously
         """
+        print(f"[CheckpointHandler] Starting checkpoint loop for task {task_id} (interval: {self.checkpoint_interval}s)")
         try:
+            # Wait a short initial delay to let task start, then checkpoint immediately
+            await asyncio.sleep(1.0)
+            
             while True:
-                await asyncio.sleep(self.checkpoint_interval)
+                print(f"[CheckpointHandler] Taking checkpoint for task {task_id}")
+                
+                # Process checkpoint first, then wait for interval
+                # This ensures we get a checkpoint early in task execution
                 
                 try:
                     # Get current state
                     current_state = get_state_callback()
                     self.current_state = current_state
+                    
+                    print(f"[CheckpointHandler] Got state for task {task_id}: progress={current_state.get('progress_percent', 0):.1f}%")
                     
                     # Serialize state
                     try:
@@ -106,8 +118,9 @@ class CheckpointHandler:
                             "compression_type": "gzip"
                         }
                         
-                        print(f"CheckpointHandler: Sending base checkpoint {self.checkpoint_count} "
-                              f"for task {task_id} (size: {len(compressed)} bytes)")
+                        progress = current_state.get("progress_percent", 0)
+                        print(f"[Checkpoint] Sending BASE #{self.checkpoint_count} for task {task_id} | "
+                              f"Size: {len(compressed):,} bytes | Progress: {progress:.1f}%")
                         
                         # Send asynchronously without blocking
                         await asyncio.to_thread(send_checkpoint_callback, checkpoint_msg)
@@ -129,8 +142,9 @@ class CheckpointHandler:
                             "compression_type": "gzip"
                         }
                         
-                        print(f"CheckpointHandler: Sending delta checkpoint {self.checkpoint_count} "
-                              f"for task {task_id} (delta size: {len(delta_bytes)} bytes)")
+                        progress = current_state.get("progress_percent", 0)
+                        print(f"[Checkpoint] Sending DELTA #{self.checkpoint_count} for task {task_id} | "
+                              f"Delta size: {len(delta_bytes):,} bytes | Progress: {progress:.1f}%")
                         
                         # Send asynchronously
                         await asyncio.to_thread(send_checkpoint_callback, checkpoint_msg)
@@ -139,6 +153,9 @@ class CheckpointHandler:
                     raise
                 except Exception as e:
                     print(f"CheckpointHandler: Error in checkpoint loop: {e}")
+                
+                # Wait for next checkpoint interval
+                await asyncio.sleep(self.checkpoint_interval)
         
         except asyncio.CancelledError:
             print(f"CheckpointHandler: Checkpoint monitoring stopped for {task_id}")
