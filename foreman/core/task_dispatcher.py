@@ -14,6 +14,7 @@ from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
 from .utils import (
     _get_pending_tasks,
     _get_assigned_tasks,
+    _get_assigned_tasks,
     _update_task_status,
     _update_worker_status,
     _claim_task_for_worker,
