@@ -104,56 +104,71 @@ class TaskDispatcher:
         print(f"TaskDispatcher: Assigned {tasks_assigned} tasks for job {job_id}")
         return tasks_assigned
 
-    async def assign_task_to_available_worker(self, worker_id: str) -> bool:
+    async def assign_task_to_available_worker(
+        self, worker_id: str, worker_threshold: int = 2
+    ) -> bool:
         """
-        Assign a pending task to a specific worker
+        Assign pending tasks when enough workers are available
+
+        When the number of available workers exceeds the threshold,
+        triggers batch assignment for all jobs (like initial start).
+        Otherwise, skips assignment and waits for more workers.
 
         Args:
-            worker_id: Worker identifier
+            worker_id: Worker identifier that just became available
+            worker_threshold: Minimum number of available workers before batch assignment
 
         Returns:
-            True if task was assigned, False otherwise
+            True if tasks were assigned, False otherwise
         """
-        # Get all pending tasks across jobs
+        # Check how many workers are currently available
+        available_workers = self.connection_manager.get_available_workers()
+        num_available = len(available_workers)
+
+        print(
+            f"TaskDispatcher: Worker {worker_id} available. "
+            f"Total available workers: {num_available}, threshold: {worker_threshold}"
+        )
+
+        # If not enough workers available, wait for more
+        if num_available < worker_threshold:
+            print(
+                f"TaskDispatcher: Waiting for more workers "
+                f"({num_available}/{worker_threshold} available)"
+            )
+            return False
+
+        # Enough workers available - trigger batch assignment for all jobs
+        print(
+            f"TaskDispatcher: Threshold reached ({num_available} >= {worker_threshold}), "
+            f"triggering batch assignment for all jobs"
+        )
+
+        # Get all pending tasks to find unique job IDs
         pending_tasks = await _get_pending_tasks()
 
         if not pending_tasks:
-            print(f"TaskDispatcher: No pending tasks available for worker {worker_id}")
+            print(f"TaskDispatcher: No pending tasks available")
             return False
 
-        # Convert to scheduler tasks
-        scheduler_tasks = [
-            SchedulerTask(
-                id=task.id,
-                job_id=task.job_id,
-                args=task.args,
-                priority=getattr(task, "priority", 0),
-            )
-            for task in pending_tasks
-        ]
+        # Get unique job IDs from pending tasks
+        job_ids = set(task.job_id for task in pending_tasks)
 
-        # Let scheduler select best task for this worker
-        selected_task = await self.scheduler.select_task(scheduler_tasks, worker_id)
+        total_assigned = 0
+        for job_id in job_ids:
+            # Get func_code from job manager
+            func_code = self.job_manager.get_func_code(job_id)
 
-        if not selected_task:
-            print(f"TaskDispatcher: Scheduler returned no task for worker {worker_id}")
-            return False
+            if not func_code:
+                print(f"TaskDispatcher: No func_code found for job {job_id}, skipping")
+                continue
 
-        # Get func_code from job manager
-        func_code = self.job_manager.get_func_code(selected_task.job_id)
+            # Use assign_tasks_for_job (like initial start) for batch assignment
+            assigned = await self.assign_tasks_for_job(job_id, func_code, [])
+            total_assigned += assigned
 
-        if not func_code:
-            print(f"TaskDispatcher: No func_code found for job {selected_task.job_id}")
-            return False
-
-        # Parse task args
-        task_args = json.loads(selected_task.args) if selected_task.args else []
-
-        success = await self._assign_task_to_worker(
-            selected_task.job_id, selected_task.id, func_code, task_args, worker_id
-        )
-
-        return success
+        print(f"TaskDispatcher: Batch assignment completed, {total_assigned} tasks assigned")
+        return total_assigned > 0
 
     async def _assign_task_to_worker(
         self, job_id: str, task_id: str, func_code: str, task_args: Any, worker_id: str

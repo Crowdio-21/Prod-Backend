@@ -61,9 +61,27 @@ async def run_distributed_sentiment(text, foreman_host="localhost"):
         # Distribute sentiment analysis to workers
         worker_results = await distributed_map(sentiment_worker, segments)
 
-        # Parse results from strings to dicts
-        import ast
-        parsed_results = [ast.literal_eval(result) for result in worker_results]
+        # Parse results - handle both dict results (already parsed) and string results
+        parsed_results = []
+        for idx, result in enumerate(worker_results):
+            if isinstance(result, dict):
+                parsed_results.append(result)
+            elif isinstance(result, str):
+                # Try JSON first, then ast.literal_eval as fallback
+                import json
+                import ast
+                try:
+                    parsed_results.append(json.loads(result))
+                except json.JSONDecodeError:
+                    try:
+                        parsed_results.append(ast.literal_eval(result))
+                    except (ValueError, SyntaxError) as e:
+                        print(f"Warning: Could not parse result {idx}: {result!r}")
+                        print(f"Parse error: {e}")
+                        # Use None for unparseable results
+                        parsed_results.append({"sentiment": 0, "confidence": 0, "latency_ms": 0, "error": str(e)})
+            else:
+                parsed_results.append(result)
 
         # Add segment_ids to results
         results = []

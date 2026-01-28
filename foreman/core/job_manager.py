@@ -121,8 +121,11 @@ class JobManager:
         """
         print(f"JobManager: Marking task {task_id} as completed")
 
+        # Serialize result to JSON string for storage
+        result_str = json.dumps(result) if not isinstance(result, str) else result
+
         accepted, _, completed_count, total_tasks = await _complete_task_if_assigned(
-            task_id, worker_id, str(result)
+            task_id, worker_id, result_str
         )
 
         if not accepted:
