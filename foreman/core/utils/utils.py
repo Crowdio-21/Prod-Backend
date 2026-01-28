@@ -1,6 +1,23 @@
 import json
 from ...db.base import db_session
-from ...db.crud import *
+from ...db.crud import (
+    get_pending_tasks,
+    get_assigned_tasks,
+    get_job_tasks,
+    get_job_by_id,
+    create_job,
+    create_worker,
+    get_workers,
+    update_worker_device_specs,
+    update_worker_status,
+    update_job_status,
+    update_task_status,
+    claim_task_for_worker,
+    update_worker_task_stats,
+    increment_job_completed_tasks,
+    complete_task_if_assigned,
+    record_worker_failure,
+)
 from ...db.models import TaskModel
 
 
@@ -23,6 +40,13 @@ async def _get_pending_tasks(job_id=None):
     async with db_session() as session:
         pending_tasks = await get_pending_tasks(session, job_id)
     return pending_tasks
+
+
+async def _get_assigned_tasks(job_id=None):
+    """Get tasks with 'assigned' status, optionally filtered by job_id"""
+    async with db_session() as session:
+        assigned_tasks = await get_assigned_tasks(session, job_id)
+    return assigned_tasks
 
 
 async def _get_job_by_id(job_id: str):

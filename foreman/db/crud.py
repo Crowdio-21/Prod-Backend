@@ -439,6 +439,19 @@ async def get_pending_tasks(
     return result.scalars().all()
 
 
+async def get_assigned_tasks(
+    session: AsyncSession, job_id: str = None
+) -> List[TaskModel]:
+    """Get tasks with 'assigned' status, optionally filtered by job_id"""
+    query = select(TaskModel).where(TaskModel.status == "assigned")
+    if job_id:
+        query = query.where(TaskModel.job_id == job_id)
+    
+    query = query.order_by(TaskModel.id)
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
 async def get_job_by_id(session: AsyncSession, job_id: str) -> Optional[JobModel]:
     """Get job by ID (alias for get_job)"""
     return await get_job(session, job_id)
