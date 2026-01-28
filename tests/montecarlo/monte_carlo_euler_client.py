@@ -20,7 +20,7 @@ import os
 import json
 import time
 
-# Add parent directory to Python path
+# Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from developer_sdk import connect, map as distributed_map, disconnect, crowdio
@@ -59,6 +59,25 @@ def monte_carlo_euler_worker(num_trials):
     import time
     
     start = time.time()
+    
+    # Minimum execution time to ensure checkpointing (in seconds)
+    # Checkpoint interval is 5s, so 25s ensures at least 4 checkpoints
+    MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
+    
+    # Create a shared state object for checkpointing
+    # This will be accessed by the checkpoint handler via builtins
+    checkpoint_state = {
+        "trials_completed": 0,
+        "total_count": 0,
+        "num_trials": num_trials,
+        "progress_percent": 0.0,
+        "estimated_e": 0.0,
+        "start_time": start
+    }
+    
+    # Make checkpoint state accessible globally via builtins for checkpoint handler
+    import builtins
+    builtins._checkpoint_state = checkpoint_state
     
     # Minimum execution time to ensure checkpointing (in seconds)
     MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
@@ -151,6 +170,10 @@ def monte_carlo_euler_worker(num_trials):
             "status": "error",
             "error": str(e)
         }
+    finally:
+        # Clean up checkpoint state
+        if hasattr(builtins, '_checkpoint_state'):
+            delattr(builtins, '_checkpoint_state')
 
 
 # =========================================================
