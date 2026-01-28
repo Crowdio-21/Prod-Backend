@@ -54,6 +54,8 @@ def main():
         max_concurrent_tasks=1,
         auto_restart=True,
         heartbeat_interval=30,
+        api_host="0.0.0.0",
+        api_port=port,
     )
 
     # Create worker
@@ -80,7 +82,7 @@ def main():
     import uvicorn
 
     try:
-        uvicorn.run(worker.app, host="0.0.0.0", port=port, log_level="info")
+        uvicorn.run(worker.app, host=config.api_host, port=config.api_port, log_level="info")
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")
 

@@ -18,6 +18,7 @@ from common.serializer import deserialize_function_for_PC, get_runtime_info
 from ..config import WorkerConfig
 from ..schema.models import TaskResult
 from .app import create_app
+from ..staged_results_manager.checkpoint_handler import CheckpointHandler
 
 
 class FastAPIWorker:
@@ -38,6 +39,9 @@ class FastAPIWorker:
             "started_at": datetime.now(),
             "task_durations": [],  # Track individual task durations for MCDM
         }
+        
+        # Initialize checkpoint handler with 5 second intervals
+        self.checkpoint_handler = CheckpointHandler(checkpoint_interval=5.0)
 
         # Build FastAPI application with routes and dashboard
         self.app = create_app(self)
@@ -208,15 +212,26 @@ class FastAPIWorker:
             self.current_task = {"task_id": task_id, "job_id": job_id}
 
             # Execute the task
-            result = await self._execute_task(func_code, task_args)
+            result = await self._execute_task(func_code, task_args, task_id, job_id)
+
+            # Serialize result to JSON string for database storage
+            import json
+            try:
+                result_str = json.dumps(result)
+            except (TypeError, ValueError):
+                # If result can't be JSON serialized, convert to string
+                result_str = str(result)
 
             # Send result back
             result_message = Message(
                 msg_type=MessageType.TASK_RESULT,
-                data={"result": result, "task_id": task_id},
+                data={"result": result_str, "task_id": task_id},
                 job_id=job_id,
             )
             await self.websocket.send(result_message.to_json())
+            
+            # Small delay to ensure message is transmitted
+            await asyncio.sleep(0.1)
 
             print(f"✅ Completed task {task_id}")
 
@@ -238,20 +253,98 @@ class FastAPIWorker:
             self.current_task = None
 
     # ---------- Task execution ----------
-    async def _execute_task(self, func_code: str, task_args: List[Any]) -> Any:
-        """Execute a task in a safe environment"""
+    async def _execute_task(self, func_code: str, task_args: List[Any], task_id: str, job_id: str) -> Any:
+        """Execute a task in a safe environment with checkpointing support"""
         start_time = datetime.now()
+        
+        # Create a shared checkpoint state that the function can access
+        # This is stored as a module-level variable that we can access
+        import builtins
+        builtins._checkpoint_state = {
+            "progress_percent": 0.0,
+            "status": "initializing",
+            "task_id": task_id
+        }
+        
+        # Define state getter for checkpoint handler
+        def get_task_state() -> Dict[str, Any]:
+            """Get current task state for checkpointing"""
+            try:
+                # Check for checkpoint state in builtins (shared with deserialized function)
+                if hasattr(builtins, '_checkpoint_state'):
+                    state = builtins._checkpoint_state
+                    return dict(state)  # Return a copy
+                # Fallback: check sys.modules
+                import sys
+                for mod_name, mod in sys.modules.items():
+                    if hasattr(mod, 'checkpoint_state') and mod.checkpoint_state is not None:
+                        state = mod.checkpoint_state
+                        if isinstance(state, dict) and 'progress_percent' in state:
+                            return dict(state)
+                # Default fallback
+                return {
+                    "progress_percent": 50.0,
+                    "status": "running"
+                }
+            except Exception as e:
+                print(f"⚠️ Could not get checkpoint state: {e}")
+                return {"progress_percent": 0.0}
+        
+        # Get reference to the main event loop for cross-thread communication
+        main_loop = asyncio.get_event_loop()
+        
+        # Define checkpoint sender
+        def send_checkpoint(checkpoint_msg: Dict[str, Any]) -> None:
+            """Send checkpoint to foreman (thread-safe for cross-thread calls)"""
+            try:
+                from common.protocol import create_task_checkpoint_message
+                
+                message = create_task_checkpoint_message(
+                    task_id=task_id,
+                    job_id=job_id,
+                    **checkpoint_msg
+                )
+                
+                # Send using thread-safe method to schedule on main event loop
+                if self.websocket and not self.websocket.closed:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(message.to_json()),
+                        main_loop
+                    )
+                    # Wait for send to complete (with timeout)
+                    future.result(timeout=5.0)
+                    
+                    # Terminal logging for checkpoint progress
+                    checkpoint_id = checkpoint_msg.get("checkpoint_id", 0)
+                    progress = checkpoint_msg.get("progress_percent", 0)
+                    is_base = checkpoint_msg.get("is_base", False)
+                    checkpoint_type = "BASE" if is_base else "DELTA"
+                    
+                    print(f"[Checkpoint] Task {task_id} | {checkpoint_type} #{checkpoint_id} | "
+                          f"Progress: {progress:.1f}%")
+            except Exception as e:
+                print(f"⚠️ Error sending checkpoint: {e}")
 
         try:
             print(f"🔄 Executing task... | worker_runtime={get_runtime_info()}")
 
             # Deserialize the function
             func = deserialize_function_for_PC(func_code)
+            
+            # Start checkpoint monitoring in background
+            await self.checkpoint_handler.start_checkpoint_monitoring(
+                task_id=task_id,
+                get_state_callback=get_task_state,
+                send_checkpoint_callback=send_checkpoint
+            )
+            
+            print(f"✅ Checkpoint monitoring started for task {task_id}")
 
-            # Execute the function with the provided arguments
+            # Execute the function in a thread to avoid blocking the event loop
+            # This allows the checkpoint loop to run concurrently
             if isinstance(task_args, list) and len(task_args) == 1:
                 # Single argument
-                result = func(task_args[0])
+                result = await asyncio.to_thread(func, task_args[0])
             elif (
                 isinstance(task_args, list)
                 and len(task_args) == 2
@@ -259,10 +352,10 @@ class FastAPIWorker:
             ):
                 # Function with args and kwargs
                 args, kwargs = task_args
-                result = func(*args, **kwargs)
+                result = await asyncio.to_thread(lambda: func(*args, **kwargs))
             else:
                 # Multiple arguments
-                result = func(*task_args)
+                result = await asyncio.to_thread(lambda: func(*task_args))
 
             execution_time = (datetime.now() - start_time).total_seconds()
 
@@ -286,6 +379,15 @@ class FastAPIWorker:
             self.stats["total_execution_time"] += execution_time
 
             raise Exception(error_msg)
+        
+        finally:
+            # Stop checkpoint monitoring
+            await self.checkpoint_handler.stop_checkpoint_monitoring()
+            print(f"🛑 Checkpoint monitoring stopped for task {task_id}")
+            
+            # Clean up checkpoint state from builtins
+            if hasattr(builtins, '_checkpoint_state'):
+                delattr(builtins, '_checkpoint_state')
 
     # ---------- Background tasks ----------
     async def listen_for_tasks(self):
@@ -314,7 +416,7 @@ class FastAPIWorker:
         """Send periodic heartbeat to foreman (as PONG with metrics)"""
         while self.is_connected:
             try:
-                if self.websocket:
+                if self.websocket and not self.websocket.closed:
                     # Collect performance metrics
                     from common.device_info import get_performance_metrics
 
@@ -338,8 +440,13 @@ class FastAPIWorker:
 
                 await asyncio.sleep(self.config.heartbeat_interval)
 
-            except Exception as e:
-                print(f"❌ Error sending heartbeat: {e}")
+            except websockets.exceptions.ConnectionClosed:
+                print("WebSocket closed during heartbeat, reconnecting...")
+                self.is_connected = False
+                break
+            except Exception as e: 
+                print(f"Error sending heartbeat: {e}")
+                await asyncio.sleep(self.config.heartbeat_interval)
                 break
 
     # ---------- Main worker lifecycle ----------

@@ -317,12 +317,17 @@ class WorkerMessageHandler:
                 return
 
             print(
-                f"WorkerMessageHandler: Task {task_id} completed by worker {worker_id} for job {job_id}"
+                f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
             )
+
+            # Result should already be a string from worker, but ensure it
+            result_str = str(result) if result is not None else ""
+            
+            print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
 
             # Mark task as completed in job manager (idempotent)
             accepted, job_complete = await self.job_manager.mark_task_completed(
-                task_id, job_id, worker_id, result
+                task_id, job_id, worker_id, result_str
             )
 
             if not accepted:
@@ -358,10 +363,11 @@ class WorkerMessageHandler:
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling task result: {e}")
             import traceback
-
             traceback.print_exc()
 
     async def _handle_task_error(

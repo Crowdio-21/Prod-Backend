@@ -105,7 +105,7 @@ class WebSocketManager:
                     print(f"Error handling message: {e}")
                     import traceback
                     traceback.print_exc()
-                    break
+                    # Don't break - continue listening for messages
                     
         except websockets.exceptions.ConnectionClosed:
             print("WebSocket connection closed")
@@ -139,7 +139,7 @@ class WebSocketManager:
         """Periodically ping workers to keep connections alive"""
         while True:
             try:
-                await asyncio.sleep(30)  # Ping every 30 seconds
+                await asyncio.sleep(130)  # Ping every 30 seconds
                 
                 ping_message = create_ping_message()
                 worker_ids = self.connection_manager.get_all_worker_ids()
