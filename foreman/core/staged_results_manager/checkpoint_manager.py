@@ -73,15 +73,22 @@ class CheckpointManager:
             
             if is_base:
                 # Store base checkpoint
-                await self.storage_handler.store_checkpoint(
+                storage_ref = await self.storage_handler.store_checkpoint(
                     task_id, delta_data_bytes, is_base=True
                 )
                 task.base_checkpoint_data = f"stored_{checkpoint_id}"
                 task.base_checkpoint_size = len(delta_data_bytes)
                 task.delta_checkpoints = json.dumps([])
                 
-                print(f"CheckpointManager: Stored base checkpoint {checkpoint_id} "
-                      f"for task {task_id} (size: {len(delta_data_bytes)} bytes)")
+                # Set checkpoint storage path
+                if storage_ref.startswith("fs_"):
+                    task.checkpoint_storage_path = os.path.join(self.checkpoint_dir, task_id)
+                else:
+                    task.checkpoint_storage_path = f"db://{task_id}"
+                
+                print(f"[Checkpoint DB] Task {task_id} | BASE #{checkpoint_id} | "
+                      f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
+                      f"Storage: {task.checkpoint_storage_path}")
             else:
                 # Append delta checkpoint
                 deltas = json.loads(task.delta_checkpoints or "[]")
@@ -102,11 +109,13 @@ class CheckpointManager:
                 deltas.append(delta_info)
                 task.delta_checkpoints = json.dumps(deltas)
                 
-                print(f"CheckpointManager: Stored delta {checkpoint_id} for task {task_id} "
-                      f"(size: {len(delta_data_bytes)} bytes)")
+                print(f"[Checkpoint DB] Task {task_id} | DELTA #{checkpoint_id} | "
+                      f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
+                      f"Total deltas: {len(deltas)}")
                 
                 # Compact if too many deltas (merge into new base every 50)
                 if len(deltas) >= 50:
+                    print(f"[Checkpoint DB] Compacting {len(deltas)} deltas for task {task_id}...")
                     await self._compact_checkpoints(session, task_id)
             
             await session.commit()

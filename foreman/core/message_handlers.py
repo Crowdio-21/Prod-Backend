@@ -322,12 +322,17 @@ class WorkerMessageHandler:
                 return
 
             print(
-                f"📥 [RESULT DEBUG] Task {task_id} result received from worker {worker_id} for job {job_id}"
+                f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
             )
+
+            # Result should already be a string from worker, but ensure it
+            result_str = str(result) if result is not None else ""
+            
+            print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
 
             # Mark task as completed in job manager (idempotent)
             accepted, job_complete = await self.job_manager.mark_task_completed(
-                task_id, job_id, worker_id, result
+                task_id, job_id, worker_id, result_str
             )
 
             if not accepted:
@@ -340,7 +345,7 @@ class WorkerMessageHandler:
                 return
 
             print(
-                f"✅ [RESULT DEBUG] Task {task_id} accepted, job_complete={job_complete}"
+                f"[RESULT DEBUG] Task {task_id} accepted, job_complete={job_complete}"
             )
 
             # Update worker statistics
@@ -353,7 +358,7 @@ class WorkerMessageHandler:
             # Check if job is complete and handle completion
             if job_complete:
                 print(
-                    f"🏁 [RESULT DEBUG] Job {job_id} completed, triggering completion handler"
+                    f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler"
                 )
                 await self.completion_handler.handle_job_completion(job_id)
 
@@ -363,18 +368,17 @@ class WorkerMessageHandler:
             )
 
             if assigned:
-                print(f"📤 [RESULT DEBUG] Assigned next task to worker {worker_id}")
+                print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
             else:
                 print(
-                    f"📭 [RESULT DEBUG] No more tasks to assign to worker {worker_id}"
+                    f"[RESULT DEBUG] No more tasks to assign to worker {worker_id}"
                 )
 
         except KeyError as e:
-            print(f"❌ [RESULT DEBUG] Missing required field in task result: {e}")
+            print(f"[RESULT DEBUG] Missing required field in task result: {e}")
         except Exception as e:
-            print(f"❌ [RESULT DEBUG] Error handling task result: {e}")
+            print(f"[RESULT DEBUG] Error handling task result: {e}")
             import traceback
-
             traceback.print_exc()
 
     async def _handle_task_error(
