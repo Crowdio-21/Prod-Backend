@@ -128,6 +128,11 @@ class WebSocketManager:
                 print(f"Worker {worker_id} disconnected")
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")
+                
+                # Recover any orphaned tasks that were assigned to this worker
+                recovered = await self.task_dispatcher.recover_orphaned_tasks()
+                if recovered > 0:
+                    print(f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected")
         
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
