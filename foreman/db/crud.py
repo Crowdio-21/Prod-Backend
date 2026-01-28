@@ -116,6 +116,37 @@ async def get_workers(session: AsyncSession) -> List[WorkerModel]:
     return result.scalars().all()
 
 
+async def delete_worker(session: AsyncSession, worker_id: str) -> bool:
+    """Delete a worker by ID"""
+    result = await session.execute(select(WorkerModel).filter_by(id=worker_id))
+    worker = result.scalar_one_or_none()
+    if worker:
+        await session.delete(worker)
+        await session.commit()
+        return True
+    return False
+
+
+async def clear_database(session: AsyncSession) -> dict:
+    """Clear all workers, jobs, tasks, and worker failures from the database"""
+    from sqlalchemy import delete as sql_delete
+    
+    # Delete in order to respect foreign key constraints
+    worker_failures_result = await session.execute(sql_delete(WorkerFailureModel))
+    tasks_result = await session.execute(sql_delete(TaskModel))
+    jobs_result = await session.execute(sql_delete(JobModel))
+    workers_result = await session.execute(sql_delete(WorkerModel))
+    
+    await session.commit()
+    
+    return {
+        "workers_deleted": workers_result.rowcount,
+        "jobs_deleted": jobs_result.rowcount,
+        "tasks_deleted": tasks_result.rowcount,
+        "worker_failures_deleted": worker_failures_result.rowcount
+    }
+
+
 async def update_job_status(
     session: AsyncSession, job_id: str, status: str, completed_tasks: int = None
 ):
