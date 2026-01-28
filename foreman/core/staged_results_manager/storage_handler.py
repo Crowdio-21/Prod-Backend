@@ -1,21 +1,22 @@
 """
 Hybrid checkpoint storage handler
 
-Strategy: Store checkpoints in DB if <1MB, filesystem if >=1MB
-This minimizes DB bloat while keeping small checkpoints fast to access.
+Strategy: Store small checkpoints (<1MB compressed) in database BLOB,
+larger checkpoints in filesystem. This provides fast access for small
+checkpoints while avoiding database bloat for large ones.
 """
 
 import os
 import json
 import gzip
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class StorageHandler:
-    """Manages hybrid storage for checkpoints"""
+    """Manages hybrid storage for checkpoints (DB blob + filesystem)"""
     
-    # Size threshold: 1 MB
+    # Size threshold: 1 MB (compressed)
     DB_SIZE_LIMIT = 1024 * 1024
     
     def __init__(self, checkpoint_dir: str = ".checkpoints"):
@@ -34,7 +35,7 @@ class StorageHandler:
         checkpoint_data: bytes,
         is_base: bool = False,
         checkpoint_id: int = 0
-    ) -> str:
+    ) -> Tuple[str, Optional[bytes]]:
         """
         Store checkpoint with hybrid strategy
         
@@ -45,20 +46,22 @@ class StorageHandler:
             checkpoint_id: Checkpoint sequential number
             
         Returns:
-            Storage reference (location identifier)
+            Tuple of (storage_reference, blob_data_or_None)
+            - If stored in DB: ("db_{type}", compressed_bytes)
+            - If stored in filesystem: ("fs_{path}", None)
         """
         # Compress for storage efficiency
         compressed_data = gzip.compress(checkpoint_data, compresslevel=6)
+        checkpoint_type = "base" if is_base else f"delta_{checkpoint_id}"
         
         if len(compressed_data) < self.DB_SIZE_LIMIT:
-            # Small checkpoint - return DB reference
-            return f"db_{checkpoint_id}"
+            # Small checkpoint - return data for DB blob storage
+            return (f"db_{checkpoint_type}", compressed_data)
         else:
             # Large checkpoint - store in filesystem
             checkpoint_subdir = self.checkpoint_dir / task_id
             checkpoint_subdir.mkdir(parents=True, exist_ok=True)
             
-            checkpoint_type = "base" if is_base else f"delta_{checkpoint_id}"
             checkpoint_file = checkpoint_subdir / f"{checkpoint_type}.gz"
             
             try:
@@ -66,7 +69,7 @@ class StorageHandler:
                     f.write(compressed_data)
                 
                 relative_path = f"{task_id}/{checkpoint_type}.gz"
-                return f"fs_{relative_path}"
+                return (f"fs_{relative_path}", None)
             except Exception as e:
                 print(f"StorageHandler: Error writing checkpoint file: {e}")
                 raise
@@ -75,7 +78,8 @@ class StorageHandler:
         self,
         task_id: str,
         is_base: bool = False,
-        checkpoint_id: int = 0
+        checkpoint_id: int = 0,
+        blob_data: Optional[bytes] = None
     ) -> Optional[bytes]:
         """
         Retrieve checkpoint and decompress
@@ -84,10 +88,20 @@ class StorageHandler:
             task_id: Task identifier
             is_base: True for base checkpoint
             checkpoint_id: Checkpoint sequential number
+            blob_data: If provided, decompress this blob instead of reading from filesystem
             
         Returns:
             Decompressed checkpoint bytes or None if not found
         """
+        # If blob data provided, decompress it directly
+        if blob_data is not None:
+            try:
+                return gzip.decompress(blob_data)
+            except Exception as e:
+                print(f"StorageHandler: Error decompressing blob data: {e}")
+                return None
+        
+        # Otherwise, read from filesystem
         checkpoint_subdir = self.checkpoint_dir / task_id
         checkpoint_type = "base" if is_base else f"delta_{checkpoint_id}"
         checkpoint_file = checkpoint_subdir / f"{checkpoint_type}.gz"
@@ -109,7 +123,7 @@ class StorageHandler:
     
     async def delete_checkpoints(self, task_id: str) -> bool:
         """
-        Delete all checkpoints for a task
+        Delete all checkpoints for a task from filesystem
         
         Args:
             task_id: Task identifier
@@ -131,7 +145,7 @@ class StorageHandler:
     
     def get_checkpoint_info(self, task_id: str) -> dict:
         """
-        Get information about stored checkpoints
+        Get information about stored checkpoints in filesystem
         
         Args:
             task_id: Task identifier

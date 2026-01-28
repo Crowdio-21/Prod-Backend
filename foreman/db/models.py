@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Boolean,
     Float,
+    LargeBinary,
 )
 from sqlalchemy.orm import relationship
 
@@ -53,13 +54,15 @@ class TaskModel(Base):
     # Checkpoint fields (for incremental checkpointing)
     base_checkpoint_data = Column(
         Text, nullable=True
-    )  # Hex-encoded serialized base state
+    )  # Storage reference (fs_path or db_id)
     base_checkpoint_size = Column(Integer, default=0)  # Bytes of base checkpoint
+    base_checkpoint_blob = Column(LargeBinary, nullable=True)  # Small base checkpoint data (<1MB)
     delta_checkpoints = Column(Text, nullable=True)  # JSON array of delta checkpoints
+    delta_checkpoint_blobs = Column(Text, nullable=True)  # JSON map of delta_id -> base64 encoded blob
     last_checkpoint_at = Column(DateTime, nullable=True)
     progress_percent = Column(Float, default=0.0)  # Task progress 0-100
     checkpoint_count = Column(Integer, default=0)  # Number of checkpoints taken
-    checkpoint_storage_path = Column(String, nullable=True)  # Path if stored externally
+    checkpoint_storage_path = Column(String, nullable=True)  # Path if stored externally or 'db' if in blob
 
     # Relationships
     job = relationship("JobModel", back_populates="tasks")
