@@ -72,26 +72,34 @@ class CheckpointManager:
             task.checkpoint_count = checkpoint_id
             
             if is_base:
-                # Store base checkpoint
-                storage_ref = await self.storage_handler.store_checkpoint(
+                # Store base checkpoint - returns (storage_ref, blob_data_or_None)
+                storage_ref, blob_data = await self.storage_handler.store_checkpoint(
                     task_id, delta_data_bytes, is_base=True
                 )
-                task.base_checkpoint_data = f"stored_{checkpoint_id}"
+                task.base_checkpoint_data = storage_ref
                 task.base_checkpoint_size = len(delta_data_bytes)
                 task.delta_checkpoints = json.dumps([])
                 
-                # Set checkpoint storage path
-                if storage_ref.startswith("fs_"):
-                    task.checkpoint_storage_path = os.path.join(self.checkpoint_dir, task_id)
+                # Store blob in database if small enough, otherwise set filesystem path
+                if blob_data is not None:
+                    task.base_checkpoint_blob = blob_data
+                    task.checkpoint_storage_path = "db"
+                    storage_location = "database (blob)"
                 else:
-                    task.checkpoint_storage_path = f"db://{task_id}"
+                    task.base_checkpoint_blob = None
+                    task.checkpoint_storage_path = os.path.join(self.checkpoint_dir, task_id)
+                    storage_location = task.checkpoint_storage_path
+                
+                # Clear delta blobs when new base is set
+                task.delta_checkpoint_blobs = json.dumps({})
                 
                 print(f"[Checkpoint DB] Task {task_id} | BASE #{checkpoint_id} | "
                       f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
-                      f"Storage: {task.checkpoint_storage_path}")
+                      f"Storage: {storage_location}")
             else:
                 # Append delta checkpoint
                 deltas = json.loads(task.delta_checkpoints or "[]")
+                delta_blobs = json.loads(task.delta_checkpoint_blobs or "{}")
                 
                 delta_info = {
                     "checkpoint_id": checkpoint_id,
@@ -100,18 +108,28 @@ class CheckpointManager:
                     "compression": compression_type
                 }
                 
-                # Store delta and get reference
-                storage_ref = await self.storage_handler.store_checkpoint(
+                # Store delta and get reference + optional blob
+                storage_ref, blob_data = await self.storage_handler.store_checkpoint(
                     task_id, delta_data_bytes, is_base=False, checkpoint_id=checkpoint_id
                 )
                 delta_info["storage_ref"] = storage_ref
                 
+                # Store blob in database if small enough
+                if blob_data is not None:
+                    import base64
+                    delta_blobs[str(checkpoint_id)] = base64.b64encode(blob_data).decode('ascii')
+                    delta_info["storage_type"] = "db"
+                else:
+                    delta_info["storage_type"] = "fs"
+                
                 deltas.append(delta_info)
                 task.delta_checkpoints = json.dumps(deltas)
+                task.delta_checkpoint_blobs = json.dumps(delta_blobs)
                 
+                storage_type = "database" if blob_data else "filesystem"
                 print(f"[Checkpoint DB] Task {task_id} | DELTA #{checkpoint_id} | "
                       f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
-                      f"Total deltas: {len(deltas)}")
+                      f"Total deltas: {len(deltas)} | Storage: {storage_type}")
                 
                 # Compact if too many deltas (merge into new base every 50)
                 if len(deltas) >= 50:
