@@ -8,6 +8,7 @@ from typing import List, Optional, Any, Dict
 from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
 from .utils import (
     _get_pending_tasks,
+    _get_assigned_tasks,
     _update_task_status,
     _update_worker_status,
     _claim_task_for_worker,
@@ -39,6 +40,45 @@ class TaskDispatcher:
         self.scheduler = scheduler
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+
+    # ==================== Orphan Task Recovery ====================
+
+    async def recover_orphaned_tasks(self) -> int:
+        """
+        Find tasks assigned to disconnected workers and reset them to pending
+        
+        An orphaned task is one where:
+        - Status is "assigned"
+        - The assigned worker_id is no longer connected via WebSocket
+        
+        Returns:
+            Number of tasks recovered
+        """
+        # Get all connected worker IDs
+        connected_workers = self.connection_manager.get_all_worker_ids()
+        
+        # Get all tasks that are currently assigned
+        assigned_tasks = await _get_assigned_tasks()
+        
+        if not assigned_tasks:
+            return 0
+        
+        recovered = 0
+        for task in assigned_tasks:
+            # Check if the assigned worker is still connected
+            if task.worker_id and task.worker_id not in connected_workers:
+                # Worker is disconnected - reset task to pending for reassignment
+                await _update_task_status(task.id, "pending", worker_id=None)
+                recovered += 1
+                print(
+                    f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} "
+                    f"from disconnected worker {task.worker_id}"
+                )
+        
+        if recovered > 0:
+            print(f"TaskDispatcher: Recovered {recovered} orphaned tasks for reassignment")
+        
+        return recovered
 
     # ==================== Task Assignment ====================
 
@@ -121,6 +161,9 @@ class TaskDispatcher:
         When the number of available workers exceeds the threshold,
         triggers batch assignment for all jobs (like initial start).
         Otherwise, skips assignment and waits for more workers.
+        
+        Also recovers orphaned tasks (assigned to disconnected workers)
+        before attempting new assignments.
 
         Args:
             worker_id: Worker identifier that just became available
@@ -129,6 +172,11 @@ class TaskDispatcher:
         Returns:
             True if tasks were assigned, False otherwise
         """
+        # First, recover any orphaned tasks from disconnected workers
+        recovered = await self.recover_orphaned_tasks()
+        if recovered > 0:
+            print(f"TaskDispatcher: Recovered {recovered} orphaned tasks before assignment")
+        
         # Check how many workers are currently available
         available_workers = self.connection_manager.get_available_workers()
         num_available = len(available_workers)
