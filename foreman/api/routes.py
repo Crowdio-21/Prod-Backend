@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from foreman.db.base import get_db
 from foreman.db.crud import (
     get_jobs, get_job, get_workers, get_job_stats,
-    get_worker_failures, get_worker_failure_stats
+    get_worker_failures, get_worker_failure_stats, delete_worker, clear_database
 )
 from foreman.schema.schema import ( 
     JobResponse, WorkerResponse, JobStats, WorkerFailureResponse, WorkerFailureStats
@@ -59,6 +59,24 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
     """List all workers"""
     workers = await get_workers(db)
     return [WorkerResponse.from_orm(worker) for worker in workers]
+
+
+@router.delete("/api/database/clear")
+async def clear_all_data(db: AsyncSession = Depends(get_db)):
+    """Clear all data from the database (workers, jobs, tasks, failures)"""
+    result = await clear_database(db)
+    return {
+        "message": f"Database cleared successfully. Deleted: {result['workers_deleted']} workers, {result['jobs_deleted']} jobs, {result['tasks_deleted']} tasks, {result['worker_failures_deleted']} failures."
+    }
+
+
+@router.delete("/api/workers/{worker_id}")
+async def remove_worker(worker_id: str, db: AsyncSession = Depends(get_db)):
+    """Delete a worker by ID"""
+    deleted = await delete_worker(db, worker_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return {"message": f"Worker {worker_id} deleted successfully"}
 
 
 @router.get("/api/workers/{worker_id}/failures", response_model=dict)
