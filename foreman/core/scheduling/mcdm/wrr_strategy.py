@@ -38,8 +38,9 @@ class WRRStrategy(AllocationStrategy):
                 if max_val > 0:
                     inverted = max_val - decision_matrix[:, j]
                     weighted_scores += inverted * self.weights[j]
-        
-        print(f"[WRR STRATEGY]: Weighted Scores: {weighted_scores}")
+
+        # Store scores for logging
+        self._last_scores = weighted_scores
 
         # Return indices sorted by weighted scores descending
         return np.argsort(weighted_scores)[::-1].tolist()

@@ -64,5 +64,8 @@ class ARASStrategy(AllocationStrategy):
         s0 = s_values[0] if s_values[0] != 0 else 1.0
         k_values = s_values[1:] / s0
 
+        # Store scores for logging
+        self._last_scores = k_values
+
         # Return indices sorted by utility degree (descending)
         return np.argsort(k_values)[::-1].tolist()

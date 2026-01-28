@@ -60,5 +60,8 @@ class EDASStrategy(AllocationStrategy):
         # 5. Appraisal Score (AS)
         as_score = 0.5 * (nsp + nsn)
 
+        # Store scores for logging
+        self._last_scores = as_score
+
         # Return indices sorted by AS descending
         return np.argsort(as_score)[::-1].tolist()

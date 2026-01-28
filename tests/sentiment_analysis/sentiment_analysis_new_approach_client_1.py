@@ -7,7 +7,7 @@ from textblob import TextBlob
 import nltk
 
 # Add parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from developer_sdk import connect, map as distributed_map, disconnect
 

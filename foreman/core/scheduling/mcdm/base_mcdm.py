@@ -6,12 +6,42 @@ with the CrowdCompute TaskScheduler interface.
 """
 
 import json
+import logging
 import numpy as np
 from typing import List, Optional, Set, Dict
 from abc import ABC
+from pathlib import Path
 
 from ..scheduler_interface import TaskScheduler, Task, Worker
 from .base_strategy import AllocationStrategy
+
+# Configure MCDM-specific logger
+logger = logging.getLogger("mcdm_scheduler")
+logger.setLevel(logging.DEBUG)
+
+# Create logs directory if it doesn't exist
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+# File handler for MCDM decisions
+file_handler = logging.FileHandler(log_dir / "mcdm_decisions.log")
+file_handler.setLevel(logging.DEBUG)
+
+# Console handler for important info
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Detailed formatter
+formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers if not already added
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 
 class BaseMCDMScheduler(TaskScheduler, ABC):
@@ -54,7 +84,7 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         # Check weights sum to approximately 1.0
         weight_sum = np.sum(self.criteria_weights)
         if not (0.95 <= weight_sum <= 1.05):
-            print(f"Warning: Criteria weights sum to {weight_sum}, not 1.0")
+            logger.warning(f"Criteria weights sum to {weight_sum}, not 1.0")
 
         # Check all lists have same length
         if not (
@@ -68,6 +98,18 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
                 f"names={len(self.criteria_names)}, "
                 f"types={len(self.criteria_types)}"
             )
+
+        # Log configuration on initialization
+        logger.info(f"\n{'='*80}")
+        logger.info(f"MCDM Scheduler Initialized: {self.strategy.__class__.__name__}")
+        logger.info(f"{'='*80}")
+        logger.info(f"Criteria Configuration:")
+        for i, (name, weight, ctype) in enumerate(
+            zip(self.criteria_names, self.criteria_weights, self.criteria_types)
+        ):
+            criterion_type = "BENEFIT" if ctype == 1 else "COST"
+            logger.info(f"  [{i+1}] {name}: weight={weight:.3f}, type={criterion_type}")
+        logger.info(f"{'='*80}\n")
 
     def _build_decision_matrix(
         self, workers: Dict[str, Worker]
@@ -114,27 +156,36 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
                     matrix[i, j] = float(value)
                 except (TypeError, ValueError):
                     matrix[i, j] = 0.0
-                    print(
-                        f"Warning: Could not convert {criterion}={value} to float for worker {worker_id}"
+                    logger.warning(
+                        f"Could not convert {criterion}={value} to float for worker {worker_id}"
                     )
+
+        # Log the decision matrix
+        logger.debug(
+            f"\nDecision Matrix ({n_workers} workers × {n_criteria} criteria):"
+        )
+        logger.debug(f"Workers: {worker_ids}")
+        logger.debug(f"Criteria: {self.criteria_names}")
+        logger.debug(f"\nMatrix values:")
+        for i, worker_id in enumerate(worker_ids):
+            logger.debug(f"  {worker_id}:")
+            for j, criterion in enumerate(self.criteria_names):
+                criterion_type = "BENEFIT" if self.criteria_types[j] == 1 else "COST"
+                logger.debug(f"    {criterion} = {matrix[i, j]:.4f} ({criterion_type})")
 
         return matrix, worker_ids
 
     async def select_worker(
         self, task: Task, available_workers: Set[str], all_workers: Dict[str, Worker]
     ) -> Optional[str]:
-        """
-        Select best worker for a task using MCDM algorithm
+        logger.info(f"\n{'='*80}")
+        logger.info(f"WORKER SELECTION - Task ID: {task.id} (Job: {task.job_id})")
+        logger.info(f"{'='*80}")
+        logger.info(f"Available workers: {sorted(list(available_workers))}")
+        logger.info(f"Total workers in system: {len(all_workers)}")
 
-        Args:
-            task: Task to be assigned
-            available_workers: Set of available worker IDs
-            all_workers: Dictionary of all workers
-
-        Returns:
-            Selected worker ID or None if no suitable worker
-        """
         if not available_workers or not all_workers:
+            logger.warning("No available workers or no workers in system")
             return None
 
         try:
@@ -142,18 +193,72 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
             matrix, worker_ids = self._build_decision_matrix(all_workers)
 
             if matrix.size == 0:
+                logger.warning("Decision matrix is empty")
                 return None
 
             # Rank workers using MCDM algorithm
+            logger.info(f"\nRunning {self.strategy.__class__.__name__} algorithm...")
             ranked_indices = self.strategy.rank_devices(matrix, self.criteria_types)
 
+            # Get scores if available from strategy
+            scores = None
+            if hasattr(self.strategy, "_last_scores"):
+                scores = self.strategy._last_scores
+
+            # Log complete ranking with scores
+            logger.info(f"\n{'─'*80}")
+            logger.info(f"WORKER RANKINGS (Best to Worst):")
+            logger.info(f"{'─'*80}")
+            for rank, idx in enumerate(ranked_indices, 1):
+                worker_id = worker_ids[idx]
+                is_available = (
+                    "✓ AVAILABLE" if worker_id in available_workers else "✗ BUSY"
+                )
+                score_str = f", Score: {scores[idx]:.6f}" if scores is not None else ""
+                logger.info(f"  Rank {rank}: {worker_id} [{is_available}]{score_str}")
+
+                # Log worker details for top 3
+                if rank <= 3:
+                    worker = all_workers[worker_id]
+                    logger.debug(
+                        f"    Details: status={worker.status}, completed={worker.tasks_completed}, failed={worker.tasks_failed}"
+                    )
+
+            logger.info(f"{'─'*80}")
+
             # Return first available worker from ranked list
-            for idx in ranked_indices:
+            selected_worker = None
+            selected_rank = None
+            for rank, idx in enumerate(ranked_indices, 1):
                 worker_id = worker_ids[idx]
                 if worker_id in available_workers:
-                    # Log decision (optional)
-                    # print(f"MCDM: Selected worker {worker_id} (rank {ranked_indices.index(idx) + 1}/{len(ranked_indices)})")
-                    return worker_id
+                    selected_worker = worker_id
+                    selected_rank = rank
+                    break
+
+            if selected_worker:
+                score_str = (
+                    f" with score {scores[ranked_indices[selected_rank-1]]:.6f}"
+                    if scores is not None
+                    else ""
+                )
+                logger.info(
+                    f"\n✓ SELECTED: {selected_worker} (Rank {selected_rank}/{len(ranked_indices)}){score_str}"
+                )
+                logger.info(f"{'='*80}\n")
+                return selected_worker
+            else:
+                logger.warning("No available workers in ranked list")
+                logger.info(f"{'='*80}\n")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in MCDM select_worker: {e}", exc_info=True)
+            # Fallback to first available worker
+            fallback = list(available_workers)[0] if available_workers else None
+            if fallback:
+                logger.warning(f"Using fallback selection: {fallback}")
+            return fallback
 
             # No available workers in ranked list
             return None

@@ -56,7 +56,9 @@ class MABACStrategy(AllocationStrategy):
 
         # 5. Final Score (Sum of Q)
         final_scores = np.sum(q_matrix, axis=1)
-        print(f"[MABAC STRATEGY]: Final Scores: {final_scores}")
+
+        # Store scores for logging
+        self._last_scores = final_scores
 
         # Return indices sorted by final scores descending
         return np.argsort(final_scores)[::-1].tolist()
