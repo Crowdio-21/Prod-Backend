@@ -1,4 +1,8 @@
 import json
+import base64
+import gzip
+import pickle
+from typing import Optional
 from ...db.base import db_session
 from ...db.crud import (
     get_pending_tasks,
@@ -21,10 +25,87 @@ from ...db.crud import (
 from ...db.models import TaskModel
 
 
-async def _record_worker_failure(worker_id, task_id, error, job_id):
+def _decode_checkpoint_blob(blob_base64: str) -> Optional[dict]:
+    """
+    Decode a checkpoint blob from delta_checkpoint_blobs
+    
+    The blob encoding chain is:
+    1. Worker: pickle(delta_dict) → gzip compress
+    2. Storage handler: gzip compress again  
+    3. Checkpoint manager: base64 encode
+    
+    So to decode: base64 decode → gzip decompress → gzip decompress → pickle loads
+    
+    Args:
+        blob_base64: Base64 encoded double-compressed blob
+        
+    Returns:
+        Decoded dictionary or None if decoding fails
+    """
+    try:
+        # Step 1: base64 decode
+        compressed_data = base64.b64decode(blob_base64)
+        
+        # Step 2: First gzip decompress (storage handler compression)
+        first_decompress = gzip.decompress(compressed_data)
+        
+        # Step 3: Second gzip decompress (worker compression)
+        second_decompress = gzip.decompress(first_decompress)
+        
+        # Step 4: Pickle loads
+        checkpoint_state = pickle.loads(second_decompress)
+        return checkpoint_state
+    except Exception as e:
+        print(f"_decode_checkpoint_blob: Error decoding checkpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _make_json_serializable(obj):
+    """Convert non-JSON-serializable objects to serializable format"""
+    if isinstance(obj, dict):
+        return {k: _make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_make_json_serializable(item) for item in obj]
+    elif isinstance(obj, bytes):
+        return f"<bytes: {len(obj)} bytes>"
+    elif hasattr(obj, '__dict__'):
+        return f"<{type(obj).__name__}: {str(obj)[:100]}>"
+    elif isinstance(obj, (int, float, str, bool, type(None))):
+        return obj
+    else:
+        return str(obj)
+
+
+async def _record_worker_failure(
+    worker_id, 
+    task_id, 
+    error, 
+    job_id, 
+    checkpoint_available: bool = False,
+    latest_checkpoint_data: Optional[str] = None
+):
+    """
+    Record a worker failure with optional checkpoint data
+    
+    Args:
+        worker_id: Worker identifier
+        task_id: Task identifier
+        error: Error message
+        job_id: Job identifier
+        checkpoint_available: Whether checkpoint exists for recovery
+        latest_checkpoint_data: JSON string of decoded latest checkpoint delta
+    """
     async with db_session() as session:
         await record_worker_failure(
-            session, worker_id, task_id, error_message=str(error), job_id=job_id
+            session, 
+            worker_id, 
+            task_id, 
+            error_message=str(error), 
+            job_id=job_id,
+            checkpoint_available=checkpoint_available,
+            latest_checkpoint_data=latest_checkpoint_data,
         )
 
 
