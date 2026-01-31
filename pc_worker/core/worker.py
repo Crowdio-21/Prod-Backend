@@ -176,6 +176,11 @@ class FastAPIWorker:
             elif message.type == MessageType.PING:
                 # Respond to ping with performance metrics
                 await self._handle_ping()
+            elif message.type == MessageType.CHECKPOINT_ACK:
+                # Foreman acknowledged checkpoint receipt - no action needed
+                checkpoint_id = message.data.get("checkpoint_id", "?")
+                task_id = message.data.get("task_id", "?")
+                print(f"✅ Checkpoint #{checkpoint_id} acknowledged for task {task_id}")
             else:
                 print(f"Unknown message type: {message.type}")
 
