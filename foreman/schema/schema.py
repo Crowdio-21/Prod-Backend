@@ -114,6 +114,8 @@ class WorkerFailureResponse(BaseModel):
     job_id: Optional[str] = None
     error_message: str
     failed_at: datetime
+    checkpoint_available: bool = False
+    latest_checkpoint_data: Optional[str] = None
     
     class Config:
         from_attributes = True

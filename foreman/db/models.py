@@ -128,6 +128,9 @@ class WorkerFailureModel(Base):
     checkpoint_available = Column(
         Boolean, default=False
     )  # Whether checkpoint exists for recovery
+    latest_checkpoint_data = Column(
+        Text, nullable=True
+    )  # Decoded JSON from latest delta_checkpoint_blob entry
 
 
 class SchedulerConfigModel(Base):

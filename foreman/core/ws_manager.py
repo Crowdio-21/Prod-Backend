@@ -3,6 +3,7 @@ WebSocket manager for CrowdCompute Foreman - Refactored
 """
 
 import asyncio
+import json
 import websockets
 from typing import Any, Dict
 from websockets.server import WebSocketServerProtocol
@@ -13,8 +14,16 @@ from .task_dispatcher import TaskDispatcher
 from .message_handlers import ClientMessageHandler, WorkerMessageHandler
 from .completion_handler import JobCompletionHandler
 from .scheduling import TaskScheduler, create_scheduler
-from .utils import _update_worker_status
+from .utils import (
+    _update_worker_status,
+    _get_assigned_tasks,
+    _record_worker_failure,
+    _decode_checkpoint_blob,
+    _make_json_serializable,
+)
 from common.protocol import Message, MessageType, create_ping_message
+from foreman.db.base import db_session
+from foreman.db.models import TaskModel
 
 
 class WebSocketManager:
@@ -126,6 +135,11 @@ class WebSocketManager:
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
             if worker_id:
                 print(f"Worker {worker_id} disconnected")
+                
+                # Get tasks assigned to this worker BEFORE removing the worker
+                # and record failures with checkpoint data
+                await self._record_worker_disconnection_failures(worker_id)
+                
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")
                 
@@ -139,6 +153,85 @@ class WebSocketManager:
             if job_id:
                 print(f"Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
+    
+    async def _record_worker_disconnection_failures(self, worker_id: str):
+        """
+        Record failures for all tasks assigned to a disconnected worker
+        
+        Extracts and decodes the latest checkpoint data from delta_checkpoint_blobs
+        and stores it in the worker_failures table.
+        
+        Args:
+            worker_id: ID of the disconnected worker
+        """
+        try:
+            # Get all assigned tasks
+            assigned_tasks = await _get_assigned_tasks()
+            
+            # Filter tasks assigned to this specific worker
+            worker_tasks = [t for t in assigned_tasks if t.worker_id == worker_id]
+            
+            if not worker_tasks:
+                print(f"No tasks assigned to disconnected worker {worker_id}")
+                return
+            
+            print(f"Recording {len(worker_tasks)} failure(s) for disconnected worker {worker_id}")
+            
+            # Get full task data including checkpoint blobs
+            async with db_session() as session:
+                for task in worker_tasks:
+                    # Fetch the full task with checkpoint data
+                    full_task = await session.get(TaskModel, task.id)
+                    if not full_task:
+                        continue
+                    
+                    # Check if checkpoint data exists
+                    checkpoint_available = bool(full_task.base_checkpoint_data)
+                    latest_checkpoint_data = None
+                    
+                    # Decode the latest delta checkpoint blob
+                    if full_task.delta_checkpoint_blobs:
+                        try:
+                            delta_blobs = json.loads(full_task.delta_checkpoint_blobs)
+                            if delta_blobs:
+                                # Get the latest checkpoint (highest checkpoint_id)
+                                latest_checkpoint_id = max(delta_blobs.keys(), key=int)
+                                latest_blob = delta_blobs[latest_checkpoint_id]
+                                
+                                # Decode the blob
+                                decoded_state = _decode_checkpoint_blob(latest_blob)
+                                
+                                if decoded_state is not None:
+                                    # Make it JSON serializable
+                                    serializable_state = _make_json_serializable(decoded_state)
+                                    latest_checkpoint_data = json.dumps({
+                                        "checkpoint_id": int(latest_checkpoint_id),
+                                        "progress_percent": full_task.progress_percent,
+                                        "checkpoint_count": full_task.checkpoint_count,
+                                        "state": serializable_state
+                                    })
+                                    print(f"  Task {task.id}: Decoded checkpoint #{latest_checkpoint_id} "
+                                          f"(progress: {full_task.progress_percent}%)")
+                        except Exception as e:
+                            print(f"  Task {task.id}: Error decoding checkpoint: {e}")
+                    
+                    # Record the failure
+                    await _record_worker_failure(
+                        worker_id=worker_id,
+                        task_id=task.id,
+                        error="Worker disconnected while task was assigned",
+                        job_id=full_task.job_id,
+                        checkpoint_available=checkpoint_available,
+                        latest_checkpoint_data=latest_checkpoint_data
+                    )
+                    
+                    print(f"  Recorded failure for task {task.id} "
+                          f"(checkpoint: {'yes' if checkpoint_available else 'no'})")
+                    
+        except Exception as e:
+            print(f"Error recording worker disconnection failures: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def ping_workers(self):
         """Periodically ping workers to keep connections alive"""

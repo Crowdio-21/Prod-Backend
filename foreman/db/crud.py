@@ -313,14 +313,28 @@ async def record_worker_failure(
     task_id: str,
     error_message: str,
     job_id: Optional[str] = None,
+    checkpoint_available: bool = False,
+    latest_checkpoint_data: Optional[str] = None,
 ) -> None:
-    """Insert a worker failure record"""
+    """Insert a worker failure record
+    
+    Args:
+        session: Database session
+        worker_id: Worker identifier
+        task_id: Task identifier
+        error_message: Error description
+        job_id: Job identifier (optional)
+        checkpoint_available: Whether checkpoint exists for recovery
+        latest_checkpoint_data: JSON string of decoded latest checkpoint delta
+    """
     failure = WorkerFailureModel(
         worker_id=worker_id,
         task_id=task_id,
         job_id=job_id or "",
         error_message=error_message,
         failed_at=datetime.now(),
+        checkpoint_available=checkpoint_available,
+        latest_checkpoint_data=latest_checkpoint_data,
     )
     session.add(failure)
     await session.commit()
