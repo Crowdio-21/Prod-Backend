@@ -171,6 +171,8 @@ class FastAPIWorker:
         try:
             if message.type == MessageType.ASSIGN_TASK:
                 await self._handle_task_assignment(message)
+            elif message.type == MessageType.RESUME_TASK:
+                await self._handle_task_resume(message)
             elif message.type == MessageType.PING:
                 # Respond to ping with performance metrics
                 await self._handle_ping()
@@ -249,6 +251,86 @@ class FastAPIWorker:
 
         except Exception as e:
             print(f"❌ Error executing task {task_id}: {e}")
+
+            # Send error back
+            error_message = Message(
+                msg_type=MessageType.TASK_ERROR,
+                data={"error": str(e), "task_id": task_id},
+                job_id=job_id,
+            )
+            await self.websocket.send(error_message.to_json())
+
+            # Clear current task
+            self.current_task = None
+
+    async def _handle_task_resume(self, message: Message):
+        """
+        Handle a task resumption from foreman.
+        
+        This is similar to task assignment but restores the checkpoint state
+        so the worker can continue from where the previous worker left off.
+        """
+        try:
+            task_id = message.data["task_id"]
+            job_id = message.job_id
+            func_code = message.data["func_code"]
+            checkpoint_state = message.data.get("checkpoint_state", {})
+            progress_percent = message.data.get("progress_percent", 0)
+            checkpoint_count = message.data.get("checkpoint_count", 0)
+
+            print(
+                f"Resuming task {task_id} for job {job_id} from checkpoint "
+                f"(progress: {progress_percent:.1f}%, checkpoints: {checkpoint_count}) | "
+                f"worker_runtime={get_runtime_info()}"
+            )
+            
+            # Log checkpoint state contents
+            if checkpoint_state:
+                print(f"Checkpoint state keys: {list(checkpoint_state.keys())}")
+                for key, value in checkpoint_state.items():
+                    if isinstance(value, (int, float)):
+                        print(f"   {key}: {value}")
+                    elif isinstance(value, str) and len(value) < 50:
+                        print(f"   {key}: {value}")
+                    else:
+                        print(f"   {key}: <{type(value).__name__}>")
+
+            # Set current task
+            self.current_task = {"task_id": task_id, "job_id": job_id, "is_resume": True}
+
+            # Execute the task with checkpoint state pre-loaded
+            result = await self._execute_resumed_task(
+                func_code, checkpoint_state, task_id, job_id
+            )
+
+            # Serialize result to JSON string for database storage
+            import json
+            try:
+                result_str = json.dumps(result)
+            except (TypeError, ValueError):
+                # If result can't be JSON serialized, convert to string
+                result_str = str(result)
+
+            # Send result back
+            result_message = Message(
+                msg_type=MessageType.TASK_RESULT,
+                data={"result": result_str, "task_id": task_id},
+                job_id=job_id,
+            )
+            await self.websocket.send(result_message.to_json())
+            
+            # Small delay to ensure message is transmitted
+            await asyncio.sleep(0.1)
+
+            print(f"[Success] Completed resumed task {task_id}")
+
+            # Clear current task
+            self.current_task = None
+
+        except Exception as e:
+            print(f"[Error]Error executing resumed task {task_id}: {e}")
+            import traceback
+            traceback.print_exc()
 
             # Send error back
             error_message = Message(
@@ -393,6 +475,144 @@ class FastAPIWorker:
             # Stop checkpoint monitoring
             await self.checkpoint_handler.stop_checkpoint_monitoring()
             print(f"🛑 Checkpoint monitoring stopped for task {task_id}")
+            
+            # Clean up checkpoint state from builtins
+            if hasattr(builtins, '_checkpoint_state'):
+                delattr(builtins, '_checkpoint_state')
+
+    async def _execute_resumed_task(
+        self, func_code: str, checkpoint_state: dict, task_id: str, job_id: str
+    ) -> Any:
+        """
+        Execute a resumed task, continuing from checkpoint state.
+        
+        The checkpoint_state is pre-loaded into builtins._checkpoint_state so the
+        deserialized function can access its previous progress and continue.
+        
+        Args:
+            func_code: Serialized function code
+            checkpoint_state: Dictionary with saved state from last checkpoint
+            task_id: Task identifier
+            job_id: Job identifier
+            
+        Returns:
+            Task result
+        """
+        start_time = datetime.now()
+        
+        # Pre-load checkpoint state so the function can resume from it
+        import builtins
+        
+        # Restore the checkpoint state for the function to use
+        builtins._checkpoint_state = dict(checkpoint_state)
+        builtins._checkpoint_state["_is_resumed"] = True
+        builtins._checkpoint_state["task_id"] = task_id
+        
+        print(f"[load] Pre-loaded checkpoint state into builtins._checkpoint_state")
+        
+        # Define state getter for checkpoint handler
+        def get_task_state() -> Dict[str, Any]:
+            """Get current task state for checkpointing"""
+            try:
+                if hasattr(builtins, '_checkpoint_state'):
+                    state = builtins._checkpoint_state
+                    return dict(state)
+                return {"progress_percent": 0.0}
+            except Exception as e:
+                print(f"[warning] Could not get checkpoint state: {e}")
+                return {"progress_percent": 0.0}
+        
+        # Get reference to the main event loop for cross-thread communication
+        main_loop = asyncio.get_event_loop()
+        
+        # Define checkpoint sender
+        def send_checkpoint(checkpoint_msg: Dict[str, Any]) -> None:
+            """Send checkpoint to foreman (thread-safe for cross-thread calls)"""
+            try:
+                from common.protocol import create_task_checkpoint_message
+                
+                message = create_task_checkpoint_message(
+                    task_id=task_id,
+                    job_id=job_id,
+                    **checkpoint_msg
+                )
+                
+                if self.websocket and not self.websocket.closed:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(message.to_json()),
+                        main_loop
+                    )
+                    future.result(timeout=5.0)
+                    
+                    checkpoint_id = checkpoint_msg.get("checkpoint_id", 0)
+                    progress = checkpoint_msg.get("progress_percent", 0)
+                    is_base = checkpoint_msg.get("is_base", False)
+                    checkpoint_type = "BASE" if is_base else "DELTA"
+                    
+                    print(f"[Checkpoint] Resumed task {task_id} | {checkpoint_type} #{checkpoint_id} | "
+                          f"Progress: {progress:.1f}%")
+            except Exception as e:
+                print(f"[Error] Error sending checkpoint: {e}")
+
+        try:
+            print(f"Executing resumed task... | worker_runtime={get_runtime_info()}")
+
+            # Deserialize the function
+            func = deserialize_function_for_PC(func_code)
+            
+            # Start checkpoint monitoring in background
+            await self.checkpoint_handler.start_checkpoint_monitoring(
+                task_id=task_id,
+                get_state_callback=get_task_state,
+                send_checkpoint_callback=send_checkpoint
+            )
+            
+            print(f"Checkpoint monitoring started for resumed task {task_id}")
+
+            # For resumed tasks, we need to extract the original args from checkpoint
+            # The function should check builtins._checkpoint_state for resume info
+            # and continue from where it left off
+            
+            # Get the original num_trials from checkpoint (specific to monte carlo)
+            num_trials = checkpoint_state.get("num_trials", 125000)
+            
+            print(f"[Info] Resuming with original args: num_trials={num_trials}")
+            print(f"Starting from: trials_completed={checkpoint_state.get('trials_completed', 0)}, "
+                  f"progress={checkpoint_state.get('progress_percent', 0):.1f}%")
+
+            # Execute the function with original arguments
+            # The function should detect _is_resumed in checkpoint_state and continue
+            result = await asyncio.to_thread(func, num_trials)
+
+            execution_time = (datetime.now() - start_time).total_seconds()
+
+            print(f"Resumed task completed in {execution_time:.2f}s")
+
+            # Update stats
+            self.stats["tasks_completed"] += 1
+            self.stats["total_execution_time"] += execution_time
+            self.stats["task_durations"].append(execution_time)
+
+            return result
+
+        except Exception as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            error_msg = f"Resumed task execution failed: {e}"
+
+            print(f"[Error] Resumed task failed: {error_msg}")
+            import traceback
+            traceback.print_exc()
+
+            # Update stats
+            self.stats["tasks_failed"] += 1
+            self.stats["total_execution_time"] += execution_time
+
+            raise Exception(error_msg)
+        
+        finally:
+            # Stop checkpoint monitoring
+            await self.checkpoint_handler.stop_checkpoint_monitoring()
+            print(f"Checkpoint monitoring stopped for resumed task {task_id}")
             
             # Clean up checkpoint state from builtins
             if hasattr(builtins, '_checkpoint_state'):

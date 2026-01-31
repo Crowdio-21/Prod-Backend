@@ -40,9 +40,13 @@ def monte_carlo_euler_worker(num_trials):
     Note:
         This function exposes checkpoint_state as a module-level variable
         that can be accessed by the checkpoint handler for periodic checkpointing.
+        
+        RESUME SUPPORT: If builtins._checkpoint_state exists with _is_resumed=True,
+        the function will continue from the saved state instead of starting fresh.
     """
     import random
     import time
+    import builtins
     
     start = time.time()
     
@@ -50,32 +54,49 @@ def monte_carlo_euler_worker(num_trials):
     # Checkpoint interval is 5s, so 25s ensures at least 4 checkpoints
     MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
     
-    # Create a shared state object for checkpointing
-    # This will be accessed by the checkpoint handler via builtins
+    # Check if we're resuming from a checkpoint
+    is_resumed = False
+    start_trial = 0
+    total_count = 0
+    
+    if hasattr(builtins, '_checkpoint_state'):
+        existing_state = builtins._checkpoint_state
+        if existing_state.get("_is_resumed", False):
+            is_resumed = True
+            start_trial = existing_state.get("trials_completed", 0)
+            total_count = existing_state.get("total_count", 0)
+            print(f"[Worker] RESUMING from checkpoint:")
+            print(f"         Trials completed: {start_trial:,}")
+            print(f"         Total count: {total_count:,}")
+            print(f"         Progress: {existing_state.get('progress_percent', 0):.1f}%")
+            print(f"         Estimated e so far: {existing_state.get('estimated_e', 0):.6f}")
+    
+    # Create/update checkpoint state object
     checkpoint_state = {
-        "trials_completed": 0,
-        "total_count": 0,
+        "trials_completed": start_trial,
+        "total_count": total_count,
         "num_trials": num_trials,
-        "progress_percent": 0.0,
-        "estimated_e": 0.0,
-        "start_time": start
+        "progress_percent": (start_trial / num_trials) * 100 if num_trials > 0 else 0,
+        "estimated_e": total_count / start_trial if start_trial > 0 else 0.0,
+        "start_time": start,
+        "_is_resumed": is_resumed
     }
     
     # Make checkpoint state accessible globally via builtins for checkpoint handler
-    import builtins
     builtins._checkpoint_state = checkpoint_state
     
     try:
         random.seed()  # Ensure different seeds on different workers
         
-        total_count = 0
-        
         # Run Monte Carlo trials with periodic state updates
         checkpoint_interval = max(1, num_trials // 100)  # Update every 1%
         
+        # Calculate remaining trials
+        remaining_trials = num_trials - start_trial
+        
         # Calculate delay per trial to stretch execution time
         estimated_time_per_trial = 0.00001  # Rough estimate: 10 microseconds per trial
-        estimated_total_time = num_trials * estimated_time_per_trial
+        estimated_total_time = remaining_trials * estimated_time_per_trial
         
         # If task would complete too quickly, add delays
         if estimated_total_time < MIN_EXECUTION_TIME:
@@ -83,9 +104,14 @@ def monte_carlo_euler_worker(num_trials):
         else:
             delay_per_update = 0
         
-        print(f"[Worker] Starting {num_trials:,} trials (target runtime: {MIN_EXECUTION_TIME}s)")
+        if is_resumed:
+            print(f"[Worker] Continuing from trial {start_trial:,}, {remaining_trials:,} trials remaining "
+                  f"(target runtime: {MIN_EXECUTION_TIME}s)")
+        else:
+            print(f"[Worker] Starting {num_trials:,} trials (target runtime: {MIN_EXECUTION_TIME}s)")
         
-        for i in range(num_trials):
+        # Start from where we left off (or 0 if fresh start)
+        for i in range(start_trial, num_trials):
             random_sum = 0.0
             count = 0
             
@@ -118,7 +144,8 @@ def monte_carlo_euler_worker(num_trials):
                 # Log progress every 10%
                 if int(progress_percent) % 10 == 0 and (i + 1) % checkpoint_interval == 0:
                     elapsed = time.time() - start
-                    print(f"[Worker] Progress: {progress_percent:.1f}% ({i + 1}/{num_trials} trials) | "
+                    resume_indicator = " (resumed)" if is_resumed else ""
+                    print(f"[Worker] Progress: {progress_percent:.1f}% ({i + 1}/{num_trials} trials){resume_indicator} | "
                           f"Current e ≈ {estimated_e:.6f} | Elapsed: {elapsed:.1f}s")
         
         # Ensure minimum execution time for checkpointing
