@@ -21,6 +21,7 @@ from ...db.crud import (
     increment_job_completed_tasks,
     complete_task_if_assigned,
     record_worker_failure,
+    get_latest_task_failure_with_checkpoint,
 )
 from ...db.models import TaskModel
 
@@ -30,11 +31,10 @@ def _decode_checkpoint_blob(blob_base64: str) -> Optional[dict]:
     Decode a checkpoint blob from delta_checkpoint_blobs
     
     The blob encoding chain is:
-    1. Worker: pickle(delta_dict) → gzip compress
-    2. Storage handler: gzip compress again  
-    3. Checkpoint manager: base64 encode
+    - PC Worker: pickle(delta_dict) → gzip compress → gzip compress → base64 encode
+    - Android Worker: JSON(delta_dict) → gzip compress → gzip compress → base64 encode
     
-    So to decode: base64 decode → gzip decompress → gzip decompress → pickle loads
+    So to decode: base64 decode → gzip decompress → gzip decompress → (pickle or JSON)
     
     Args:
         blob_base64: Base64 encoded double-compressed blob
@@ -52,9 +52,19 @@ def _decode_checkpoint_blob(blob_base64: str) -> Optional[dict]:
         # Step 3: Second gzip decompress (worker compression)
         second_decompress = gzip.decompress(first_decompress)
         
-        # Step 4: Pickle loads
-        checkpoint_state = pickle.loads(second_decompress)
-        return checkpoint_state
+        # Step 4: Try to decode as JSON first (Android workers), then pickle (PC workers)
+        # JSON is more common for cross-platform, so try it first
+        try:
+            # Try JSON decode (Android workers send JSON)
+            checkpoint_state = json.loads(second_decompress.decode('utf-8'))
+            print(f"_decode_checkpoint_blob: Decoded as JSON")
+            return checkpoint_state
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Fall back to pickle (PC workers send pickle)
+            checkpoint_state = pickle.loads(second_decompress)
+            print(f"_decode_checkpoint_blob: Decoded as pickle")
+            return checkpoint_state
+            
     except Exception as e:
         print(f"_decode_checkpoint_blob: Error decoding checkpoint: {e}")
         import traceback
@@ -107,6 +117,30 @@ async def _record_worker_failure(
             checkpoint_available=checkpoint_available,
             latest_checkpoint_data=latest_checkpoint_data,
         )
+
+
+async def _get_latest_task_failure_with_checkpoint(task_id: str) -> Optional[dict]:
+    """
+    Get the latest failure record with checkpoint data for a task.
+    
+    Used when reassigning orphaned tasks to check if we can resume
+    from a checkpoint instead of starting from scratch.
+    
+    Args:
+        task_id: Task identifier
+        
+    Returns:
+        Dictionary with checkpoint data including 'state' field, or None if not found
+    """
+    async with db_session() as session:
+        failure = await get_latest_task_failure_with_checkpoint(session, task_id)
+        if failure and failure.latest_checkpoint_data:
+            try:
+                return json.loads(failure.latest_checkpoint_data)
+            except json.JSONDecodeError:
+                print(f"_get_latest_task_failure_with_checkpoint: Invalid JSON for task {task_id}")
+                return None
+        return None
 
 
 async def _get_job_tasks(job_id):

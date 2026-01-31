@@ -12,8 +12,9 @@ from .utils import (
     _update_task_status,
     _update_worker_status,
     _claim_task_for_worker,
+    _get_latest_task_failure_with_checkpoint,
 )
-from common.protocol import create_assign_task_message
+from common.protocol import create_assign_task_message, create_resume_task_message
 from common.serializer import get_runtime_info
 
 
@@ -222,7 +223,11 @@ class TaskDispatcher:
         self, job_id: str, task_id: str, func_code: str, task_args: Any, worker_id: str
     ) -> bool:
         """
-        Assign a specific task to a specific worker
+        Assign a specific task to a specific worker.
+        
+        If the task has checkpoint data from a previous failure, sends a RESUME_TASK
+        message so the worker can continue from where the last worker left off.
+        Otherwise, sends a regular ASSIGN_TASK message to start fresh.
 
         Args:
             job_id: Job identifier
@@ -235,10 +240,32 @@ class TaskDispatcher:
             True if assignment successful, False otherwise
         """
         try:
-            # Create task assignment message
-            message = create_assign_task_message(
-                func_code, [task_args], task_id, job_id  # Wrap in list for single task
-            )
+            # Check if we have checkpoint data for this task from a previous failure
+            checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
+            
+            if checkpoint_data and checkpoint_data.get("state"):
+                # We have checkpoint data - send RESUME_TASK message
+                message = create_resume_task_message(
+                    task_id=task_id,
+                    job_id=job_id,
+                    func_code=func_code,
+                    checkpoint_state=checkpoint_data.get("state", {}),
+                    task_args=[task_args] if not isinstance(task_args, list) else task_args,
+                    task_kwargs={},
+                    progress_percent=checkpoint_data.get("progress_percent", 0),
+                    checkpoint_count=checkpoint_data.get("checkpoint_count", 0)
+                )
+                is_resume = True
+                print(
+                    f"TaskDispatcher: 🔄 Resuming task {task_id} from checkpoint "
+                    f"(progress: {checkpoint_data.get('progress_percent', 0):.1f}%)"
+                )
+            else:
+                # No checkpoint - send regular ASSIGN_TASK message
+                message = create_assign_task_message(
+                    func_code, [task_args], task_id, job_id  # Wrap in list for single task
+                )
+                is_resume = False
 
             # Get worker websocket
             websocket = self.connection_manager.get_worker_websocket(worker_id)
@@ -260,8 +287,9 @@ class TaskDispatcher:
             self.connection_manager.mark_worker_busy(worker_id)
             await _update_worker_status(worker_id, "busy", current_task_id=task_id)
 
+            action = "Resumed" if is_resume else "Assigned"
             print(
-                f"TaskDispatcher: Assigned task {task_id} to worker {worker_id} | foreman_runtime={get_runtime_info()}"
+                f"TaskDispatcher: {action} task {task_id} to worker {worker_id} | foreman_runtime={get_runtime_info()}"
             )
 
             return True
