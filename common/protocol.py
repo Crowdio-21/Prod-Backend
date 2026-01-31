@@ -209,18 +209,25 @@ def create_resume_task_message(
     task_id: str, 
     job_id: str, 
     func_code: str,
-    reconstructed_state_hex: str,
-    remaining_args: List[Any],
-    checkpoint_count: int
+    checkpoint_state: dict,
+    task_args: List[Any] = None,
+    task_kwargs: Dict[str, Any] = None,
+    progress_percent: float = 0.0,
+    checkpoint_count: int = 0
 ) -> Message:
     """Create a task resumption message from foreman to worker
+    
+    Sends checkpoint state to worker so it can continue from where 
+    the previous worker left off.
     
     Args:
         task_id: Task identifier
         job_id: Job identifier
-        func_code: Updated function code if needed
-        reconstructed_state_hex: Hex-encoded reconstructed state
-        remaining_args: Arguments not yet processed
+        func_code: Function code to execute
+        checkpoint_state: Dictionary containing the saved state from last checkpoint
+        task_args: Original task arguments (required for function execution)
+        task_kwargs: Original task keyword arguments
+        progress_percent: Progress percentage at last checkpoint
         checkpoint_count: Total checkpoints available for this task
     """
     return Message(
@@ -228,8 +235,10 @@ def create_resume_task_message(
         data={
             "task_id": task_id,
             "func_code": func_code,
-            "reconstructed_state_hex": reconstructed_state_hex,
-            "remaining_args": remaining_args,
+            "checkpoint_state": checkpoint_state,
+            "task_args": task_args or [],
+            "task_kwargs": task_kwargs or {},
+            "progress_percent": progress_percent,
             "checkpoint_count": checkpoint_count
         },
         job_id=job_id

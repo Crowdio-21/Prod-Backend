@@ -389,6 +389,33 @@ async def get_worker_failure_stats(
     )
 
 
+async def get_latest_task_failure_with_checkpoint(
+    session: AsyncSession, task_id: str
+) -> Optional[WorkerFailureModel]:
+    """
+    Get the most recent failure record for a task that has checkpoint data.
+    
+    This is used when reassigning orphaned tasks to determine if we can
+    resume from a checkpoint instead of starting from scratch.
+    
+    Args:
+        session: Database session
+        task_id: Task identifier
+        
+    Returns:
+        WorkerFailureModel with checkpoint data, or None if not found
+    """
+    result = await session.execute(
+        select(WorkerFailureModel)
+        .where(WorkerFailureModel.task_id == task_id)
+        .where(WorkerFailureModel.checkpoint_available == True)
+        .where(WorkerFailureModel.latest_checkpoint_data != None)
+        .order_by(WorkerFailureModel.failed_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_online_workers_count(session: AsyncSession) -> int:
     """Get count of online workers"""
     result = await session.execute(
