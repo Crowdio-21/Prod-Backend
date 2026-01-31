@@ -48,6 +48,10 @@ class TaskDispatcher:
         """
         Assign available tasks for a specific job to available workers
 
+        Uses batch_select_workers for optimized assignment:
+        - If tasks >= workers: Skip ranking, assign all workers directly
+        - If tasks < workers: Rank once and pick top N workers
+
         Args:
             job_id: Job identifier
             func_code: Function code to execute
@@ -65,41 +69,45 @@ class TaskDispatcher:
             print(f"TaskDispatcher: No pending tasks for job {job_id}")
             return 0
 
-        tasks_assigned = 0
+        available_workers = self.connection_manager.get_available_workers()
 
-        for task in pending_tasks:
-            available_workers = self.connection_manager.get_available_workers()
-            
+        if not available_workers:
+            print(
+                f"TaskDispatcher: No available workers, {len(pending_tasks)} tasks remain"
+            )
+            return 0
 
-            if not available_workers:
-                print(
-                    f"TaskDispatcher: No available workers, {len(pending_tasks) - tasks_assigned} tasks remain"
-                )
-                break
+        # Get worker objects for scheduler
+        all_workers = await self._get_all_workers()
 
-            # Get worker objects for scheduler
-            all_workers = await self._get_all_workers()
-
-            # Create scheduler task
-            scheduler_task = SchedulerTask(
+        # Convert pending tasks to scheduler tasks
+        scheduler_tasks = [
+            SchedulerTask(
                 id=task.id,
                 job_id=task.job_id,
                 args=task.args,
                 priority=getattr(task, "priority", 0),
             )
+            for task in pending_tasks
+        ]
 
-            # Let scheduler select best worker
-            worker_id = await self.scheduler.select_worker(
-                scheduler_task, available_workers, all_workers
+        # Use batch assignment - ranks workers ONCE instead of per-task
+        assignments = await self.scheduler.batch_select_workers(
+            scheduler_tasks, available_workers, all_workers
+        )
+
+        print(
+            f"TaskDispatcher: Batch scheduler returned {len(assignments)} assignments"
+        )
+
+        tasks_assigned = 0
+        for scheduler_task, worker_id in assignments:
+            task_args = json.loads(scheduler_task.args) if scheduler_task.args else []
+            success = await self._assign_task_to_worker(
+                job_id, scheduler_task.id, func_code, task_args, worker_id
             )
-
-            if worker_id:
-                task_args = json.loads(task.args) if task.args else []
-                success = await self._assign_task_to_worker(
-                    job_id, task.id, func_code, task_args, worker_id
-                )
-                if success:
-                    tasks_assigned += 1
+            if success:
+                tasks_assigned += 1
 
         print(f"TaskDispatcher: Assigned {tasks_assigned} tasks for job {job_id}")
         return tasks_assigned
@@ -167,7 +175,9 @@ class TaskDispatcher:
             assigned = await self.assign_tasks_for_job(job_id, func_code, [])
             total_assigned += assigned
 
-        print(f"TaskDispatcher: Batch assignment completed, {total_assigned} tasks assigned")
+        print(
+            f"TaskDispatcher: Batch assignment completed, {total_assigned} tasks assigned"
+        )
         return total_assigned > 0
 
     async def _assign_task_to_worker(

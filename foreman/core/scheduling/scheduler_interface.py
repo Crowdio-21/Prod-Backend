@@ -121,3 +121,39 @@ class TaskScheduler(ABC):
             Selected task or None if no suitable task
         """
         pass
+
+    async def batch_select_workers(
+        self, tasks: List[Task], available_workers: Set[str], all_workers: dict
+    ) -> List[tuple]:
+        """
+        Optimized batch assignment: select workers for multiple tasks at once.
+
+        This method ranks workers ONCE and assigns them to tasks, avoiding
+        redundant MCDM computations. Subclasses can override for custom logic.
+
+        Optimization strategy:
+        - If tasks >= available_workers: Skip ranking, assign all workers (no choice needed)
+        - If tasks < available_workers: Rank once, pick top N workers
+
+        Args:
+            tasks: List of tasks to assign
+            available_workers: Set of available worker IDs
+            all_workers: Dictionary of all workers (id -> Worker)
+
+        Returns:
+            List of (task, worker_id) tuples for successful assignments
+        """
+        # Default implementation: fall back to individual select_worker calls
+        # Subclasses (like BaseMCDMScheduler) should override for optimization
+        assignments = []
+        remaining_workers = set(available_workers)
+
+        for task in tasks:
+            if not remaining_workers:
+                break
+            worker_id = await self.select_worker(task, remaining_workers, all_workers)
+            if worker_id:
+                assignments.append((task, worker_id))
+                remaining_workers.discard(worker_id)
+
+        return assignments

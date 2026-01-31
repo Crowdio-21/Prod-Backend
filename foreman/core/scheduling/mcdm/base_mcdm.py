@@ -260,17 +260,6 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
                 logger.warning(f"Using fallback selection: {fallback}")
             return fallback
 
-            # No available workers in ranked list
-            return None
-
-        except Exception as e:
-            print(f"Error in MCDM select_worker: {e}")
-            import traceback
-
-            traceback.print_exc()
-            # Fallback to first available worker
-            return list(available_workers)[0] if available_workers else None
-
     async def select_task(
         self, pending_tasks: List[Task], worker_id: str
     ) -> Optional[Task]:
@@ -293,6 +282,121 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         # Simple FIFO for now - can be enhanced later
         # Could consider task priority, job affinity, etc.
         return pending_tasks[0]
+
+    async def batch_select_workers(
+        self,
+        tasks: List[Task],
+        available_workers: Set[str],
+        all_workers: Dict[str, Worker],
+    ) -> List[tuple]:
+        """
+        Optimized batch assignment: select workers for multiple tasks at once.
+
+        This method ranks workers ONCE and assigns them to tasks, avoiding
+        redundant MCDM computations.
+
+        Optimization strategy:
+        - If tasks >= available_workers: Skip ranking entirely, assign all workers
+        - If tasks < available_workers: Rank once, pick top N workers
+
+        Args:
+            tasks: List of tasks to assign
+            available_workers: Set of available worker IDs
+            all_workers: Dictionary of all workers (id -> Worker)
+
+        Returns:
+            List of (task, worker_id) tuples for successful assignments
+        """
+        logger.info(f"\n{'='*80}")
+        logger.info(
+            f"BATCH WORKER SELECTION - {len(tasks)} tasks, {len(available_workers)} available workers"
+        )
+        logger.info(f"{'='*80}")
+
+        if not tasks or not available_workers:
+            logger.warning("No tasks or no available workers for batch assignment")
+            return []
+
+        available_list = list(available_workers)
+        n_tasks = len(tasks)
+        n_workers = len(available_list)
+
+        # OPTIMIZATION 1: If tasks >= workers, skip ranking - assign all workers
+        if n_tasks >= n_workers:
+            logger.info(f"⚡ FAST PATH: {n_tasks} tasks >= {n_workers} workers")
+            logger.info(
+                f"   Skipping MCDM ranking - assigning all available workers directly"
+            )
+
+            assignments = []
+            for i, worker_id in enumerate(available_list):
+                if i < len(tasks):
+                    assignments.append((tasks[i], worker_id))
+                    logger.info(f"   Assigned task {tasks[i].id} → {worker_id}")
+
+            logger.info(f"✓ Fast-path assigned {len(assignments)} tasks")
+            logger.info(f"{'='*80}\n")
+            return assignments
+
+        # OPTIMIZATION 2: tasks < workers - rank ONCE and pick top N
+        logger.info(f"🎯 RANKED PATH: {n_tasks} tasks < {n_workers} workers")
+        logger.info(f"   Running MCDM ranking ONCE to select best {n_tasks} workers")
+
+        try:
+            # Build decision matrix ONCE for all available workers only
+            available_workers_dict = {
+                wid: all_workers[wid] for wid in available_list if wid in all_workers
+            }
+            matrix, worker_ids = self._build_decision_matrix(available_workers_dict)
+
+            if matrix.size == 0:
+                logger.warning("Decision matrix is empty")
+                return []
+
+            # Rank workers using MCDM algorithm - SINGLE computation
+            logger.info(f"   Running {self.strategy.__class__.__name__} algorithm...")
+            ranked_indices = self.strategy.rank_devices(matrix, self.criteria_types)
+
+            # Get scores if available
+            scores = getattr(self.strategy, "_last_scores", None)
+
+            # Log complete ranking
+            logger.info(f"\n{'─'*80}")
+            logger.info(f"WORKER RANKINGS (computed once for batch):")
+            logger.info(f"{'─'*80}")
+            for rank, idx in enumerate(ranked_indices, 1):
+                worker_id = worker_ids[idx]
+                score_str = f", Score: {scores[idx]:.6f}" if scores is not None else ""
+                selected_marker = "→ SELECTED" if rank <= n_tasks else ""
+                logger.info(f"  Rank {rank}: {worker_id}{score_str} {selected_marker}")
+            logger.info(f"{'─'*80}")
+
+            # Assign tasks to top-ranked workers
+            assignments = []
+            for i, task in enumerate(tasks):
+                if i < len(ranked_indices):
+                    best_worker_idx = ranked_indices[i]
+                    worker_id = worker_ids[best_worker_idx]
+                    assignments.append((task, worker_id))
+                    logger.info(f"   Task {task.id} → {worker_id} (Rank {i+1})")
+
+            logger.info(
+                f"\n✓ Ranked-path assigned {len(assignments)} tasks using single MCDM computation"
+            )
+            logger.info(f"{'='*80}\n")
+            return assignments
+
+        except Exception as e:
+            logger.error(f"Error in batch_select_workers: {e}", exc_info=True)
+            # Fallback: simple assignment without ranking
+            assignments = []
+            for i, worker_id in enumerate(available_list):
+                if i < len(tasks):
+                    assignments.append((tasks[i], worker_id))
+            logger.warning(
+                f"Fallback: assigned {len(assignments)} tasks without ranking"
+            )
+            return assignments
 
     def get_config(self) -> Dict:
         """
