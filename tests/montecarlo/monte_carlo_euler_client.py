@@ -57,6 +57,7 @@ def monte_carlo_euler_worker(num_trials):
     """
     import random
     import time
+    import builtins
     
     start = time.time()
     
@@ -64,19 +65,35 @@ def monte_carlo_euler_worker(num_trials):
     # Checkpoint interval is 5s, so 25s ensures at least 4 checkpoints
     MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
     
-    # Create a shared state object for checkpointing
-    # This will be accessed by the checkpoint handler via builtins
+    # Check if we're resuming from a checkpoint
+    is_resumed = False
+    start_trial = 0
+    total_count = 0
+    
+    if hasattr(builtins, '_checkpoint_state'):
+        existing_state = builtins._checkpoint_state
+        if existing_state.get("_is_resumed", False):
+            is_resumed = True
+            start_trial = existing_state.get("trials_completed", 0)
+            total_count = existing_state.get("total_count", 0)
+            print(f"[Worker] RESUMING from checkpoint:")
+            print(f"         Trials completed: {start_trial:,}")
+            print(f"         Total count: {total_count:,}")
+            print(f"         Progress: {existing_state.get('progress_percent', 0):.1f}%")
+            print(f"         Estimated e so far: {existing_state.get('estimated_e', 0):.6f}")
+    
+    # Create/update checkpoint state object
     checkpoint_state = {
-        "trials_completed": 0,
-        "total_count": 0,
+        "trials_completed": start_trial,
+        "total_count": total_count,
         "num_trials": num_trials,
-        "progress_percent": 0.0,
-        "estimated_e": 0.0,
-        "start_time": start
+        "progress_percent": (start_trial / num_trials) * 100 if num_trials > 0 else 0,
+        "estimated_e": total_count / start_trial if start_trial > 0 else 0.0,
+        "start_time": start,
+        "_is_resumed": is_resumed
     }
     
     # Make checkpoint state accessible globally via builtins for checkpoint handler
-    import builtins
     builtins._checkpoint_state = checkpoint_state
     
     # Minimum execution time to ensure checkpointing (in seconds)
