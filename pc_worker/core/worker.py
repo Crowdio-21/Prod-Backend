@@ -338,8 +338,13 @@ class FastAPIWorker:
 
                 await asyncio.sleep(self.config.heartbeat_interval)
 
+            except websockets.exceptions.ConnectionClosed:
+                print("🔌 Foreman connection closed during heartbeat")
+                self.is_connected = False
+                break
             except Exception as e:
                 print(f"❌ Error sending heartbeat: {e}")
+                self.is_connected = False
                 break
 
     # ---------- Main worker lifecycle ----------
