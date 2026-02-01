@@ -135,29 +135,7 @@ class WebSocketManager:
                 print(f"Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
     
-    async def ping_workers(self):
-        """Periodically ping workers to keep connections alive"""
-        while True:
-            try:
-                await asyncio.sleep(30)  # Ping every 30 seconds
-                
-                ping_message = create_ping_message()
-                worker_ids = self.connection_manager.get_all_worker_ids()
-                
-                for worker_id in worker_ids:
-                    websocket = self.connection_manager.get_worker_websocket(worker_id)
-                    if websocket:
-                        try:
-                            await websocket.send(ping_message.to_json())
-                        except Exception:
-                            # Worker connection is dead, will be cleaned up
-                            pass
-                        
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"Error in ping task: {e}")
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get current WebSocket manager stats"""
         return self.connection_manager.get_stats()
