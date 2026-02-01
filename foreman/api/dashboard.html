@@ -176,6 +176,199 @@
         .status-online { background: #a5d6a7; color: #2e7d32; }
         .status-offline { background: #ef9a9a; color: #c62828; }
         .status-busy { background: #ffeaa7; color: #d68910; }
+        .status-assigned { background: #81ecec; color: #00838f; }
+        .status-resumed { background: #b39ddb; color: #4527a0; }
+        
+        /* Checkpoint-specific styles */
+        .checkpoint-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            font-weight: 500;
+        }
+        .checkpoint-badge.enabled { background: #e8f5e9; color: #2e7d32; }
+        .checkpoint-badge.disabled { background: #fafafa; color: #9e9e9e; }
+        .checkpoint-badge.resumed { background: #ede7f6; color: #4527a0; }
+        
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #3498db, #2ecc71);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .progress-bar.resumed {
+            background: linear-gradient(90deg, #9b59b6, #3498db);
+        }
+        
+        /* Timeline styles */
+        .timeline-container {
+            display: none;
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+        }
+        .timeline-container.expanded { display: block; }
+        
+        .timeline {
+            position: relative;
+            padding-left: 0;
+        }
+        
+        .timeline-expand-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            margin-top: 8px;
+            background: #e3f2fd;
+            border: 1px solid #90caf9;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            color: #1976d2;
+            transition: all 0.2s;
+        }
+        .timeline-expand-btn:hover {
+            background: #bbdefb;
+        }
+        .timeline-expand-btn .arrow {
+            transition: transform 0.2s;
+        }
+        .timeline-expand-btn.expanded .arrow {
+            transform: rotate(90deg);
+        }
+        .timeline-hidden-events {
+            display: none;
+        }
+        .timeline-hidden-events.expanded {
+            display: block;
+        }
+        
+        /* Expandable row */
+        .expandable-row { cursor: pointer; }
+        .expandable-row:hover { background: #e3f2fd !important; }
+        .expand-icon {
+            display: inline-block;
+            width: 20px;
+            transition: transform 0.2s;
+        }
+        .expand-icon.expanded { transform: rotate(90deg); }
+        
+        /* Summary cards grid */
+        .checkpoint-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .summary-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+            border-left: 3px solid #ddd;
+        }
+        .summary-card.primary { border-left-color: #3498db; }
+        .summary-card.success { border-left-color: #27ae60; }
+        .summary-card.warning { border-left-color: #f39c12; }
+        .summary-card.danger { border-left-color: #e74c3c; }
+        .summary-card.purple { border-left-color: #9b59b6; }
+        .summary-card .card-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .summary-card .card-label {
+            font-size: 0.8em;
+            color: #7f8c8d;
+            margin-top: 4px;
+        }
+        
+        /* Job selector */
+        .job-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        }
+        .job-selector label {
+            font-weight: 500;
+            color: #2c3e50;
+        }
+        .job-selector select {
+            flex: 1;
+            width: 100%;
+            max-width: none;
+            min-width: 0;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.9em;
+            box-sizing: border-box;
+        }
+        .job-status-indicator {
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        
+        /* Pagination styles */
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 15px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+            border-radius: 0 0 12px 12px;
+        }
+        .pagination-info {
+            color: #7f8c8d;
+            font-size: 0.85em;
+        }
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .pagination-btn {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }
+        .pagination-btn:hover:not(:disabled) {
+            background: #e3f2fd;
+            border-color: #3498db;
+        }
+        .pagination-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .pagination-page {
+            padding: 6px 10px;
+            font-size: 0.85em;
+            color: #2c3e50;
+        }
         
         /* Danger button (clear database) */
         .danger-btn {
@@ -241,6 +434,7 @@
         <div class="tabs">
             <button class="tab active" onclick="showTab('overview')">Overview</button>
             <button class="tab" onclick="showTab('evaluation')">Evaluation</button>
+            <button class="tab" onclick="showTab('checkpointing')">Checkpointing</button>
             <button class="tab" onclick="showTab('jobs')">Jobs</button>
             <button class="tab" onclick="showTab('workers')">Workers</button>
         </div>
@@ -379,6 +573,113 @@
                     <div class="metric-item">
                         <span class="metric-label">Imbalance Ratio</span>
                         <span class="metric-value" id="lb-imbalance">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Checkpointing & Recovery Tab -->
+        <div id="checkpointing-tab" class="tab-content">
+            <!-- Job Selector + Pause Refresh Button -->
+            <div class="job-selector" style="gap: 16px;">
+                <label for="checkpoint-job-select">Select Job:</label>
+                <select id="checkpoint-job-select" onchange="loadCheckpointData()">
+                    <option value="">Select a job</option>
+                </select>
+                <span id="job-status-badge" class="job-status-indicator status-pending" style="display: none;">-</span>
+                <button id="pause-refresh-btn" class="pagination-btn" style="margin-left: 12px; min-width: 90px;" onclick="toggleCheckpointRefresh()">⏸ Pause Refresh</button>
+            </div>
+            
+            <!-- Job-Level Summary -->
+            <div class="checkpoint-summary" id="checkpoint-summary">
+                <div class="summary-card primary">
+                    <div class="card-value" id="cp-total-tasks">-</div>
+                    <div class="card-label">Total Tasks</div>
+                </div>
+                <div class="summary-card success">
+                    <div class="card-value" id="cp-completed-tasks">-</div>
+                    <div class="card-label">Completed</div>
+                </div>
+                <div class="summary-card danger">
+                    <div class="card-value" id="cp-failed-tasks">-</div>
+                    <div class="card-label">Failed</div>
+                </div>
+                <div class="summary-card purple">
+                    <div class="card-value" id="cp-resumed-tasks">-</div>
+                    <div class="card-label">Resumed</div>
+                </div>
+                <div class="summary-card warning">
+                    <div class="card-value" id="cp-total-checkpoints">-</div>
+                    <div class="card-label">Total Checkpoints</div>
+                </div>
+                <div class="summary-card">
+                    <div class="card-value" id="cp-enabled">-</div>
+                    <div class="card-label">Checkpointing</div>
+                </div>
+            </div>
+            
+            <!-- Worker-Task Checkpoint Table -->
+            <div class="section">
+                <h2> Task Checkpoints & Recovery Status</h2>
+                <table id="checkpoint-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 30px;"></th>
+                            <th>Worker ID</th>
+                            <th>Worker Status</th>
+                            <th>Task ID</th>
+                            <th>Task Status</th>
+                            <th>Progress</th>
+                            <th>Last Checkpoint</th>
+                            <th>Checkpoints</th>
+                            <th>Resumed</th>
+                        </tr>
+                    </thead>
+                    <tbody id="checkpoint-table-body">
+                        <tr>
+                            <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                                Select a job to view checkpoint details
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="checkpoint-pagination" style="display: none;">
+                    <span class="pagination-info" id="checkpoint-pagination-info">Showing 1-10 of 0</span>
+                    <div class="pagination-controls">
+                        <button class="pagination-btn" id="checkpoint-prev-btn" onclick="changeCheckpointPage(-1)" disabled>← Prev</button>
+                        <span class="pagination-page" id="checkpoint-page-indicator">Page 1 of 1</span>
+                        <button class="pagination-btn" id="checkpoint-next-btn" onclick="changeCheckpointPage(1)" disabled>Next →</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Recovery Events Log -->
+            <div class="section">
+                <h2> Recent Recovery Events</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Event Type</th>
+                            <th>Task ID</th>
+                            <th>Worker ID</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recovery-events-body">
+                        <tr>
+                            <td colspan="5" style="text-align: center; color: #7f8c8d; padding: 20px;">
+                                No recovery events yet
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="recovery-pagination" style="display: none;">
+                    <span class="pagination-info" id="recovery-pagination-info">Showing 1-10 of 0</span>
+                    <div class="pagination-controls">
+                        <button class="pagination-btn" id="recovery-prev-btn" onclick="changeRecoveryPage(-1)" disabled>← Prev</button>
+                        <span class="pagination-page" id="recovery-page-indicator">Page 1 of 1</span>
+                        <button class="pagination-btn" id="recovery-next-btn" onclick="changeRecoveryPage(1)" disabled>Next →</button>
                     </div>
                 </div>
             </div>
@@ -535,6 +836,9 @@
             
             if (tabName === 'evaluation') {
                 loadEvaluationData();
+            } else if (tabName === 'checkpointing') {
+                loadJobsForCheckpointSelector();
+                loadRecoveryEvents();
             }
         }
         
@@ -816,6 +1120,436 @@
             }
         }
         
+        // ==================== Checkpointing & Recovery Functions ====================
+        
+        // Load jobs for checkpoint selector dropdown
+        async function loadJobsForCheckpointSelector() {
+            try {
+                const response = await fetch('/api/jobs');
+                const jobs = await response.json();
+                
+                const select = document.getElementById('checkpoint-job-select');
+                const currentValue = select.value;
+                
+                // Keep first option, clear rest
+                select.innerHTML = '<option value="">-- Select a job --</option>';
+                
+                jobs.forEach(job => {
+                    const option = document.createElement('option');
+                    option.value = job.id;
+                    const statusIcon = job.status === 'completed' ? '' : job.status === 'running' ? '' : '';
+                    option.textContent = `${statusIcon} ${job.id} (${job.completed_tasks}/${job.total_tasks} tasks)`;
+                    select.appendChild(option);
+                });
+                
+                // Restore selection if still valid
+                if (currentValue && jobs.find(j => j.id === currentValue)) {
+                    select.value = currentValue;
+                }
+            } catch (error) {
+                console.error('Error loading jobs for checkpoint selector:', error);
+            }
+        }
+        
+        // Load checkpoint data for selected job
+        async function loadCheckpointData() {
+            const jobId = document.getElementById('checkpoint-job-select').value;
+            const statusBadge = document.getElementById('job-status-badge');
+            
+            if (!jobId) {
+                // Reset to default state
+                document.getElementById('cp-total-tasks').textContent = '-';
+                document.getElementById('cp-completed-tasks').textContent = '-';
+                document.getElementById('cp-failed-tasks').textContent = '-';
+                document.getElementById('cp-resumed-tasks').textContent = '-';
+                document.getElementById('cp-total-checkpoints').textContent = '-';
+                document.getElementById('cp-enabled').textContent = '-';
+                statusBadge.style.display = 'none';
+                
+                document.getElementById('checkpoint-table-body').innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                            Select a job to view checkpoint details
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/checkpoints/job/${jobId}`);
+                const data = await response.json();
+                
+                // Update job status badge
+                statusBadge.style.display = 'inline-block';
+                statusBadge.textContent = data.job_status.toUpperCase();
+                statusBadge.className = `job-status-indicator status-${data.job_status}`;
+                
+                // Update summary cards
+                document.getElementById('cp-total-tasks').textContent = data.total_tasks;
+                document.getElementById('cp-completed-tasks').textContent = data.completed_tasks;
+                document.getElementById('cp-failed-tasks').textContent = data.failed_tasks;
+                document.getElementById('cp-resumed-tasks').textContent = data.resumed_tasks;
+                document.getElementById('cp-total-checkpoints').textContent = data.total_checkpoints;
+                document.getElementById('cp-enabled').innerHTML = data.checkpointing_enabled 
+                    ? '<span class="checkpoint-badge enabled">✓ Enabled</span>'
+                    : '<span class="checkpoint-badge disabled">✗ Disabled</span>';
+                
+                // Update task table
+                renderCheckpointTable(data.tasks);
+                
+            } catch (error) {
+                console.error('Error loading checkpoint data:', error);
+                document.getElementById('checkpoint-table-body').innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #e74c3c; padding: 40px;">
+                            Error loading checkpoint data
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+        
+        // Render checkpoint table with expandable timeline rows
+        // Pagination state for checkpoint table
+        let checkpointAllTasks = [];
+        let checkpointCurrentPage = 1;
+        const checkpointPageSize = 10;
+        
+        function renderCheckpointTable(tasks) {
+            // Store all tasks for pagination
+            checkpointAllTasks = tasks || [];
+            checkpointCurrentPage = 1;
+            renderCheckpointPage();
+        }
+        
+        function renderCheckpointPage() {
+            const tbody = document.getElementById('checkpoint-table-body');
+            const pagination = document.getElementById('checkpoint-pagination');
+            tbody.innerHTML = '';
+            
+            if (!checkpointAllTasks || checkpointAllTasks.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                            No tasks found for this job
+                        </td>
+                    </tr>
+                `;
+                pagination.style.display = 'none';
+                return;
+            }
+            
+            // Calculate pagination
+            const totalPages = Math.ceil(checkpointAllTasks.length / checkpointPageSize);
+            const startIndex = (checkpointCurrentPage - 1) * checkpointPageSize;
+            const endIndex = Math.min(startIndex + checkpointPageSize, checkpointAllTasks.length);
+            const pageTasks = checkpointAllTasks.slice(startIndex, endIndex);
+            
+            function formatTaskId(id) {
+                if (!id || id.length <= 15) return id;
+                return id.substring(0, 7) + '...' + id.substring(id.length - 7);
+            }
+            
+            pageTasks.forEach((task, i) => {
+                const index = startIndex + i;
+                // Main row
+                const row = document.createElement('tr');
+                row.className = 'expandable-row';
+                row.onclick = () => toggleTimeline(index);
+                
+                const progressClass = task.resumed_from_checkpoint ? 'resumed' : '';
+                const lastCheckpoint = task.last_checkpoint_at 
+                    ? new Date(task.last_checkpoint_at).toLocaleTimeString() 
+                    : '-';
+                
+                row.innerHTML = `
+                    <td><span class="expand-icon" id="expand-icon-${index}">▶</span></td>
+                    <td>${task.worker_id ? task.worker_id.substring(0, 30) + '...' : '<em>Unassigned</em>'}</td>
+                    <td><span class="status status-${task.worker_status || 'offline'}">${task.worker_status || 'N/A'}</span></td>
+                    <td>${formatTaskId(task.task_id)}</td>
+                    <td><span class="status status-${task.status}">${task.status}</span></td>
+                    <td>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar ${progressClass}" style="width: ${task.progress_percent}%"></div>
+                        </div>
+                        <small>${task.progress_percent.toFixed(1)}%</small>
+                    </td>
+                    <td>${lastCheckpoint}</td>
+                    <td><strong>${task.checkpoint_count}</strong></td>
+                    <td>${task.resumed_from_checkpoint 
+                        ? '<span class="checkpoint-badge resumed">Yes</span>' 
+                        : '<span style="color: #9e9e9e;">No</span>'}</td>
+                `;
+                tbody.appendChild(row);
+                
+                // Timeline row (hidden by default)
+                const timelineRow = document.createElement('tr');
+                timelineRow.id = `timeline-row-${index}`;
+                timelineRow.innerHTML = `
+                    <td colspan="9" style="padding: 0;">
+                        <div class="timeline-container" id="timeline-${index}">
+                            ${renderTimeline(task.timeline || [])}
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(timelineRow);
+            });
+            
+            // Update pagination UI
+            pagination.style.display = 'flex';
+            document.getElementById('checkpoint-pagination-info').textContent = 
+                `Showing ${startIndex + 1}-${endIndex} of ${checkpointAllTasks.length}`;
+            document.getElementById('checkpoint-page-indicator').textContent = 
+                `Page ${checkpointCurrentPage} of ${totalPages}`;
+            document.getElementById('checkpoint-prev-btn').disabled = checkpointCurrentPage <= 1;
+            document.getElementById('checkpoint-next-btn').disabled = checkpointCurrentPage >= totalPages;
+        }
+        
+        function changeCheckpointPage(delta) {
+            const totalPages = Math.ceil(checkpointAllTasks.length / checkpointPageSize);
+            const newPage = checkpointCurrentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                checkpointCurrentPage = newPage;
+                renderCheckpointPage();
+            }
+        }
+        
+        // Render timeline for a task
+        function renderTimeline(events) {
+            if (!events || events.length === 0) {
+                return '<div style="padding: 10px; color: #7f8c8d; font-size: 0.9em;">No checkpoint events recorded yet</div>';
+            }
+
+            const uniqueId = 'timeline-events-' + Math.random().toString(36).substr(2, 9);
+            const showInitially = 3;
+            const hasMoreEvents = events.length > showInitially;
+            
+            function getEventStyle(eventType) {
+                switch(eventType) {
+                    case 'base_checkpoint': return { color: '#2ecc71', bg: '#e8f5e9' };
+                    case 'delta_checkpoint': return { color: '#3498db', bg: '#e3f2fd' };
+                    case 'failure': return { color: '#e74c3c', bg: '#ffebee' };
+                    case 'resume': return { color: '#9b59b6', bg: '#f3e5f5' };
+                    case 'complete': return { color: '#27ae60', bg: '#e8f5e9' };
+                    default: return { color: '#3498db', bg: '#e3f2fd' };
+                }
+            }
+            
+            function renderEvent(event, showLine) {
+                const time = new Date(event.timestamp).toLocaleString();
+                const style = getEventStyle(event.type);
+                return `
+                <div class="timeline-event-item" style="display: flex; align-items: flex-start; position: relative; min-height: 48px;">
+                    <div style="position: relative; width: 32px; display: flex; flex-direction: column; align-items: center;">
+                        <div style="width: 18px; height: 18px; border-radius: 50%; background: ${style.bg}; border: 3px solid ${style.color}; z-index: 2;"></div>
+                        ${showLine ? `<div style="width: 3px; background: linear-gradient(to bottom, ${style.color}, #ddd); flex: 1 1 auto; min-height: 24px; z-index: 1;"></div>` : ''}
+                    </div>
+                    <div style="margin-left: 10px; flex: 1; padding-bottom: 8px;">
+                        <div style="font-weight: 600; color: #2c3e50; font-size: 0.95em;">${event.description}</div>
+                        <div style="color: #7f8c8d; font-size: 0.85em; margin-top: 2px;">${time}</div>
+                    </div>
+                </div>`;
+            }
+
+            let html = `<div class="timeline">`;
+            
+            // Render first 3 events always visible
+            const visibleEvents = events.slice(0, showInitially);
+            visibleEvents.forEach((event, idx) => {
+                // Show line if not the last visible OR if there are more hidden events
+                const isLastVisible = idx === visibleEvents.length - 1;
+                const showLine = !isLastVisible || hasMoreEvents;
+                html += renderEvent(event, showLine);
+            });
+            
+            // If more than 3 events, add expandable section
+            if (hasMoreEvents) {
+                const hiddenEvents = events.slice(showInitially);
+                html += `
+                <div class="timeline-hidden-events" id="${uniqueId}" data-count="${hiddenEvents.length}">`;
+                hiddenEvents.forEach((event, idx) => {
+                    const isLastHidden = idx === hiddenEvents.length - 1;
+                    html += renderEvent(event, !isLastHidden);
+                });
+                html += `</div>
+                <button class="timeline-expand-btn" onclick="toggleTimelineEvents('${uniqueId}', this, event)">
+                    <span class="arrow">▶</span>
+                    <span class="btn-text">Show ${hiddenEvents.length} more event${hiddenEvents.length > 1 ? 's' : ''}</span>
+                </button>`;
+            }
+            
+            html += '</div>';
+            return html;
+        }
+        
+        // Toggle hidden timeline events
+        function toggleTimelineEvents(id, btn, e) {
+            e.stopPropagation(); // Prevent row collapse
+            const container = document.getElementById(id);
+            const btnText = btn.querySelector('.btn-text');
+            const eventCount = parseInt(container.dataset.count, 10);
+            
+            if (container.classList.contains('expanded')) {
+                container.classList.remove('expanded');
+                btn.classList.remove('expanded');
+                btnText.textContent = `Show ${eventCount} more event${eventCount > 1 ? 's' : ''}`;
+            } else {
+                container.classList.add('expanded');
+                btn.classList.add('expanded');
+                btnText.textContent = 'Show less';
+            }
+        }
+        
+        // Toggle timeline expansion
+        function toggleTimeline(index) {
+            const timeline = document.getElementById(`timeline-${index}`);
+            const icon = document.getElementById(`expand-icon-${index}`);
+            const isCurrentlyExpanded = timeline.classList.contains('expanded');
+
+            // Collapse all other expanded timelines and their icons
+            document.querySelectorAll('.timeline-container.expanded').forEach(expandedTimeline => {
+                if (expandedTimeline.id !== `timeline-${index}`) {
+                    expandedTimeline.classList.remove('expanded');
+                    // Extract the index from the timeline id and collapse its icon
+                    const timelineId = expandedTimeline.id;
+                    const expandedIndex = timelineId.replace('timeline-', '');
+                    const expandedIcon = document.getElementById(`expand-icon-${expandedIndex}`);
+                    if (expandedIcon) {
+                        expandedIcon.classList.remove('expanded');
+                    }
+                }
+            });
+
+            // Toggle the clicked row
+            if (isCurrentlyExpanded) {
+                timeline.classList.remove('expanded');
+                icon.classList.remove('expanded');
+            } else {
+                timeline.classList.add('expanded');
+                icon.classList.add('expanded');
+            }
+        }
+        
+        // Load recovery events with pagination
+        let recoveryAllEvents = [];
+        let recoveryCurrentPage = 1;
+        const recoveryPageSize = 10;
+        
+        async function loadRecoveryEvents() {
+            try {
+                const response = await fetch('/api/checkpoints/recovery-events?limit=100');
+                const events = await response.json();
+                
+                // Store all events for pagination
+                recoveryAllEvents = events || [];
+                recoveryCurrentPage = 1;
+                renderRecoveryPage();
+                
+            } catch (error) {
+                console.error('Error loading recovery events:', error);
+            }
+        }
+        
+        function renderRecoveryPage() {
+            const tbody = document.getElementById('recovery-events-body');
+            const pagination = document.getElementById('recovery-pagination');
+            tbody.innerHTML = '';
+            
+            if (!recoveryAllEvents || recoveryAllEvents.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: #7f8c8d; padding: 20px;">
+                            No recovery events yet
+                        </td>
+                    </tr>
+                `;
+                pagination.style.display = 'none';
+                return;
+            }
+            
+            // Calculate pagination
+            const totalPages = Math.ceil(recoveryAllEvents.length / recoveryPageSize);
+            const startIndex = (recoveryCurrentPage - 1) * recoveryPageSize;
+            const endIndex = Math.min(startIndex + recoveryPageSize, recoveryAllEvents.length);
+            const pageEvents = recoveryAllEvents.slice(startIndex, endIndex);
+            
+            function formatTaskId(id) {
+                if (!id || id.length <= 15) return id;
+                return id.substring(0, 7) + '...' + id.substring(id.length - 7);
+            }
+            
+            pageEvents.forEach(event => {
+                const row = document.createElement('tr');
+                const time = new Date(event.timestamp).toLocaleString();
+                let eventIcon = '';
+                let eventClass = 'warning';
+                if (event.event_type === 'worker_failure') {
+                    eventClass = 'danger';
+                } else if (event.event_type === 'task_resumed') {
+                    eventClass = 'purple';
+                } else if (event.event_type === 'checkpoint_recovery') {
+                    eventClass = 'primary';
+                }
+                row.innerHTML = `
+                    <td>${time}</td>
+                    <td><span class="status status-${event.event_type === 'worker_failure' ? 'failed' : 'resumed'}">${eventIcon} ${event.event_type}</span></td>
+                    <td>${event.task_id ? formatTaskId(event.task_id) : '-'}</td>
+                    <td>${event.worker_id ? event.worker_id.substring(0, 12) + '...' : '-'}</td>
+                    <td>${event.details || '-'}</td>
+                `;
+                tbody.appendChild(row);
+            });
+            // Update pagination UI
+            pagination.style.display = 'flex';
+            document.getElementById('recovery-pagination-info').textContent = 
+                `Showing ${startIndex + 1}-${endIndex} of ${recoveryAllEvents.length}`;
+            document.getElementById('recovery-page-indicator').textContent = 
+                `Page ${recoveryCurrentPage} of ${totalPages}`;
+            document.getElementById('recovery-prev-btn').disabled = recoveryCurrentPage <= 1;
+            document.getElementById('recovery-next-btn').disabled = recoveryCurrentPage >= totalPages;
+        }
+        
+        function changeRecoveryPage(delta) {
+            const totalPages = Math.ceil(recoveryAllEvents.length / recoveryPageSize);
+            const newPage = recoveryCurrentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                recoveryCurrentPage = newPage;
+                renderRecoveryPage();
+            }
+        }
+        
+        // Checkpoint refresh state
+        let checkpointRefreshPaused = false;
+        
+        function toggleCheckpointRefresh() {
+            checkpointRefreshPaused = !checkpointRefreshPaused;
+            const btn = document.getElementById('pause-refresh-btn');
+            if (checkpointRefreshPaused) {
+                btn.textContent = '▶ Resume Refresh';
+                btn.style.background = '#e8f5e9';
+                btn.style.borderColor = '#27ae60';
+            } else {
+                btn.textContent = '⏸ Pause Refresh';
+                btn.style.background = '';
+                btn.style.borderColor = '';
+            }
+        }
+        
+        async function refreshCheckpointingTab() {
+            // Only refresh if checkpointing tab is active and refresh is not paused
+            const checkpointingTab = document.getElementById('checkpointing-tab');
+            if (!checkpointingTab.classList.contains('active') || checkpointRefreshPaused) {
+                return;
+            }
+            
+            const jobId = document.getElementById('checkpoint-job-select').value;
+            if (jobId) {
+                await loadCheckpointData();
+            }
+            await loadRecoveryEvents();
+        }
+        
         // Refresh all data
         async function refreshAll() {
             showRefreshing();
@@ -835,6 +1569,9 @@
             
             // Refresh every 5 seconds
             setInterval(refreshAll, 5000);
+            
+            // Refresh checkpointing tab every 3 seconds for more responsive updates
+            setInterval(refreshCheckpointingTab, 3000);
         });
     </script>
 </body>
