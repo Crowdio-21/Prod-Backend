@@ -313,11 +313,16 @@ class WorkerMessageHandler:
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
 
             if not worker_id:
-                print(f"WorkerMessageHandler: Could not find worker for task result")
+                print(
+                    f"⚠️ [RESULT DEBUG] Could not find worker for task result - task_id={task_id}, job_id={job_id}"
+                )
+                print(
+                    f"⚠️ [RESULT DEBUG] This may indicate worker was disconnected before result was processed!"
+                )
                 return
 
             print(
-                f"WorkerMessageHandler: Task {task_id} completed by worker {worker_id} for job {job_id}"
+                f"📥 [RESULT DEBUG] Task {task_id} result received from worker {worker_id} for job {job_id}"
             )
 
             # Mark task as completed in job manager (idempotent)
@@ -327,12 +332,16 @@ class WorkerMessageHandler:
 
             if not accepted:
                 print(
-                    f"WorkerMessageHandler: Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
+                    f"⚠️ [RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
                 )
                 # Even if ignored, free the worker to take new tasks
                 self.connection_manager.mark_worker_available(worker_id)
                 await _update_worker_status(worker_id, "online", current_task_id=None)
                 return
+
+            print(
+                f"✅ [RESULT DEBUG] Task {task_id} accepted, job_complete={job_complete}"
+            )
 
             # Update worker statistics
             await _update_worker_task_stats(worker_id, task_completed=True)
@@ -344,7 +353,7 @@ class WorkerMessageHandler:
             # Check if job is complete and handle completion
             if job_complete:
                 print(
-                    f"WorkerMessageHandler: Job {job_id} completed, triggering completion handler"
+                    f"🏁 [RESULT DEBUG] Job {job_id} completed, triggering completion handler"
                 )
                 await self.completion_handler.handle_job_completion(job_id)
 
@@ -354,12 +363,16 @@ class WorkerMessageHandler:
             )
 
             if assigned:
-                print(f"WorkerMessageHandler: Assigned next task to worker {worker_id}")
+                print(f"📤 [RESULT DEBUG] Assigned next task to worker {worker_id}")
+            else:
+                print(
+                    f"📭 [RESULT DEBUG] No more tasks to assign to worker {worker_id}"
+                )
 
         except KeyError as e:
-            print(f"WorkerMessageHandler: Missing required field in task result: {e}")
+            print(f"❌ [RESULT DEBUG] Missing required field in task result: {e}")
         except Exception as e:
-            print(f"WorkerMessageHandler: Error handling task result: {e}")
+            print(f"❌ [RESULT DEBUG] Error handling task result: {e}")
             import traceback
 
             traceback.print_exc()
