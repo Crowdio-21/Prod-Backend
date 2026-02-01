@@ -289,6 +289,7 @@ async def complete_task_if_assigned(
     task.status = "completed"
     task.result = result
     task.completed_at = datetime.now()
+    task.progress_percent = 100.0  # Task is complete, so progress is 100%
     if not task.worker_id:
         task.worker_id = worker_id
 

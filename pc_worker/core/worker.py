@@ -180,7 +180,7 @@ class FastAPIWorker:
                 # Foreman acknowledged checkpoint receipt - no action needed
                 checkpoint_id = message.data.get("checkpoint_id", "?")
                 task_id = message.data.get("task_id", "?")
-                print(f"✅ Checkpoint #{checkpoint_id} acknowledged for task {task_id}")
+                print(f"Checkpoint #{checkpoint_id} acknowledged for task {task_id}")
             else:
                 print(f"Unknown message type: {message.type}")
 
