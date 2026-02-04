@@ -8,6 +8,7 @@ from common.protocol import (
     create_ping_message, create_pong_message
 )
 from common.serializer import serialize_function
+from .decorators import get_task_metadata, TaskMetadata
 
 
 class CrowdComputeClient:
@@ -20,6 +21,7 @@ class CrowdComputeClient:
         self.connected = False
         self.pending_jobs: Dict[str, asyncio.Future] = {}
         self._listen_task: Optional[asyncio.Task] = None
+        self._submitted_jobs: Dict[str, Dict[str, Any]] = {}
     
     async def connect(self, host: str, port: int = 9000):
         """Connect to foreman server"""
@@ -91,8 +93,23 @@ class CrowdComputeClient:
         except Exception as e:
             print(f"Error handling message: {e}")
     
-    async def map(self, func: Callable, iterable: List[Any]) -> List[Any]:
-        """Map function over iterable using distributed workers"""
+    async def map(self, func: Callable, iterable: List[Any], **kwargs) -> List[Any]:
+        """
+        Map function over iterable using distributed workers
+        
+        Extracts checkpoint metadata from @task decorated functions and
+        sends it with the job submission for checkpoint-aware execution.
+        
+        Args:
+            func: Function to execute (optionally decorated with @task)
+            iterable: List of arguments to map over
+            **kwargs: Additional options:
+                - checkpoint: Override checkpoint setting
+                - checkpoint_interval: Override checkpoint interval
+                
+        Returns:
+            List of results from workers
+        """
         if not self.connected:
             raise RuntimeError("Not connected to foreman. Call connect() first.")
         
@@ -104,14 +121,62 @@ class CrowdComputeClient:
         self.pending_jobs[job_id] = future
         
         try:
-            # # Serialize function
-            func_code = serialize_function(func)
+            # Extract metadata from decorated function (if present)
+            metadata = get_task_metadata(func)
             
-            # Create submission message
-            message = create_submit_job_message(func_code, iterable, job_id)
+            # Apply any overrides from kwargs
+            if metadata:
+                task_metadata = TaskMetadata(
+                    checkpoint_enabled=kwargs.get('checkpoint', metadata.checkpoint_enabled),
+                    checkpoint_interval=kwargs.get('checkpoint_interval', metadata.checkpoint_interval),
+                    checkpoint_state=kwargs.get('checkpoint_state', metadata.checkpoint_state),
+                    parallel=kwargs.get('parallel', metadata.parallel),
+                    retry_on_failure=kwargs.get('retry_on_failure', metadata.retry_on_failure),
+                    max_retries=kwargs.get('max_retries', metadata.max_retries),
+                    timeout=kwargs.get('timeout', metadata.timeout),
+                    _func_name=metadata._func_name
+                )
+            else:
+                # Create default metadata if not decorated
+                task_metadata = TaskMetadata(
+                    checkpoint_enabled=kwargs.get('checkpoint', False),
+                    checkpoint_interval=kwargs.get('checkpoint_interval', 10.0),
+                    checkpoint_state=kwargs.get('checkpoint_state', []),
+                    parallel=kwargs.get('parallel', True),
+                    retry_on_failure=kwargs.get('retry_on_failure', True),
+                    max_retries=kwargs.get('max_retries', 3),
+                    timeout=kwargs.get('timeout', None),
+                    _func_name=func.__name__
+                )
+            
+            # Serialize function (use original if decorated)
+            if hasattr(func, '__crowdio_original__'):
+                func_code = serialize_function(func.__crowdio_original__)
+            else:
+                func_code = serialize_function(func)
+            
+            # Create submission message with metadata
+            message = self._create_submit_job_message_with_metadata(
+                func_code, iterable, job_id, task_metadata
+            )
+            
+            # Store job metadata for tracking
+            self._submitted_jobs[job_id] = {
+                'metadata': task_metadata,
+                'func_name': task_metadata._func_name,
+                'total_tasks': len(iterable),
+                'checkpoint_enabled': task_metadata.checkpoint_enabled
+            }
             
             # Send to foreman
             await self.websocket.send(message.to_json())
+            
+            if task_metadata.checkpoint_enabled:
+                print(f"[SDK] Job {job_id[:8]}... submitted with checkpointing enabled "
+                      f"(interval: {task_metadata.checkpoint_interval}s, "
+                      f"state vars: {task_metadata.checkpoint_state or 'all'})")
+            else:
+                print(f"[SDK] Job {job_id[:8]}... submitted (checkpointing disabled)")
             
             # Wait for results
             results = await future
@@ -121,7 +186,139 @@ class CrowdComputeClient:
             # Clean up on error
             if job_id in self.pending_jobs:
                 del self.pending_jobs[job_id]
+            if job_id in self._submitted_jobs:
+                del self._submitted_jobs[job_id]
             raise
+    
+    def _create_submit_job_message_with_metadata(
+        self, 
+        func_code: str, 
+        args_list: List[Any], 
+        job_id: str,
+        metadata: TaskMetadata
+    ) -> Message:
+        """
+        Create a job submission message with checkpoint metadata
+        
+        Args:
+            func_code: Serialized function code
+            args_list: List of task arguments
+            job_id: Job identifier
+            metadata: Task checkpoint metadata
+            
+        Returns:
+            Message object ready to send
+        """
+        return Message(
+            msg_type=MessageType.SUBMIT_JOB,
+            data={
+                "func_code": func_code,
+                "args_list": args_list,
+                "total_tasks": len(args_list),
+                "task_metadata": metadata.to_dict()
+            },
+            job_id=job_id
+        )
+    
+    async def submit(self, func: Callable, iterable: List[Any], **kwargs) -> str:
+        """
+        Submit a job asynchronously without waiting for results
+        
+        Args:
+            func: Function to execute
+            iterable: List of arguments for tasks
+            **kwargs: Additional options
+            
+        Returns:
+            job_id: Identifier to retrieve results later
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected to foreman. Call connect() first.")
+        
+        job_id = str(uuid.uuid4())
+        
+        # Extract metadata
+        metadata = get_task_metadata(func)
+        if metadata:
+            task_metadata = TaskMetadata(
+                checkpoint_enabled=kwargs.get('checkpoint', metadata.checkpoint_enabled),
+                checkpoint_interval=kwargs.get('checkpoint_interval', metadata.checkpoint_interval),
+                checkpoint_state=kwargs.get('checkpoint_state', metadata.checkpoint_state),
+                parallel=metadata.parallel,
+                retry_on_failure=metadata.retry_on_failure,
+                max_retries=metadata.max_retries,
+                timeout=metadata.timeout,
+                _func_name=metadata._func_name
+            )
+        else:
+            task_metadata = TaskMetadata(
+                checkpoint_enabled=kwargs.get('checkpoint', False),
+                checkpoint_interval=kwargs.get('checkpoint_interval', 10.0),
+                _func_name=func.__name__
+            )
+        
+        # Serialize function
+        if hasattr(func, '__crowdio_original__'):
+            func_code = serialize_function(func.__crowdio_original__)
+        else:
+            func_code = serialize_function(func)
+        
+        # Create future for this job
+        future = asyncio.Future()
+        self.pending_jobs[job_id] = future
+        
+        # Store job metadata
+        self._submitted_jobs[job_id] = {
+            'metadata': task_metadata,
+            'func_name': task_metadata._func_name,
+            'total_tasks': len(iterable),
+            'checkpoint_enabled': task_metadata.checkpoint_enabled,
+            'future': future
+        }
+        
+        # Create and send message
+        message = self._create_submit_job_message_with_metadata(
+            func_code, iterable, job_id, task_metadata
+        )
+        await self.websocket.send(message.to_json())
+        
+        print(f"[SDK] Job {job_id[:8]}... submitted asynchronously")
+        return job_id
+    
+    async def get_results(self, job_id: str, timeout: Optional[float] = None) -> Any:
+        """
+        Get results for a submitted job
+        
+        Args:
+            job_id: Job identifier from submit()
+            timeout: Maximum seconds to wait (None = wait forever)
+            
+        Returns:
+            List of results
+            
+        Raises:
+            TimeoutError: If timeout exceeded
+            KeyError: If job_id not found
+        """
+        if job_id not in self.pending_jobs:
+            raise KeyError(f"Job {job_id} not found")
+        
+        future = self.pending_jobs[job_id]
+        
+        if timeout:
+            try:
+                results = await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+        else:
+            results = await future
+        
+        # Clean up
+        del self.pending_jobs[job_id]
+        if job_id in self._submitted_jobs:
+            del self._submitted_jobs[job_id]
+        
+        return results
     
     async def run(self, func: Callable, *args, **kwargs) -> Any:
         """Run a single function with arguments in one worker"""
