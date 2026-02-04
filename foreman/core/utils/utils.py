@@ -171,13 +171,20 @@ async def _get_job_by_id(job_id: str):
         return await get_job_by_id(session, job_id)
 
 
-async def _create_job_in_database(job_id: str, total_tasks: int):
-    """Create job in database"""
+async def _create_job_in_database(job_id: str, total_tasks: int, supports_checkpointing: bool = False):
+    """
+    Create job in database
+    
+    Args:
+        job_id: Job identifier
+        total_tasks: Total number of tasks
+        supports_checkpointing: Whether job tasks support checkpointing
+    """
 
     # Create a new session for this operation
     async with db_session() as session:
-        await create_job(session, job_id, total_tasks)
-    print(f"Created job {job_id} in database")
+        await create_job(session, job_id, total_tasks, supports_checkpointing=supports_checkpointing)
+    print(f"Created job {job_id} in database (checkpointing={'enabled' if supports_checkpointing else 'disabled'})")
 
 
 async def _create_worker_in_database(worker_id: str, device_specs: dict = None):

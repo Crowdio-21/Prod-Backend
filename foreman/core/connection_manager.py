@@ -1,9 +1,85 @@
 """
 WebSocket connection management for workers and clients
+
+Extended with mobile worker support:
+- WorkerInfo class tracks worker capabilities
+- Automatic detection of workers needing code instrumentation
+- Support for Chaquopy and other mobile runtimes
 """
 
-from typing import Dict, Set, Optional, List
+from dataclasses import dataclass, field
+from typing import Dict, Set, Optional, List, Any
 from websockets.server import WebSocketServerProtocol
+
+from common.code_instrumenter import WorkerType, detect_worker_capabilities
+
+
+@dataclass
+class WorkerInfo:
+    """
+    Information about a connected worker
+    
+    Tracks worker capabilities to determine if code instrumentation
+    is needed (e.g., for Chaquopy workers without sys.settrace support).
+    """
+    worker_id: str
+    websocket: WebSocketServerProtocol
+    
+    # Worker type and platform
+    worker_type: WorkerType = WorkerType.PC_PYTHON
+    platform: str = "unknown"
+    runtime: str = "cpython"
+    
+    # Capabilities
+    supports_settrace: bool = True
+    supports_frame_introspection: bool = True
+    needs_instrumentation: bool = False
+    
+    # Additional info
+    device_specs: Dict[str, Any] = field(default_factory=dict)
+    
+    @classmethod
+    def from_worker_ready_message(
+        cls,
+        worker_id: str,
+        websocket: WebSocketServerProtocol,
+        message_data: Dict[str, Any]
+    ) -> 'WorkerInfo':
+        """
+        Create WorkerInfo from WORKER_READY message data
+        
+        Args:
+            worker_id: Worker identifier
+            websocket: WebSocket connection
+            message_data: Data from WORKER_READY message
+            
+        Returns:
+            WorkerInfo with capabilities detected
+        """
+        # Extract platform info from message
+        platform = message_data.get("platform", "unknown")
+        runtime = message_data.get("runtime", "cpython")
+        capabilities = message_data.get("capabilities", {})
+        device_specs = message_data.get("device_specs", {})
+        
+        # Detect worker capabilities
+        caps = detect_worker_capabilities(
+            platform=platform,
+            runtime=runtime,
+            capabilities=capabilities
+        )
+        
+        return cls(
+            worker_id=worker_id,
+            websocket=websocket,
+            worker_type=caps["worker_type"],
+            platform=platform,
+            runtime=runtime,
+            supports_settrace=caps["supports_settrace"],
+            supports_frame_introspection=caps["supports_frame_introspection"],
+            needs_instrumentation=caps["needs_instrumentation"],
+            device_specs=device_specs
+        )
 
 
 class ConnectionManager:
@@ -21,6 +97,9 @@ class ConnectionManager:
         # Worker connections: worker_id -> websocket
         self._workers: Dict[str, WebSocketServerProtocol] = {}
         
+        # Worker info: worker_id -> WorkerInfo (extended info including capabilities)
+        self._worker_info: Dict[str, WorkerInfo] = {}
+        
         # Client connections: job_id -> websocket
         self._clients: Dict[str, WebSocketServerProtocol] = {}
         
@@ -32,17 +111,31 @@ class ConnectionManager:
     
     # ==================== Worker Management ====================
     
-    def add_worker(self, worker_id: str, websocket: WebSocketServerProtocol) -> None:
+    def add_worker(
+        self, 
+        worker_id: str, 
+        websocket: WebSocketServerProtocol,
+        worker_info: Optional[WorkerInfo] = None
+    ) -> None:
         """
         Register a new worker connection
         
         Args:
             worker_id: Unique worker identifier
             websocket: WebSocket connection for the worker
+            worker_info: Optional WorkerInfo with capabilities (for mobile support)
         """
         self._workers[worker_id] = websocket
         self._available_workers.add(worker_id)
-        print(f"ConnectionManager: Added worker {worker_id}")
+        
+        # Store worker info if provided
+        if worker_info:
+            self._worker_info[worker_id] = worker_info
+            instrumentation_note = " (needs instrumentation)" if worker_info.needs_instrumentation else ""
+            print(f"ConnectionManager: Added worker {worker_id} "
+                  f"[{worker_info.worker_type.value}, {worker_info.platform}]{instrumentation_note}")
+        else:
+            print(f"ConnectionManager: Added worker {worker_id}")
     
     def remove_worker(self, worker_id: str) -> bool:
         """
@@ -57,8 +150,42 @@ class ConnectionManager:
         if worker_id in self._workers:
             del self._workers[worker_id]
             self._available_workers.discard(worker_id)
+            # Also remove worker info if present
+            if worker_id in self._worker_info:
+                del self._worker_info[worker_id]
             print(f"ConnectionManager: Removed worker {worker_id}")
             return True
+        return False
+    
+    def get_worker_info(self, worker_id: str) -> Optional[WorkerInfo]:
+        """
+        Get WorkerInfo for a specific worker
+        
+        Args:
+            worker_id: Worker identifier
+            
+        Returns:
+            WorkerInfo or None if not found
+        """
+        return self._worker_info.get(worker_id)
+    
+    def needs_code_instrumentation(self, worker_id: str) -> bool:
+        """
+        Check if a worker needs code instrumentation for checkpointing
+        
+        Workers that don't support sys.settrace() (e.g., Chaquopy on Android)
+        need code instrumentation with explicit checkpoint calls.
+        
+        Args:
+            worker_id: Worker identifier
+            
+        Returns:
+            True if worker needs instrumented code, False for standard workers
+        """
+        info = self._worker_info.get(worker_id)
+        if info:
+            return info.needs_instrumentation
+        # Default: assume standard Python with settrace support
         return False
     
     def get_worker_websocket(self, worker_id: str) -> Optional[WebSocketServerProtocol]:

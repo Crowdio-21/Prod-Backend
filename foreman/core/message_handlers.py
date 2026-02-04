@@ -70,16 +70,29 @@ class ClientMessageHandler:
             func_code = message.data["func_code"]
             args_list = message.data["args_list"]
             total_tasks = message.data["total_tasks"]
+            
+            # Extract task metadata for declarative checkpointing
+            task_metadata = message.data.get("task_metadata")
 
             print(
                 f"ClientMessageHandler: Received job {job_id} with {total_tasks} tasks | foreman_runtime={get_runtime_info()}"
             )
+            
+            # Log checkpoint configuration if present
+            if task_metadata and task_metadata.get("checkpoint_enabled"):
+                print(
+                    f"ClientMessageHandler: Job {job_id} has checkpointing enabled "
+                    f"(interval={task_metadata.get('checkpoint_interval')}s, "
+                    f"state_vars={task_metadata.get('checkpoint_state', [])})"
+                )
 
             # Register client websocket
             self.connection_manager.add_client(job_id, websocket)
 
-            # Create job and tasks
-            await self.job_manager.create_job(job_id, func_code, args_list, total_tasks)
+            # Create job and tasks with task_metadata
+            await self.job_manager.create_job(
+                job_id, func_code, args_list, total_tasks, task_metadata=task_metadata
+            )
 
             # Try to assign tasks to available workers
             assigned = await self.task_dispatcher.assign_tasks_for_job(
@@ -241,6 +254,10 @@ class WorkerMessageHandler:
     ):
         """
         Handle worker ready message (worker registration)
+        
+        Extended to extract worker capabilities for mobile support.
+        Workers report their platform, runtime, and capabilities, which
+        determines if code instrumentation is needed.
 
         Args:
             message: Worker ready message
@@ -249,8 +266,15 @@ class WorkerMessageHandler:
         try:
             worker_id = message.data["worker_id"]
             device_specs = message.data.get("device_specs", {})
+            
+            # Extract platform/runtime info for mobile worker support
+            worker_type = message.data.get("worker_type", "pc_python")
+            platform = message.data.get("platform", "unknown")
+            runtime = message.data.get("runtime", "cpython")
+            capabilities = message.data.get("capabilities", {})
 
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
+            print(f"  Type: {worker_type} | Platform: {platform} | Runtime: {runtime}")
 
             # Log device specs if available
             if device_specs:
@@ -262,9 +286,24 @@ class WorkerMessageHandler:
                 print(f"  📱 Device: {device_type} | OS: {os_info}")
                 print(f"  🖥️  CPU: {cpu}")
                 print(f"  💾 RAM: {ram_info}")
+            
+            # Log capabilities for mobile workers
+            if capabilities:
+                settrace_support = capabilities.get("supports_settrace", True)
+                frame_support = capabilities.get("supports_frame_introspection", True)
+                if not settrace_support or not frame_support:
+                    print(f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
 
-            # Register worker
-            self.connection_manager.add_worker(worker_id, websocket)
+            # Create WorkerInfo for extended capability tracking
+            from .connection_manager import WorkerInfo
+            worker_info = WorkerInfo.from_worker_ready_message(
+                worker_id=worker_id,
+                websocket=websocket,
+                message_data=message.data
+            )
+            
+            # Register worker with capabilities
+            self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
 
             # Create or update worker in database with device specs
             await _create_worker_in_database(worker_id, device_specs)
@@ -448,6 +487,9 @@ class WorkerMessageHandler:
     ):
         """
         Handle checkpoint message from worker (incremental state save)
+        
+        Supports both legacy checkpoints and declarative checkpointing with
+        additional metadata (checkpoint_type, checkpoint_state_vars, state_size_bytes).
 
         Args:
             message: Task checkpoint message
@@ -461,6 +503,11 @@ class WorkerMessageHandler:
             progress_percent = message.data["progress_percent"]
             checkpoint_id = message.data["checkpoint_id"]
             compression_type = message.data.get("compression_type", "gzip")
+            
+            # Extract declarative checkpointing metadata (optional)
+            checkpoint_type = message.data.get("checkpoint_type")
+            checkpoint_state_vars = message.data.get("checkpoint_state_vars")
+            state_size_bytes = message.data.get("state_size_bytes")
 
             # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
@@ -471,11 +518,16 @@ class WorkerMessageHandler:
 
             # Convert hex back to bytes
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
+            
+            # Build log message with declarative checkpoint details if present
+            state_vars_info = ""
+            if checkpoint_state_vars:
+                state_vars_info = f", state_vars: {checkpoint_state_vars}"
 
             print(
                 f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
                 f"for task {task_id} (size: {len(checkpoint_data_bytes)} bytes, "
-                f"progress: {progress_percent}%)"
+                f"progress: {progress_percent}%{state_vars_info})"
             )
 
             # Get database session and store checkpoint
@@ -491,6 +543,9 @@ class WorkerMessageHandler:
                     progress_percent=progress_percent,
                     checkpoint_id=checkpoint_id,
                     compression_type=compression_type,
+                    checkpoint_type=checkpoint_type,
+                    checkpoint_state_vars=checkpoint_state_vars,
+                    state_size_bytes=state_size_bytes,
                 )
 
             if success:
