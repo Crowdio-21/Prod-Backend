@@ -4,7 +4,7 @@ Serialization utilities for CrowdCompute
 
 import inspect
 import sys
-import types 
+import types
 from typing import Any, Callable, List
 
 
@@ -19,16 +19,25 @@ def get_runtime_info() -> str:
 
 
 def serialize_function(func: str):
-    """Serialize a Python function as a str"""
+    """Serialize a Python function as a str, stripping any decorators"""
     try:
-        return inspect.getsource(func)
+        source = inspect.getsource(func)
+        # Strip only @...remote decorator lines to avoid issues on worker
+        lines = source.split("\n")
+        filtered_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("@") and ".remote" in stripped:
+                continue  # Skip @crowdio.remote decorator lines
+            filtered_lines.append(line)
+        return "\n".join(filtered_lines)
     except Exception as e:
         raise ValueError(f"Failed to serialize function ({_env_info()}): {e}")
 
- 
+
 def deserialize_function_for_PC(func_code: str):
     """Turn function source code string into a callable function"""
-    
+
     # Create a local namespace for the exec
     local_vars = {}
     exec(func_code, {}, local_vars)
