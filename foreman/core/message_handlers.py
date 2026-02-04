@@ -414,7 +414,9 @@ class WorkerMessageHandler:
                 )
 
         except KeyError as e:
-            print(f"[RESULT DEBUG] Missing required field in task result: {e}")
+            print(f"WorkerMessageHandler: Missing required field in task result: {e}")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             print(f"[RESULT DEBUG] Error handling task result: {e}")
             import traceback
