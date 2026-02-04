@@ -1,4 +1,5 @@
 import logging
+import sys
 from pathlib import Path
 
 from .scheduler_interface import *
@@ -11,12 +12,22 @@ logger.setLevel(logging.DEBUG)
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
 
-# File handler for FIFO decisions
-file_handler = logging.FileHandler(log_dir / "fifo_decisions.log")
+# File handler for FIFO decisions with UTF-8 encoding
+file_handler = logging.FileHandler(log_dir / "fifo_decisions.log", encoding="utf-8")
 file_handler.setLevel(logging.DEBUG)
 
 # Console handler for important info
-console_handler = logging.StreamHandler()
+# Use UTF-8 encoding on Windows to handle Unicode characters
+if sys.platform == "win32":
+    import io
+
+    # Create a stream with UTF-8 encoding for Windows
+    utf8_stream = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace"
+    )
+    console_handler = logging.StreamHandler(stream=utf8_stream)
+else:
+    console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
 # Detailed formatter
@@ -34,7 +45,7 @@ if not logger.handlers:
 
 class FIFOScheduler(TaskScheduler):
     """First-In-First-Out scheduler - assigns tasks in order received"""
-    
+
     def __init__(self):
         """Initialize FIFO scheduler"""
         logger.info(f"\n{'='*80}")
@@ -42,12 +53,9 @@ class FIFOScheduler(TaskScheduler):
         logger.info(f"{'='*80}")
         logger.info(f"Strategy: First-In-First-Out (simple queue-based)")
         logger.info(f"{'='*80}\n")
-    
+
     async def select_worker(
-        self, 
-        task: Task, 
-        available_workers: Set[str],
-        all_workers: dict
+        self, task: Task, available_workers: Set[str], all_workers: dict
     ) -> Optional[str]:
         """Select first available worker"""
         logger.info(f"\n{'='*80}")
@@ -55,14 +63,14 @@ class FIFOScheduler(TaskScheduler):
         logger.info(f"{'='*80}")
         logger.info(f"Available workers: {sorted(list(available_workers))}")
         logger.info(f"Total workers in system: {len(all_workers)}")
-        
+
         if not available_workers:
             logger.warning("No available workers")
             logger.info(f"{'='*80}\n")
             return None
-        
+
         selected_worker = next(iter(available_workers))
-        
+
         logger.info(f"\n{'─'*80}")
         logger.info(f"FIFO SELECTION (First Available):")
         logger.info(f"{'─'*80}")
@@ -70,24 +78,23 @@ class FIFOScheduler(TaskScheduler):
             marker = "→ SELECTED" if worker_id == selected_worker else "  available"
             logger.info(f"  [{i}] {worker_id} {marker}")
         logger.info(f"{'─'*80}")
-        
+
         logger.info(f"\n✓ SELECTED: {selected_worker}")
         logger.info(f"{'='*80}\n")
-        
+
         return selected_worker
-    
+
     async def select_task(
-        self,
-        pending_tasks: List[Task],
-        worker_id: str
+        self, pending_tasks: List[Task], worker_id: str
     ) -> Optional[Task]:
         """Select first pending task"""
         if not pending_tasks:
             logger.debug(f"No pending tasks for worker {worker_id}")
             return None
-        
-        selected_task = pending_tasks[0]
-        logger.debug(f"Selected task {selected_task.id} for worker {worker_id} (FIFO - first in queue)")
-        
-        return selected_task
 
+        selected_task = pending_tasks[0]
+        logger.debug(
+            f"Selected task {selected_task.id} for worker {worker_id} (FIFO - first in queue)"
+        )
+
+        return selected_task

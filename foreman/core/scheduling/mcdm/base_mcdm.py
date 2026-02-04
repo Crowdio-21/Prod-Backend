@@ -7,6 +7,7 @@ with the CrowdCompute TaskScheduler interface.
 
 import json
 import logging
+import sys
 import numpy as np
 from typing import List, Optional, Set, Dict
 from abc import ABC
@@ -23,12 +24,22 @@ logger.setLevel(logging.DEBUG)
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
 
-# File handler for MCDM decisions
-file_handler = logging.FileHandler(log_dir / "mcdm_decisions.log")
+# File handler for MCDM decisions with UTF-8 encoding
+file_handler = logging.FileHandler(log_dir / "mcdm_decisions.log", encoding="utf-8")
 file_handler.setLevel(logging.DEBUG)
 
 # Console handler for important info
-console_handler = logging.StreamHandler()
+# Use UTF-8 encoding on Windows to handle Unicode characters
+if sys.platform == "win32":
+    import io
+
+    # Create a stream with UTF-8 encoding for Windows
+    utf8_stream = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace"
+    )
+    console_handler = logging.StreamHandler(stream=utf8_stream)
+else:
+    console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
 # Detailed formatter

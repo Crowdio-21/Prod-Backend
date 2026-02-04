@@ -8,7 +8,10 @@ import os
 import uvicorn
 
 # Add parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Initialize global logging with UTF-8 support before anything else
+import common.logging_config
 
 
 if __name__ == "__main__":
@@ -21,7 +24,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Press Ctrl+C to stop the server")
     print("=" * 60)
-    
+
     try:
         # Use string import to avoid event loop issues
         uvicorn.run(
@@ -29,7 +32,7 @@ if __name__ == "__main__":
             host="0.0.0.0",
             port=8000,
             log_level="info",
-            reload=False
+            reload=False,
         )
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")
