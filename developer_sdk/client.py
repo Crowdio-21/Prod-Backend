@@ -140,7 +140,6 @@ class CrowdioClient:
         try:
             # # Serialize function
             func_code = serialize_function(func)
-            print(f"Serialized function \n{func_code}\n for remote execution.")
             # Create submission message
             message = create_submit_job_message(func_code, iterable, job_id)
 
