@@ -357,10 +357,17 @@ class WorkerMessageHandler:
                 )
                 await self.completion_handler.handle_job_completion(job_id)
 
-            # Assign next task to this worker
-            assigned = await self.task_dispatcher.assign_task_to_available_worker(
-                worker_id
-            )
+            # Assign next task to this worker            
+            no_of_all_workers = self.connection_manager.get_worker_count()
+            if no_of_all_workers == 1:
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id,
+                    worker_threshold = 1,
+                )                
+            else:
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id,
+                )
 
             if assigned:
                 print(f"📤 [RESULT DEBUG] Assigned next task to worker {worker_id}")
@@ -422,9 +429,16 @@ class WorkerMessageHandler:
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
             # Assign next task to this worker (the failed task will be retried by another worker)
-            assigned = await self.task_dispatcher.assign_task_to_available_worker(
-                worker_id
-            )
+            no_of_all_workers = self.connection_manager.get_worker_count()
+            if no_of_all_workers == 1:
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id,
+                    worker_threshold = 1,
+                )                
+            else:
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id,
+                )
 
             if assigned:
                 print(
