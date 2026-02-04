@@ -1,8 +1,8 @@
 """
-CrowdCompute - Distributed Python Computing SDK
+Crowdio - Distributed Python Computing SDK
 """
 
-from .api import connect, map, run, get, disconnect
+from .client import CrowdioClient
 
 __version__ = "0.1.0"
-__all__ = ["connect", "map", "run", "get", "disconnect"]
+__all__ = ["CrowdioClient"]
