@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example client script demonstrating CrowdCompute usage
+Example client script demonstrating Crowdio usage
 """
 
 import sys
@@ -9,18 +9,28 @@ import asyncio
 import time
 
 # Add parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from developer_sdk import connect, map, run, disconnect
+from developer_sdk import CrowdioClient
 
+ 
 
+print("Crowdio Example Client")
+print("=" * 40)
+
+# Create client instance
+crowdio = CrowdioClient()
+
+# Define remote functions using decorator
+@crowdio.remote
 def square(x):
     """Simple function to square a number"""
     import time
+
     time.sleep(0.1)  # Simulate some work
-    return x ** 2
+    return x**2
 
-
+@crowdio.remote
 def fibonacci(n):
     """Calculate fibonacci number"""
     if n <= 1:
@@ -30,11 +40,11 @@ def fibonacci(n):
         a, b = b, a + b
     return b
 
-
+@crowdio.remote
 def process_data(data):
     """Process some data"""
     import time
-    
+
     # Simulate some computation
     result = sum(data) * 2
     time.sleep(0.05)
@@ -43,73 +53,67 @@ def process_data(data):
 
 async def main():
     """Main example function"""
-    if len(sys.argv) != 2:
-        print("Usage: python example_client.py <foreman_host>")
-        print("Example: python example_client.py 192.168.1.10")
-        sys.exit(1)
-    
-    foreman_host = sys.argv[1]
-    
-    print("CrowdCompute Example Client")
-    print("=" * 40)
     
     try:
+        # Foreman host
+        foreman_host = "localhost"  # Change as needed
+        
         # Connect to foreman
         print(f"Connecting to foreman at {foreman_host}:9000...")
-        await connect(foreman_host, 9000)
+        await crowdio.init(foreman_host, 9000)
         print("Connected!")
-        
+
         # Example 1: Simple map operation
         print("\n1. Running square function on numbers 1-10...")
         numbers = list(range(1, 11))
         start_time = time.time()
-        results = await map(square, numbers)
+        results = await square.map(numbers)
         end_time = time.time()
-        
+
         print(f"Results: {results}")
         print(f"Time taken: {end_time - start_time:.2f} seconds")
-        
+
         # Example 2: Fibonacci calculation
         print("\n2. Calculating fibonacci numbers...")
         fib_inputs = [10, 15, 20, 25, 30]
         start_time = time.time()
-        fib_results = await map(fibonacci, fib_inputs)
+        fib_results = await fibonacci.map(fib_inputs)
         end_time = time.time()
-        
+
         print(f"Fibonacci results: {fib_results}")
         print(f"Time taken: {end_time - start_time:.2f} seconds")
-        
+
         # Example 3: Data processing
         print("\n3. Processing data arrays...")
         data_arrays = [
             [1, 2, 3, 4, 5],
             [10, 20, 30, 40, 50],
             [100, 200, 300, 400, 500],
-            [1000, 2000, 3000, 4000, 5000]
+            [1000, 2000, 3000, 4000, 5000],
         ]
         start_time = time.time()
-        processed_results = await map(process_data, data_arrays)
+        processed_results = await process_data.map(data_arrays)
         end_time = time.time()
-        
+
         print(f"Processed results: {processed_results}")
         print(f"Time taken: {end_time - start_time:.2f} seconds")
-        
+
         # # Example 4: Single function execution
         # print("\n4. Running single function...")
         # start_time = time.time()
-        # single_result = await run(square, 42)
+        # single_result = await crowdio.run(square, 42)
         # end_time = time.time()
-        
+
         # print(f"Single result: {single_result}")
         # print(f"Time taken: {end_time - start_time:.2f} seconds")
-        
+
         print("\nAll examples completed successfully!")
-        
+
     except Exception as e:
         print(f"Error: {e}")
     finally:
         # Disconnect
-        await disconnect()
+        await crowdio.disconnect()
         print("Disconnected from foreman")
 
 
