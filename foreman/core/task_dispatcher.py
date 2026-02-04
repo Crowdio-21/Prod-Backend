@@ -1,5 +1,10 @@
 """
 Task dispatching with pluggable scheduling algorithms
+
+Extended with mobile worker support:
+- Detects worker capabilities (sys.settrace support)
+- Instruments code for workers without trace support (Chaquopy)
+- Transparent to developers - they write pure logic
 """
 
 import json
@@ -14,8 +19,18 @@ from .utils import (
     _claim_task_for_worker,
     _get_latest_task_failure_with_checkpoint,
 )
-from common.protocol import create_assign_task_message, create_resume_task_message
+from common.protocol import (
+    create_assign_task_message, 
+    create_resume_task_message,
+    create_assign_task_message_with_metadata,
+    create_resume_task_message_with_metadata,
+)
 from common.serializer import get_runtime_info
+from common.code_instrumenter import (
+    instrument_for_mobile,
+    prepare_code_for_mobile_resume,
+    generate_mobile_checkpoint_wrapper,
+)
 
 
 class TaskDispatcher:
@@ -41,6 +56,81 @@ class TaskDispatcher:
         self.scheduler = scheduler
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+
+    # ==================== Code Preparation for Mobile Workers ====================
+
+    def _prepare_code_for_worker(
+        self,
+        func_code: str,
+        worker_id: str,
+        task_metadata: Optional[Dict[str, Any]] = None,
+        checkpoint_state: Optional[Dict[str, Any]] = None,
+        is_resume: bool = False
+    ) -> str:
+        """
+        Prepare function code based on worker capabilities.
+        
+        For workers that don't support sys.settrace() (e.g., Chaquopy on Android),
+        this method instruments the code with explicit checkpoint calls.
+        
+        This is TRANSPARENT to developers - they write pure logic, and the framework
+        automatically prepares the code for each worker type.
+        
+        Args:
+            func_code: Original function source code
+            worker_id: Target worker identifier
+            task_metadata: Checkpoint configuration from @task decorator
+            checkpoint_state: Checkpoint state for resumed tasks
+            is_resume: Whether this is a resumed task
+            
+        Returns:
+            Prepared code (possibly instrumented for mobile workers)
+        """
+        # Check if worker needs code instrumentation
+        if not self.connection_manager.needs_code_instrumentation(worker_id):
+            # Worker supports sys.settrace() - no instrumentation needed
+            return func_code
+        
+        # Worker needs instrumentation (e.g., Chaquopy)
+        print(f"TaskDispatcher: Preparing instrumented code for mobile worker {worker_id}")
+        
+        # Get checkpoint state variables from metadata
+        checkpoint_state_vars = []
+        if task_metadata:
+            checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
+        
+        if not checkpoint_state_vars:
+            # No checkpoint variables declared - can't instrument effectively
+            print(f"TaskDispatcher: No checkpoint_state vars declared, skipping instrumentation")
+            return func_code
+        
+        try:
+            if is_resume and checkpoint_state:
+                # Resumed task - apply both resume transformation and instrumentation
+                prepared_code = prepare_code_for_mobile_resume(
+                    func_code=func_code,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_state_vars=checkpoint_state_vars
+                )
+            else:
+                # Fresh task - just instrument for checkpoint capture
+                prepared_code, num_loops = instrument_for_mobile(
+                    func_code=func_code,
+                    checkpoint_state_vars=checkpoint_state_vars
+                )
+                print(f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker")
+            
+            # Prepend the mobile checkpoint wrapper
+            wrapper = generate_mobile_checkpoint_wrapper()
+            prepared_code = wrapper + "\n\n" + prepared_code
+            
+            return prepared_code
+            
+        except Exception as e:
+            print(f"TaskDispatcher: Code instrumentation failed: {e}, using original code")
+            import traceback
+            traceback.print_exc()
+            return func_code
 
     # ==================== Orphan Task Recovery ====================
 
@@ -228,6 +318,8 @@ class TaskDispatcher:
         If the task has checkpoint data from a previous failure, sends a RESUME_TASK
         message so the worker can continue from where the last worker left off.
         Otherwise, sends a regular ASSIGN_TASK message to start fresh.
+        
+        Includes task_metadata for declarative checkpointing if configured.
 
         Args:
             job_id: Job identifier
@@ -240,32 +332,76 @@ class TaskDispatcher:
             True if assignment successful, False otherwise
         """
         try:
+            # Get task_metadata from job_manager for declarative checkpointing
+            task_metadata = self.job_manager.get_task_metadata(job_id)
+            
             # Check if we have checkpoint data for this task from a previous failure
             checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
             
+            # Prepare code for the target worker (handles mobile instrumentation)
+            checkpoint_state = None
+            is_resume = False
+            
+            if checkpoint_data and checkpoint_data.get("state"):
+                is_resume = True
+                checkpoint_state = checkpoint_data.get("state", {})
+                
+            # Prepare code based on worker capabilities
+            prepared_code = self._prepare_code_for_worker(
+                func_code=func_code,
+                worker_id=worker_id,
+                task_metadata=task_metadata,
+                checkpoint_state=checkpoint_state,
+                is_resume=is_resume
+            )
+            
             if checkpoint_data and checkpoint_data.get("state"):
                 # We have checkpoint data - send RESUME_TASK message
-                message = create_resume_task_message(
-                    task_id=task_id,
-                    job_id=job_id,
-                    func_code=func_code,
-                    checkpoint_state=checkpoint_data.get("state", {}),
-                    task_args=[task_args] if not isinstance(task_args, list) else task_args,
-                    task_kwargs={},
-                    progress_percent=checkpoint_data.get("progress_percent", 0),
-                    checkpoint_count=checkpoint_data.get("checkpoint_count", 0)
-                )
-                is_resume = True
+                if task_metadata:
+                    # Use extended message with task_metadata
+                    message = create_resume_task_message_with_metadata(
+                        task_id=task_id,
+                        job_id=job_id,
+                        func_code=prepared_code,  # Use prepared code
+                        checkpoint_state=checkpoint_data.get("state", {}),
+                        task_args=[task_args] if not isinstance(task_args, list) else task_args,
+                        task_kwargs={},
+                        progress_percent=checkpoint_data.get("progress_percent", 0),
+                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
+                        task_metadata=task_metadata
+                    )
+                else:
+                    # Use standard message
+                    message = create_resume_task_message(
+                        task_id=task_id,
+                        job_id=job_id,
+                        func_code=prepared_code,  # Use prepared code
+                        checkpoint_state=checkpoint_data.get("state", {}),
+                        task_args=[task_args] if not isinstance(task_args, list) else task_args,
+                        task_kwargs={},
+                        progress_percent=checkpoint_data.get("progress_percent", 0),
+                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0)
+                    )
                 print(
                     f"TaskDispatcher: 🔄 Resuming task {task_id} from checkpoint "
                     f"(progress: {checkpoint_data.get('progress_percent', 0):.1f}%)"
                 )
             else:
                 # No checkpoint - send regular ASSIGN_TASK message
-                message = create_assign_task_message(
-                    func_code, [task_args], task_id, job_id  # Wrap in list for single task
-                )
-                is_resume = False
+                if task_metadata:
+                    # Use extended message with task_metadata
+                    message = create_assign_task_message_with_metadata(
+                        func_code=prepared_code,  # Use prepared code
+                        task_args=[task_args],  # Wrap in list for single task
+                        task_id=task_id,
+                        job_id=job_id,
+                        task_metadata=task_metadata
+                    )
+                else:
+                    # Use standard message
+                    message = create_assign_task_message(
+                        prepared_code, [task_args], task_id, job_id  # Use prepared code
+                    )
 
             # Get worker websocket
             websocket = self.connection_manager.get_worker_websocket(worker_id)

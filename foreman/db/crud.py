@@ -7,9 +7,25 @@ from foreman.schema.schema import JobStats, WorkerFailureStats
 from .models import *
 
 
-async def create_job(session: AsyncSession, job_id: str, total_tasks: int) -> JobModel:
-    """Create a new job"""
-    job = JobModel(id=job_id, total_tasks=total_tasks)
+async def create_job(
+    session: AsyncSession, 
+    job_id: str, 
+    total_tasks: int,
+    supports_checkpointing: bool = False
+) -> JobModel:
+    """Create a new job
+    
+    Args:
+        session: Database session
+        job_id: Unique job identifier
+        total_tasks: Total number of tasks in the job
+        supports_checkpointing: Whether this job supports declarative checkpointing
+    """
+    job = JobModel(
+        id=job_id, 
+        total_tasks=total_tasks,
+        supports_checkpointing=supports_checkpointing
+    )
     session.add(job)
     await session.commit()
     await session.refresh(job)
