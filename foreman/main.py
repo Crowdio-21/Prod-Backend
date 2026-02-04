@@ -6,6 +6,9 @@ from .db.base import init_db
 from .core.ws_manager import WebSocketManager
 from . import api
 
+# Initialize global logging with UTF-8 support
+import common.logging_config
+
 
 # Global WebSocket manager
 ws_manager: WebSocketManager = None
