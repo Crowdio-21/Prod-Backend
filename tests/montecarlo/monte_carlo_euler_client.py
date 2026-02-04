@@ -57,44 +57,36 @@ def monte_carlo_euler_worker(num_trials):
     """
     import random
     import time
-    import builtins
     
     start = time.time()
     
     # Minimum execution time to ensure checkpointing (in seconds)
-    # Checkpoint interval is 5s, so 25s ensures at least 4 checkpoints
     MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
     
-    # Check if we're resuming from a checkpoint
-    is_resumed = False
-    start_trial = 0
+    # ========================================================================
+    # CHECKPOINT STATE VARIABLES - just declare them normally!
+    # Framework handles resume automatically - no manual checkpoint code needed!
+    # ========================================================================
+    trials_completed = 0
     total_count = 0
+    estimated_e = 0.0
+    progress_percent = 0.0  # Include in checkpoint_state for progress tracking
     
-    if hasattr(builtins, '_checkpoint_state'):
-        existing_state = builtins._checkpoint_state
-        if existing_state.get("_is_resumed", False):
-            is_resumed = True
-            start_trial = existing_state.get("trials_completed", 0)
-            total_count = existing_state.get("total_count", 0)
-            print(f"[Worker] RESUMING from checkpoint:")
-            print(f"         Trials completed: {start_trial:,}")
-            print(f"         Total count: {total_count:,}")
-            print(f"         Progress: {existing_state.get('progress_percent', 0):.1f}%")
-            print(f"         Estimated e so far: {existing_state.get('estimated_e', 0):.6f}")
+    random.seed()  # Ensure different seeds on different workers
     
-    # Create/update checkpoint state object
-    checkpoint_state = {
-        "trials_completed": start_trial,
-        "total_count": total_count,
-        "num_trials": num_trials,
-        "progress_percent": (start_trial / num_trials) * 100 if num_trials > 0 else 0,
-        "estimated_e": total_count / start_trial if start_trial > 0 else 0.0,
-        "start_time": start,
-        "_is_resumed": is_resumed
-    }
+    # Run Monte Carlo trials with periodic state updates
+    log_interval = max(1, num_trials // 100)  # Log every 1%
     
-    # Make checkpoint state accessible globally via builtins for checkpoint handler
-    builtins._checkpoint_state = checkpoint_state
+    # Calculate delay per update to stretch execution time for checkpointing
+    estimated_time_per_trial = 0.00001  # Rough estimate: 10 microseconds per trial
+    estimated_total_time = num_trials * estimated_time_per_trial
+    
+    if estimated_total_time < MIN_EXECUTION_TIME:
+        delay_per_update = (MIN_EXECUTION_TIME - estimated_total_time) / 100
+    else:
+        delay_per_update = 0
+    
+    print(f"[Worker] Starting {num_trials:,} trials (target runtime: {MIN_EXECUTION_TIME}s)")
     
     # Minimum execution time to ensure checkpointing (in seconds)
     MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
@@ -187,10 +179,6 @@ def monte_carlo_euler_worker(num_trials):
             "status": "error",
             "error": str(e)
         }
-    finally:
-        # Clean up checkpoint state
-        if hasattr(builtins, '_checkpoint_state'):
-            delattr(builtins, '_checkpoint_state')
 
 
 # =========================================================
