@@ -152,8 +152,18 @@ class WebSocketManager:
                 print(
                     f"[CLEANUP DEBUG] Worker {worker_id} disconnecting with {len(pending_tasks)} pending tasks: {pending_tasks}"
                 )
+                
+                # Record failures for tasks assigned to this worker BEFORE removing from connection manager
+                # This captures checkpoint data for task resumption
+                await self._record_worker_disconnection_failures(worker_id)
+                
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")
+                
+                # Recover orphaned tasks for reassignment to other workers
+                recovered = await self.task_dispatcher.recover_orphaned_tasks()
+                if recovered > 0:
+                    print(f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected")
             else:
                 print(
                     f"[CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
@@ -162,7 +172,7 @@ class WebSocketManager:
                 # Recover any orphaned tasks that were assigned to this worker
                 recovered = await self.task_dispatcher.recover_orphaned_tasks()
                 if recovered > 0:
-                    print(f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected")
+                    print(f"Recovered {recovered} orphaned tasks after worker disconnected")
         
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
@@ -248,6 +258,25 @@ class WebSocketManager:
             print(f"Error recording worker disconnection failures: {e}")
             import traceback
             traceback.print_exc()
+            
+    async def _get_worker_pending_tasks(self, worker_id: str) -> list:
+        """Get list of pending task IDs for a worker (for debugging)"""
+        try:
+            from foreman.db.base import async_session
+            from foreman.db.models import TaskModel
+            from sqlalchemy import select
+
+            async with async_session() as session:
+                result = await session.execute(
+                    select(TaskModel.id, TaskModel.status)
+                    .where(TaskModel.worker_id == worker_id)
+                    .where(TaskModel.status == "assigned")
+                )
+                tasks = result.all()
+                return [(t.id, t.status) for t in tasks]
+        except Exception as e:
+            print(f"⚠️ [CLEANUP DEBUG] Error getting pending tasks: {e}")
+            return []
     
     async def ping_workers(self):
         """Periodically ping workers to keep connections alive"""
