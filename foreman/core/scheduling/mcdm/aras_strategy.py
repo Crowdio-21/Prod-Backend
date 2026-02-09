@@ -1,7 +1,5 @@
 """
 ARAS (Additive Ratio Assessment) Strategy
-
-Ported from TEMP_ALGO_FOLDER/foreman_server/strategies/aras.py
 """
 
 import numpy as np
@@ -11,23 +9,18 @@ from .base_strategy import AllocationStrategy
 class ARASStrategy(AllocationStrategy):
     """
     ARAS - Additive Ratio Assessment
-
     Ranks devices by comparing them to an optimal alternative (A0).
-    A0 is constructed from the best values of each criterion.
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
         """
-        Rank devices using ARAS algorithm
-
-        Args:
-            decision_matrix: (n_devices x m_criteria) numpy array
-            criteria_types: List of +1 (benefit) or -1 (cost)
-
-        Returns:
-            List of device indices sorted by rank (best to worst)
+        Rank devices using ARAS algorithm with Dynamic Weighting
         """
         rows, cols = decision_matrix.shape
+        if rows == 0: return []
+
+        # --- GET WEIGHTS (Dynamic or Static) ---
+        active_weights = self._get_active_weights(decision_matrix)
 
         # 1. Determine Optimal Alternative (A0)
         a0 = np.zeros(cols)
@@ -57,15 +50,14 @@ class ARASStrategy(AllocationStrategy):
         final_norm = norm_matrix / (col_sums + 1e-9)
 
         # 3. Weighted Matrix & Optimality Function (Si)
-        weighted_matrix = final_norm * self.weights
+        # USES ACTIVE WEIGHTS HERE
+        weighted_matrix = final_norm * active_weights
         s_values = np.sum(weighted_matrix, axis=1)
 
         # 4. Utility Degree (Ki)
         s0 = s_values[0] if s_values[0] != 0 else 1.0
         k_values = s_values[1:] / s0
 
-        # Store scores for logging
         self._last_scores = k_values
 
-        # Return indices sorted by utility degree (descending)
         return np.argsort(k_values)[::-1].tolist()

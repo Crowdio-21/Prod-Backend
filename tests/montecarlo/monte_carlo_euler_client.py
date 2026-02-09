@@ -20,7 +20,7 @@ import os
 import json
 import time
 
-# Add parent directory to Python path
+# Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from developer_sdk import connect, map as distributed_map, disconnect, crowdio

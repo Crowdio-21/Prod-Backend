@@ -483,7 +483,7 @@ class FastAPIWorker:
                     is_base = checkpoint_msg.get("is_base", False)
                     checkpoint_type = "BASE" if is_base else "DELTA"
                     
-                    print(f"[Checkpoint] Task {task_id} | {checkpoint_type} #{checkpoint_id} | "
+                    print(f"[Checkpoint] Resumed task {task_id} | {checkpoint_type} #{checkpoint_id} | "
                           f"Progress: {progress:.1f}%")
             except Exception as e:
                 print(f"[Error] Error sending checkpoint: {e}")
@@ -557,7 +557,7 @@ class FastAPIWorker:
 
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Task execution failed: {e}"
+            error_msg = f"Resumed task execution failed: {e}"
 
             print(f"[Error] Task failed: {error_msg}")
 
