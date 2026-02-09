@@ -277,13 +277,40 @@ class TaskDispatcher:
             f"Total available workers: {num_available}, threshold: {worker_threshold}"
         )
 
-        # If not enough workers available, wait for more
+        # If not enough workers available, but at least one worker is present,
+        # perform a per-worker assignment (assign one pending task to the worker that became available).
         if num_available < worker_threshold:
+            if num_available == 0:
+                print(
+                    f"TaskDispatcher: Waiting for more workers "
+                    f"({num_available}/{worker_threshold} available)"
+                )
+                return False
+
+            # One or more workers available but below threshold - assign a single task to the available worker
             print(
-                f"TaskDispatcher: Waiting for more workers "
-                f"({num_available}/{worker_threshold} available)"
+                f"TaskDispatcher: Fewer workers than threshold ({num_available}/{worker_threshold}), "
+                f"attempting single-worker assignment to {worker_id}"
             )
-            return False
+
+            # Get the earliest pending task
+            pending_tasks = await _get_pending_tasks()
+            if not pending_tasks:
+                print(f"TaskDispatcher: No pending tasks available for single-worker assignment")
+                return False
+
+            # Pick the first pending task
+            task = pending_tasks[0]
+            job_id = task.job_id
+            func_code = self.job_manager.get_func_code(job_id)
+
+            if not func_code:
+                print(f"TaskDispatcher: No func_code found for job {job_id}, skipping")
+                return False
+
+            task_args = json.loads(task.args) if task.args else []
+            success = await self._assign_task_to_worker(job_id, task.id, func_code, task_args, worker_id)
+            return success
 
         # Enough workers available - trigger batch assignment for all jobs
         print(

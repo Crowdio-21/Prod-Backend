@@ -18,14 +18,17 @@ class AllocationStrategy(ABC):
     Enables Strategy Pattern for hot-swapping algorithms at runtime.
     """
 
-    def __init__(self, criteria_weights: np.ndarray = None):
+    def __init__(self, criteria_weights: np.ndarray = None, use_dynamic_weighting: bool = True):
         """
         Initialize allocation strategy
 
         Args:
             criteria_weights: Numpy array of weights for each criterion
+            use_dynamic_weighting: Whether to use Shannon Entropy for dynamic weight calculation
+                                 If False, always uses static config weights
         """
         self.weights = criteria_weights
+        self.use_dynamic_weighting = use_dynamic_weighting
         self._last_scores = None
 
     def _calculate_entropy_weights(self, matrix: np.ndarray) -> Optional[np.ndarray]:
@@ -85,17 +88,27 @@ class AllocationStrategy(ABC):
     def _get_active_weights(self, decision_matrix: np.ndarray) -> np.ndarray:
         """
         Helper to determine whether to use Dynamic (Entropy) or Static (Config) weights.
+        
+        Decision logic:
+        1. If use_dynamic_weighting=True: Try Shannon Entropy first, fallback to static
+        2. If use_dynamic_weighting=False: Skip entropy, use static config weights directly
+        3. Final fallback: Equal weights if nothing else works
         """
         cols = decision_matrix.shape[1]
         
-        # 1. Try Dynamic Weights
-        dynamic_weights = self._calculate_entropy_weights(decision_matrix)
-        
-        if dynamic_weights is not None:
-            logger.debug(f"Using DYNAMIC (Shannon Entropy) weights: {np.round(dynamic_weights, 3)}")
-            return dynamic_weights
+        # 1. Try Dynamic Weights (if enabled)
+        if self.use_dynamic_weighting:
+            dynamic_weights = self._calculate_entropy_weights(decision_matrix)
             
-        # 2. Fallback to Static Config Weights
+            if dynamic_weights is not None:
+                logger.debug(f"Using DYNAMIC (Shannon Entropy) weights: {np.round(dynamic_weights, 3)}")
+                return dynamic_weights
+            else:
+                logger.debug("Shannon Entropy returned no weights (insufficient data variance)")
+        else:
+            logger.debug("Dynamic weighting DISABLED - skipping Shannon Entropy calculation")
+            
+        # 2. Use Static Config Weights
         if self.weights is not None and len(self.weights) == cols:
             logger.debug(f"Using STATIC (Config) weights: {self.weights}")
             return self.weights
@@ -128,3 +141,13 @@ class AllocationStrategy(ABC):
             weights: New weights array
         """
         self.weights = weights
+
+    def set_dynamic_weighting(self, enabled: bool):
+        """
+        Enable or disable Shannon Entropy dynamic weighting at runtime
+
+        Args:
+            enabled: True to use dynamic weighting, False to use static config only
+        """
+        self.use_dynamic_weighting = enabled
+        logger.info(f"Dynamic weighting (Shannon Entropy) {'ENABLED' if enabled else 'DISABLED'}")

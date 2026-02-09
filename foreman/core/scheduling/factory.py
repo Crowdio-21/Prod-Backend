@@ -88,7 +88,7 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
 
 
 # Scheduler factory
-async def create_scheduler_async(scheduler_type: str = "fifo") -> TaskScheduler:
+async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
     """
     Factory function to create scheduler instances (async version for MCDM)
 
@@ -96,6 +96,7 @@ async def create_scheduler_async(scheduler_type: str = "fifo") -> TaskScheduler:
         scheduler_type: Type of scheduler
                        Simple: "fifo", "round_robin", "performance", "least_loaded", "priority"
                        MCDM: "aras", "edas", "mabac", "wrr"
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
 
     Returns:
         TaskScheduler instance
@@ -129,12 +130,13 @@ async def create_scheduler_async(scheduler_type: str = "fifo") -> TaskScheduler:
             criteria_weights=config["criteria_weights"],
             criteria_names=config["criteria_names"],
             criteria_types=config["criteria_types"],
+            use_dynamic_weighting=use_dynamic_weighting,
         )
 
     raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
 
-def create_scheduler(scheduler_type: str = "fifo") -> TaskScheduler:
+def create_scheduler(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
     """
     Synchronous factory function for backward compatibility
 
@@ -142,6 +144,7 @@ def create_scheduler(scheduler_type: str = "fifo") -> TaskScheduler:
 
     Args:
         scheduler_type: Type of scheduler (simple schedulers only)
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
 
     Returns:
         TaskScheduler instance
@@ -170,6 +173,7 @@ def create_scheduler(scheduler_type: str = "fifo") -> TaskScheduler:
                 criteria_weights=config["criteria_weights"],
                 criteria_names=config["criteria_names"],
                 criteria_types=config["criteria_types"],
+                use_dynamic_weighting=use_dynamic_weighting,
             )
         raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
