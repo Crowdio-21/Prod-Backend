@@ -1,7 +1,5 @@
 """
 WRR (Weighted Round Robin) Strategy
-
-Ported from TEMP_ALGO_FOLDER/foreman_server/strategies/wrr.py
 """
 
 import numpy as np
@@ -11,36 +9,32 @@ from .base_strategy import AllocationStrategy
 class WRRStrategy(AllocationStrategy):
     """
     WRR - Weighted Round Robin
-
     Simplistic baseline: rank simply based on weighted sum of benefit criteria.
-    This is a lightweight alternative to more complex MCDM algorithms.
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
         """
-        Rank devices using simple weighted sum
-
-        Args:
-            decision_matrix: (n_devices x m_criteria) numpy array
-            criteria_types: List of +1 (benefit) or -1 (cost)
-
-        Returns:
-            List of device indices sorted by rank (best to worst)
+        Rank devices using simple weighted sum with Dynamic Weighting
         """
-        # Simple approach: weighted sum considering benefit vs cost
-        weighted_scores = np.zeros(decision_matrix.shape[0])
+        rows, cols = decision_matrix.shape
+        if rows == 0: return []
 
-        for j in range(decision_matrix.shape[1]):
+        # --- GET WEIGHTS (Dynamic or Static) ---
+        active_weights = self._get_active_weights(decision_matrix)
+
+        # Simple approach: weighted sum considering benefit vs cost
+        weighted_scores = np.zeros(rows)
+
+        for j in range(cols):
             if criteria_types[j] == 1:  # Benefit - higher is better
-                weighted_scores += decision_matrix[:, j] * self.weights[j]
+                weighted_scores += decision_matrix[:, j] * active_weights[j]
             else:  # Cost - lower is better, so invert
                 max_val = np.max(decision_matrix[:, j])
                 if max_val > 0:
                     inverted = max_val - decision_matrix[:, j]
-                    weighted_scores += inverted * self.weights[j]
+                    weighted_scores += inverted * active_weights[j]
+                # If max is 0 (all zeros), cost contribution is 0
 
-        # Store scores for logging
         self._last_scores = weighted_scores
 
-        # Return indices sorted by weighted scores descending
         return np.argsort(weighted_scores)[::-1].tolist()
