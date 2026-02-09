@@ -326,7 +326,7 @@ async def main():
     """
     # Parse command line arguments
     total_trials = 1000000  # Default: 1 million trials (reduced for faster testing)
-    num_workers = 8  # Default: 8 workers
+    num_workers = 5  # Default: 8 workers
     foreman_host = "localhost"
     
     if len(sys.argv) > 1:

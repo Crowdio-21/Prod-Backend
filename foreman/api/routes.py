@@ -274,3 +274,110 @@ async def get_recovery_events(limit: int = 20, db: AsyncSession = Depends(get_db
     events.sort(key=lambda x: x['timestamp'] or '', reverse=True)
     
     return events[:limit]
+
+# ==================== Scheduling Visualization API ====================
+
+@router.get("/api/scheduling-info")
+async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
+    """
+    Get comprehensive scheduling visualization data.
+    
+    Returns:
+    - Active scheduler algorithm and config
+    - Per-worker: device specs, score, assigned tasks, task history
+    - Per-job: task distribution across workers (Gantt-style data)
+    """
+    import json
+    from sqlalchemy.orm import selectinload
+
+    # 1. Get active scheduler config
+    from foreman.db.models import SchedulerConfigModel
+    sched_result = await db.execute(
+        select(SchedulerConfigModel).where(SchedulerConfigModel.is_active == True)
+    )
+    active_config = sched_result.scalar_one_or_none()
+
+    scheduler_info = None
+    if active_config:
+        scheduler_info = {
+            "algorithm": active_config.algorithm_name,
+            "description": active_config.description,
+            "criteria_weights": json.loads(active_config.criteria_weights) if active_config.criteria_weights else [],
+            "criteria_names": json.loads(active_config.criteria_names) if active_config.criteria_names else [],
+            "criteria_types": json.loads(active_config.criteria_types) if active_config.criteria_types else [],
+        }
+    else:
+        # Check if simple scheduler is being used (default FIFO)
+        scheduler_info = {
+            "algorithm": "fifo",
+            "description": "First-In-First-Out (default)",
+            "criteria_weights": [],
+            "criteria_names": [],
+            "criteria_types": [],
+        }
+
+    # 2. Get all workers with full device specs
+    workers = await get_workers(db)
+    workers_data = []
+    for w in workers:
+        # Compute success rate
+        total = (w.total_tasks_completed or 0) + (w.total_tasks_failed or 0)
+        success_rate = (w.total_tasks_completed / total * 100) if total > 0 else 100.0
+
+        workers_data.append({
+            "id": w.id,
+            "status": w.status,
+            "device_type": w.device_type or "Unknown",
+            "os_type": w.os_type,
+            "cpu_model": w.cpu_model,
+            "cpu_cores": w.cpu_cores,
+            "cpu_frequency_mhz": w.cpu_frequency_mhz,
+            "ram_total_mb": w.ram_total_mb,
+            "ram_available_mb": w.ram_available_mb,
+            "battery_level": w.battery_level,
+            "is_charging": w.is_charging,
+            "current_task_id": w.current_task_id,
+            "total_tasks_completed": w.total_tasks_completed or 0,
+            "total_tasks_failed": w.total_tasks_failed or 0,
+            "success_rate": round(success_rate, 1),
+            "last_seen": w.last_seen.isoformat() if w.last_seen else None,
+        })
+
+    # 3. Get all jobs with task assignments for Gantt-style view
+    jobs_result = await db.execute(
+        select(JobModel)
+        .options(selectinload(JobModel.tasks))
+        .order_by(JobModel.created_at.desc())
+        .limit(10)
+    )
+    jobs = jobs_result.scalars().all()
+
+    jobs_data = []
+    for job in jobs:
+        task_assignments = []
+        for task in job.tasks:
+            task_assignments.append({
+                "task_id": task.id,
+                "worker_id": task.worker_id,
+                "status": task.status,
+                "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            })
+        
+        # Sort tasks by assigned_at
+        task_assignments.sort(key=lambda t: t["assigned_at"] or "")
+
+        jobs_data.append({
+            "job_id": job.id,
+            "status": job.status,
+            "total_tasks": job.total_tasks or 0,
+            "completed_tasks": job.completed_tasks or 0,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "task_assignments": task_assignments,
+        })
+
+    return {
+        "scheduler": scheduler_info,
+        "workers": workers_data,
+        "jobs": jobs_data,
+    }

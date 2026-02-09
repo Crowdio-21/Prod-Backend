@@ -437,6 +437,7 @@
             <button class="tab" onclick="showTab('checkpointing')">Checkpointing</button>
             <button class="tab" onclick="showTab('jobs')">Jobs</button>
             <button class="tab" onclick="showTab('workers')">Workers</button>
+            <button class="tab" onclick="showTab('scheduling')">Scheduling</button>
         </div>
         
         <!-- Overview Tab -->
@@ -733,6 +734,62 @@
                 </table>
             </div>
         </div>
+
+        <!-- Scheduling Tab -->
+        <div id="scheduling-tab" class="tab-content">
+            <!-- Active Scheduler Info -->
+            <div class="section">
+                <h2>Active Scheduler</h2>
+                <div class="stats" id="scheduler-stats">
+                    <div class="stat-card highlight">
+                        <div class="stat-number" id="sched-algorithm">-</div>
+                        <div class="stat-label">Algorithm</div>
+                    </div>
+                    <div class="stat-card success">
+                        <div class="stat-number" id="sched-workers">-</div>
+                        <div class="stat-label">Workers</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-number" id="sched-criteria">-</div>
+                        <div class="stat-label">Criteria</div>
+                    </div>
+                </div>
+                <div id="sched-criteria-details" style="margin-top:10px;"></div>
+            </div>
+
+            <!-- Worker Rankings -->
+            <div class="section">
+                <h2>Worker Rankings (by Scheduling Score)</h2>
+                <div id="worker-rankings-chart" style="margin-bottom: 15px;">
+                    <canvas id="workerRankChart" height="250"></canvas>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Rank</th>
+                            <th>Worker ID</th>
+                            <th>Status</th>
+                            <th>Device</th>
+                            <th>CPU Cores</th>
+                            <th>RAM Avail</th>
+                            <th>Battery</th>
+                            <th>Success Rate</th>
+                            <th>Score</th>
+                            <th>Tasks Done</th>
+                            <th>Current Task</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sched-workers-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Task Distribution Gantt -->
+            <div class="section">
+                <h2>Task Distribution Across Workers</h2>
+                <p style="color:#888;font-size:0.9em;">Shows how tasks from each job were assigned to workers</p>
+                <div id="gantt-container"></div>
+            </div>
+        </div>
     </div>
     
     <div class="refresh-indicator" id="refresh-indicator">Refreshing...</div>
@@ -839,6 +896,8 @@
             } else if (tabName === 'checkpointing') {
                 loadJobsForCheckpointSelector();
                 loadRecoveryEvents();
+            } else if (tabName === 'scheduling') {
+                loadSchedulingInfo();
             }
         }
         
@@ -1097,6 +1156,186 @@
             }
         }
         
+        // ==================== Scheduling Visualization ====================
+        let workerRankChart = null;
+
+        async function loadSchedulingInfo() {
+            try {
+                const response = await fetch('/api/scheduling-info');
+                const data = await response.json();
+                renderSchedulerInfo(data.scheduler);
+                renderWorkerRankings(data.workers);
+                renderGanttChart(data.jobs, data.workers);
+            } catch (error) {
+                console.error('Error loading scheduling info:', error);
+            }
+        }
+
+        function renderSchedulerInfo(scheduler) {
+            document.getElementById('sched-algorithm').textContent = scheduler.algorithm.toUpperCase();
+            document.getElementById('sched-criteria').textContent = scheduler.criteria_names.length || 'N/A';
+
+            const detailsDiv = document.getElementById('sched-criteria-details');
+            if (scheduler.criteria_names.length > 0) {
+                let html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
+                scheduler.criteria_names.forEach((name, i) => {
+                    const weight = scheduler.criteria_weights[i];
+                    const type = scheduler.criteria_types[i] === 1 ? 'Benefit' : 'Cost';
+                    const typeColor = type === 'Benefit' ? '#27ae60' : '#e74c3c';
+                    html += `<div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 14px;font-size:0.85em;">
+                        <b>${name.replace(/_/g, ' ')}</b><br>
+                        <span style="color:#888;">Weight: ${(weight * 100).toFixed(0)}%</span>
+                        <span style="color:${typeColor};margin-left:6px;">${type}</span>
+                    </div>`;
+                });
+                html += '</div>';
+                detailsDiv.innerHTML = html;
+            } else {
+                detailsDiv.innerHTML = '<span style="color:#888;">Simple scheduler — no MCDM criteria configured</span>';
+            }
+        }
+
+        function renderWorkerRankings(workers) {
+            document.getElementById('sched-workers').textContent = workers.length;
+
+            // Calculate scores and sort
+            const scored = workers.map(w => {
+                const score = parseFloat(calculateDeviceScore(w));
+                return { ...w, score };
+            }).sort((a, b) => b.score - a.score);
+
+            // Render table
+            const tbody = document.getElementById('sched-workers-body');
+            tbody.innerHTML = '';
+            scored.forEach((w, idx) => {
+                const row = document.createElement('tr');
+                const ramAvail = w.ram_available_mb ? (w.ram_available_mb / 1024).toFixed(1) + ' GB' : '-';
+                const battery = w.is_charging ? 'Charging' : (w.battery_level != null ? w.battery_level.toFixed(0) + '%' : 'N/A');
+                const currentTask = w.current_task_id ? w.current_task_id.substring(0, 12) + '...' : '<span style="color:#888">idle</span>';
+                row.innerHTML = `
+                    <td><b>#${idx + 1}</b></td>
+                    <td>${w.id.substring(0, 16)}...</td>
+                    <td><span class="status status-${w.status}">${w.status}</span></td>
+                    <td>${w.device_type}</td>
+                    <td>${w.cpu_cores || '-'}</td>
+                    <td>${ramAvail}</td>
+                    <td>${battery}</td>
+                    <td>${w.success_rate}%</td>
+                    <td><span class="metric-value ${getScoreClass(w.score)}">${w.score.toFixed(1)}</span></td>
+                    <td>${w.total_tasks_completed}</td>
+                    <td>${currentTask}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            // Render bar chart
+            const ctx = document.getElementById('workerRankChart');
+            if (!ctx) return;
+
+            if (workerRankChart) workerRankChart.destroy();
+
+            const labels = scored.map((w, i) => 'W' + (i + 1) + ': ' + w.id.substring(0, 8));
+            const scores = scored.map(w => w.score);
+            const bgColors = scored.map(w => {
+                if (w.score >= 70) return colors.success;
+                if (w.score >= 40) return colors.warning;
+                return colors.danger;
+            });
+
+            workerRankChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Device Score',
+                        data: scores,
+                        backgroundColor: bgColors,
+                        borderRadius: 4,
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { min: 0, max: 100, title: { display: true, text: 'Score (0-100)' } }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                afterLabel: function(context) {
+                                    const w = scored[context.dataIndex];
+                                    return `Cores: ${w.cpu_cores || '?'} | RAM: ${w.ram_available_mb ? (w.ram_available_mb/1024).toFixed(1)+'GB' : '?'} | Success: ${w.success_rate}%`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderGanttChart(jobs, workers) {
+            const container = document.getElementById('gantt-container');
+            if (!jobs || jobs.length === 0) {
+                container.innerHTML = '<p style="color:#888;">No jobs to display</p>';
+                return;
+            }
+
+            // Build worker color map
+            const workerIds = [...new Set(workers.map(w => w.id))];
+            const ganttColors = ['#3498db', '#27ae60', '#e74c3c', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#2980b9', '#c0392b', '#16a085'];
+            const workerColorMap = {};
+            workerIds.forEach((wid, i) => { workerColorMap[wid] = ganttColors[i % ganttColors.length]; });
+
+            let html = '';
+            jobs.forEach(job => {
+                if (!job.task_assignments || job.task_assignments.length === 0) return;
+
+                // Group tasks by worker
+                const byWorker = {};
+                job.task_assignments.forEach(t => {
+                    const wid = t.worker_id || 'unassigned';
+                    if (!byWorker[wid]) byWorker[wid] = [];
+                    byWorker[wid].push(t);
+                });
+
+                html += `<div style="background:#fff;border-radius:10px;padding:15px;margin-bottom:15px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">`;
+                html += `<h3 style="margin:0 0 10px;font-size:0.95em;">Job: ${job.job_id.substring(0, 20)}... <span class="status status-${job.status}">${job.status}</span> (${job.completed_tasks}/${job.total_tasks} tasks)</h3>`;
+
+                // Render a row per worker with task blocks
+                Object.keys(byWorker).forEach(wid => {
+                    const tasks = byWorker[wid];
+                    const color = workerColorMap[wid] || '#999';
+                    const shortId = wid === 'unassigned' ? 'Unassigned' : wid.substring(0, 12) + '...';
+
+                    html += `<div style="display:flex;align-items:center;margin-bottom:6px;">`;
+                    html += `<div style="width:140px;font-size:0.8em;color:#555;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${wid}">${shortId}</div>`;
+                    html += `<div style="flex:1;display:flex;gap:3px;flex-wrap:wrap;">`;
+
+                    tasks.forEach(t => {
+                        const statusColor = t.status === 'completed' ? color :
+                                            t.status === 'assigned' ? color + '99' :
+                                            t.status === 'failed' ? '#e74c3c' : '#ccc';
+                        const icon = t.status === 'completed' ? '&#10003;' :
+                                     t.status === 'assigned' ? '&#9654;' :
+                                     t.status === 'failed' ? '&#10007;' : '&#8943;';
+                        html += `<div style="background:${statusColor};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.75em;cursor:default;" title="Task: ${t.task_id}\nStatus: ${t.status}\nAssigned: ${t.assigned_at || 'N/A'}\nCompleted: ${t.completed_at || 'N/A'}">${icon}</div>`;
+                    });
+
+                    html += `</div></div>`;
+                });
+
+                // Legend
+                html += `<div style="margin-top:8px;display:flex;gap:12px;font-size:0.75em;color:#888;">`;
+                html += `<span>&#10003; Completed</span><span>&#9654; In Progress</span><span>&#10007; Failed</span><span>&#8943; Pending</span>`;
+                html += `</div>`;
+                html += `</div>`;
+            });
+
+            container.innerHTML = html || '<p style="color:#888;">No task assignments yet</p>';
+        }
+
         // Clear entire database (all workers, jobs, tasks)
         async function clearDatabase() {
             if (!confirm('Are you sure you want to clear the entire database?\\n\\nThis will delete ALL workers, jobs, and tasks. This action cannot be undone.')) {
