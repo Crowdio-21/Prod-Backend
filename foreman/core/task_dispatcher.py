@@ -201,6 +201,7 @@ class TaskDispatcher:
             return 0
 
         available_workers = self.connection_manager.get_available_workers()
+        available_workers_fifo = self.connection_manager.get_available_workers_fifo()
 
         if not available_workers:
             print(
@@ -224,7 +225,10 @@ class TaskDispatcher:
 
         # Use batch assignment - ranks workers ONCE instead of per-task
         assignments = await self.scheduler.batch_select_workers(
-            scheduler_tasks, available_workers, all_workers
+            scheduler_tasks,
+            available_workers,
+            all_workers,
+            ordered_available_workers=available_workers_fifo,
         )
 
         print(

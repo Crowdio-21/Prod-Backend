@@ -7,7 +7,8 @@ class PriorityScheduler(TaskScheduler):
         self, 
         task: Task, 
         available_workers: Set[str],
-        all_workers: dict
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None
     ) -> Optional[str]:
         """Select worker with best success rate for high priority tasks"""
         if not available_workers:
@@ -26,6 +27,8 @@ class PriorityScheduler(TaskScheduler):
                 return best_worker.id
         
         # For normal priority, use FIFO
+        if ordered_available_workers:
+            return ordered_available_workers[0]
         return next(iter(available_workers))
     
     async def select_task(

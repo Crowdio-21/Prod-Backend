@@ -7,7 +7,8 @@ class PerformanceBasedScheduler(TaskScheduler):
         self, 
         task: Task, 
         available_workers: Set[str],
-        all_workers: dict
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None
     ) -> Optional[str]:
         """Select worker with best success rate"""
         if not available_workers:
@@ -21,6 +22,8 @@ class PerformanceBasedScheduler(TaskScheduler):
         ]
         
         if not workers:
+            if ordered_available_workers:
+                return ordered_available_workers[0]
             return next(iter(available_workers))
         
         # Sort by success rate (descending) and total tasks (descending)

@@ -11,14 +11,19 @@ class RoundRobinScheduler(TaskScheduler):
         self, 
         task: Task, 
         available_workers: Set[str],
-        all_workers: dict
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None
     ) -> Optional[str]:
         """Select next worker in round-robin order"""
         if not available_workers:
             return None
         
         # Update worker order if changed
-        available_list = sorted(available_workers)
+        available_list = (
+            list(ordered_available_workers)
+            if ordered_available_workers is not None
+            else sorted(available_workers)
+        )
         if available_list != self.worker_order:
             self.worker_order = available_list
             self.last_worker_idx = -1

@@ -91,7 +91,11 @@ class TaskScheduler(ABC):
 
     @abstractmethod
     async def select_worker(
-        self, task: Task, available_workers: Set[str], all_workers: dict
+        self,
+        task: Task,
+        available_workers: Set[str],
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None,
     ) -> Optional[str]:
         """
         Select the best worker for a given task
@@ -100,6 +104,7 @@ class TaskScheduler(ABC):
             task: Task to be assigned
             available_workers: Set of available worker IDs
             all_workers: Dictionary of all workers (id -> Worker)
+            ordered_available_workers: Optional list preserving FIFO order
 
         Returns:
             Selected worker ID or None if no suitable worker
@@ -123,7 +128,11 @@ class TaskScheduler(ABC):
         pass
 
     async def batch_select_workers(
-        self, tasks: List[Task], available_workers: Set[str], all_workers: dict
+        self,
+        tasks: List[Task],
+        available_workers: Set[str],
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None,
     ) -> List[tuple]:
         """
         Optimized batch assignment: select workers for multiple tasks at once.
@@ -139,6 +148,7 @@ class TaskScheduler(ABC):
             tasks: List of tasks to assign
             available_workers: Set of available worker IDs
             all_workers: Dictionary of all workers (id -> Worker)
+            ordered_available_workers: Optional list preserving FIFO order
 
         Returns:
             List of (task, worker_id) tuples for successful assignments
@@ -146,14 +156,37 @@ class TaskScheduler(ABC):
         # Default implementation: fall back to individual select_worker calls
         # Subclasses (like BaseMCDMScheduler) should override for optimization
         assignments = []
-        remaining_workers = set(available_workers)
+
+        if ordered_available_workers:
+            filtered_order: List[str] = []
+            seen = set()
+            for worker_id in ordered_available_workers:
+                if worker_id in available_workers and worker_id not in seen:
+                    filtered_order.append(worker_id)
+                    seen.add(worker_id)
+            extra_workers = [wid for wid in available_workers if wid not in seen]
+            filtered_order.extend(extra_workers)
+        else:
+            filtered_order = list(available_workers)
+
+        remaining_order = list(filtered_order)
+        remaining_workers = set(remaining_order)
 
         for task in tasks:
             if not remaining_workers:
                 break
-            worker_id = await self.select_worker(task, remaining_workers, all_workers)
-            if worker_id:
+            worker_id = await self.select_worker(
+                task,
+                remaining_workers,
+                all_workers,
+                ordered_available_workers=remaining_order,
+            )
+            if worker_id and worker_id in remaining_workers:
                 assignments.append((task, worker_id))
                 remaining_workers.discard(worker_id)
+                try:
+                    remaining_order.remove(worker_id)
+                except ValueError:
+                    pass
 
         return assignments
