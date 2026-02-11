@@ -164,6 +164,8 @@ class WebSocketManager:
                 recovered = await self.task_dispatcher.recover_orphaned_tasks()
                 if recovered > 0:
                     print(f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected")
+                    # Trigger reassignment to remaining available workers
+                    await self._reassign_recovered_tasks_to_available_workers()
             else:
                 print(
                     f"[CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
@@ -173,6 +175,8 @@ class WebSocketManager:
                 recovered = await self.task_dispatcher.recover_orphaned_tasks()
                 if recovered > 0:
                     print(f"Recovered {recovered} orphaned tasks after worker disconnected")
+                    # Trigger reassignment to remaining available workers
+                    await self._reassign_recovered_tasks_to_available_workers()
         
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
@@ -180,10 +184,44 @@ class WebSocketManager:
                 print(f"[CLEANUP DEBUG] Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
     
+    async def _reassign_recovered_tasks_to_available_workers(self):
+        """
+        Trigger reassignment of recovered tasks to available workers.
+        
+        This is called after orphaned tasks are recovered (reset to pending)
+        to immediately assign them to any available workers, enabling
+        task resumption from checkpoints or fresh starts as appropriate.
+        """
+        try:
+            available_workers = self.connection_manager.get_available_workers()
+            if not available_workers:
+                print("[REASSIGN] No available workers to reassign recovered tasks")
+                return
+            
+            print(f"[REASSIGN] Triggering reassignment to {len(available_workers)} available worker(s)")
+            
+            # Use the first available worker to trigger batch assignment
+            # (assign_task_to_available_worker handles assigning to all available workers)
+            first_worker = available_workers[0]
+            assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                first_worker, worker_threshold=1  # Lower threshold to trigger immediate assignment
+            )
+            
+            if assigned:
+                print(f"[REASSIGN] Successfully reassigned tasks to available workers")
+            else:
+                print(f"[REASSIGN] No tasks were reassigned (may have been assigned already)")
+                
+        except Exception as e:
+            print(f"[REASSIGN] Error reassigning recovered tasks: {e}")
+            import traceback
+            traceback.print_exc()
+
     async def _record_worker_disconnection_failures(self, worker_id: str):
         """
-        Record failures for all tasks assigned to a disconnected worker
+        Record failures for all tasks associated with a disconnected worker
         
+        Handles both "assigned" and "pending" tasks that have this worker_id.
         Extracts and decodes the latest checkpoint data from delta_checkpoint_blobs
         and stores it in the worker_failures table.
         
@@ -191,11 +229,16 @@ class WebSocketManager:
             worker_id: ID of the disconnected worker
         """
         try:
-            # Get all assigned tasks
-            assigned_tasks = await _get_assigned_tasks()
+            from sqlalchemy import select, or_
             
-            # Filter tasks assigned to this specific worker
-            worker_tasks = [t for t in assigned_tasks if t.worker_id == worker_id]
+            # Get all tasks associated with this worker (assigned or pending)
+            async with db_session() as session:
+                result = await session.execute(
+                    select(TaskModel)
+                    .where(TaskModel.worker_id == worker_id)
+                    .where(or_(TaskModel.status == "assigned", TaskModel.status == "pending"))
+                )
+                worker_tasks = result.scalars().all()
             
             if not worker_tasks:
                 print(f"No tasks assigned to disconnected worker {worker_id}")
@@ -260,17 +303,18 @@ class WebSocketManager:
             traceback.print_exc()
             
     async def _get_worker_pending_tasks(self, worker_id: str) -> list:
-        """Get list of pending task IDs for a worker (for debugging)"""
+        """Get list of task IDs for a worker that need cleanup (assigned or pending with worker_id)"""
         try:
             from foreman.db.base import async_session
             from foreman.db.models import TaskModel
-            from sqlalchemy import select
+            from sqlalchemy import select, or_
 
             async with async_session() as session:
+                # Find tasks that are either assigned to this worker OR pending but still linked to this worker
                 result = await session.execute(
                     select(TaskModel.id, TaskModel.status)
                     .where(TaskModel.worker_id == worker_id)
-                    .where(TaskModel.status == "assigned")
+                    .where(or_(TaskModel.status == "assigned", TaskModel.status == "pending"))
                 )
                 tasks = result.all()
                 return [(t.id, t.status) for t in tasks]

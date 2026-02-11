@@ -164,6 +164,13 @@ async def _get_assigned_tasks(job_id=None):
     return assigned_tasks
 
 
+async def _get_tasks_needing_recovery():
+    """Get tasks that need recovery - either assigned or pending with a worker_id"""
+    from ...db.crud import get_tasks_needing_recovery
+    async with db_session() as session:
+        return await get_tasks_needing_recovery(session)
+
+
 async def _get_job_by_id(job_id: str):
     """Get job by ID from database"""
 
@@ -251,11 +258,21 @@ async def _update_task_status(
     worker_id: str = None,
     result: str = None,
     error: str = None,
+    clear_worker: bool = False,
 ):
-    """Update task status with new session"""
+    """Update task status with new session
+    
+    Args:
+        task_id: Task identifier
+        status: New status
+        worker_id: Worker ID to set (if provided)
+        result: Task result (if provided)
+        error: Error message (if provided)
+        clear_worker: If True, explicitly clear worker_id (set to None)
+    """
 
     async with db_session() as session:
-        await update_task_status(session, task_id, status, worker_id, result, error)
+        await update_task_status(session, task_id, status, worker_id, result, error, clear_worker)
 
 
 async def _claim_task_for_worker(task_id: str, worker_id: str):

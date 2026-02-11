@@ -212,7 +212,7 @@ class JobManager:
 
         # Update task status back to pending for retry
         # Set worker_id to None so it can be reassigned
-        await _update_task_status(task_id, "pending", worker_id=None, error=error)
+        await _update_task_status(task_id, "pending", error=error, clear_worker=True)
 
         # Update local metadata
         if job_id in self._job_metadata:

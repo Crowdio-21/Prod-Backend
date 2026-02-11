@@ -14,10 +14,12 @@ from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
 from .utils import (
     _get_pending_tasks,
     _get_assigned_tasks,
+    _get_tasks_needing_recovery,
     _update_task_status,
     _update_worker_status,
     _claim_task_for_worker,
     _get_latest_task_failure_with_checkpoint,
+    _get_job_by_id,
 )
 from common.protocol import (
     create_assign_task_message, 
@@ -136,10 +138,10 @@ class TaskDispatcher:
 
     async def recover_orphaned_tasks(self) -> int:
         """
-        Find tasks assigned to disconnected workers and reset them to pending
+        Find tasks associated with disconnected workers and reset them to pending
         
         An orphaned task is one where:
-        - Status is "assigned"
+        - Status is "assigned" OR "pending" with a worker_id
         - The assigned worker_id is no longer connected via WebSocket
         
         Returns:
@@ -148,21 +150,21 @@ class TaskDispatcher:
         # Get all connected worker IDs
         connected_workers = self.connection_manager.get_all_worker_ids()
         
-        # Get all tasks that are currently assigned
-        assigned_tasks = await _get_assigned_tasks()
+        # Get all tasks that need recovery (assigned or pending with worker_id)
+        tasks_needing_recovery = await _get_tasks_needing_recovery()
         
-        if not assigned_tasks:
+        if not tasks_needing_recovery:
             return 0
         
         recovered = 0
-        for task in assigned_tasks:
+        for task in tasks_needing_recovery:
             # Check if the assigned worker is still connected
             if task.worker_id and task.worker_id not in connected_workers:
                 # Worker is disconnected - reset task to pending for reassignment
-                await _update_task_status(task.id, "pending", worker_id=None)
+                await _update_task_status(task.id, "pending", clear_worker=True)
                 recovered += 1
                 print(
-                    f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} "
+                    f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} (was {task.status}) "
                     f"from disconnected worker {task.worker_id}"
                 )
         
@@ -372,8 +374,14 @@ class TaskDispatcher:
             # Get task_metadata from job_manager for declarative checkpointing
             task_metadata = self.job_manager.get_task_metadata(job_id)
             
-            # Check if we have checkpoint data for this task from a previous failure
-            checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
+            # Check if the job supports checkpointing before trying to resume
+            job = await _get_job_by_id(job_id)
+            supports_checkpointing = job.supports_checkpointing if job else False
+            
+            # Only check for checkpoint data if the job supports checkpointing
+            checkpoint_data = None
+            if supports_checkpointing:
+                checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
             
             # Prepare code for the target worker (handles mobile instrumentation)
             checkpoint_state = None
@@ -420,11 +428,17 @@ class TaskDispatcher:
                         checkpoint_count=checkpoint_data.get("checkpoint_count", 0)
                     )
                 print(
-                    f"TaskDispatcher: 🔄 Resuming task {task_id} from checkpoint "
+                    f"TaskDispatcher: Resuming task {task_id} from checkpoint "
                     f"(progress: {checkpoint_data.get('progress_percent', 0):.1f}%)"
                 )
             else:
-                # No checkpoint - send regular ASSIGN_TASK message
+                # No checkpoint or checkpointing disabled - send regular ASSIGN_TASK message
+                # Log if this is a reassignment after worker failure (task was previously assigned)
+                if not supports_checkpointing:
+                    print(
+                        f"TaskDispatcher: Starting task {task_id} from beginning "
+                        f"(checkpointing disabled for job {job_id})"
+                    )
                 if task_metadata:
                     # Use extended message with task_metadata
                     message = create_assign_task_message_with_metadata(
@@ -447,17 +461,34 @@ class TaskDispatcher:
                 print(f"TaskDispatcher: No websocket found for worker {worker_id}")
                 return False
 
+            # Check if worker is still available (prevents race condition with concurrent assignments)
+            if not self.connection_manager.is_worker_available(worker_id):
+                print(f"TaskDispatcher: Worker {worker_id} is no longer available, skipping task {task_id}")
+                return False
+
+            # Mark worker as busy BEFORE claiming task to prevent race conditions
+            # If another assignment is happening concurrently, this ensures only one wins
+            self.connection_manager.mark_worker_busy(worker_id)
+
             # Atomically claim task; if someone else grabbed it, skip
             claimed_job_id = await _claim_task_for_worker(task_id, worker_id)
             if not claimed_job_id:
                 print(f"TaskDispatcher: Task {task_id} was already claimed, skipping")
+                # Put worker back as available since we didn't assign anything
+                self.connection_manager.mark_worker_available(worker_id)
                 return False
 
             # Send to worker
-            await websocket.send(message.to_json())
+            try:
+                await websocket.send(message.to_json())
+            except Exception as send_error:
+                print(f"TaskDispatcher: Error sending task {task_id} to worker {worker_id}: {send_error}")
+                # Put worker back as available and reset task
+                self.connection_manager.mark_worker_available(worker_id)
+                await _update_task_status(task_id, "pending", clear_worker=True)
+                return False
 
-            # Mark worker as busy
-            self.connection_manager.mark_worker_busy(worker_id)
+            # Update worker status in database
             await _update_worker_status(worker_id, "busy", current_task_id=task_id)
 
             action = "Resumed" if is_resume else "Assigned"
@@ -477,7 +508,7 @@ class TaskDispatcher:
 
             # If we had claimed the task, put it back to pending
             try:
-                await _update_task_status(task_id, "pending", worker_id=None)
+                await _update_task_status(task_id, "pending", clear_worker=True)
             except Exception as reset_error:
                 print(
                     f"TaskDispatcher: Error resetting task {task_id} after send failure: {reset_error}"

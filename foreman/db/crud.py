@@ -185,11 +185,25 @@ async def update_task_status(
     worker_id: str = None,
     result: str = None,
     error: str = None,
+    clear_worker: bool = False,
 ):
-    """Update task status"""
+    """Update task status
+    
+    Args:
+        session: Database session
+        task_id: Task identifier
+        status: New status
+        worker_id: Worker ID to set (if provided)
+        result: Task result (if provided)
+        error: Error message (if provided)
+        clear_worker: If True, explicitly clear worker_id (set to None)
+    """
     update_data = {"status": status}
     if worker_id:
         update_data["worker_id"] = worker_id
+    elif clear_worker:
+        # Explicitly clear worker_id when resetting task to pending
+        update_data["worker_id"] = None
     if result:
         update_data["result"] = result
     if error:
@@ -506,6 +520,30 @@ async def get_assigned_tasks(
         query = query.where(TaskModel.job_id == job_id)
     
     query = query.order_by(TaskModel.id)
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
+async def get_tasks_needing_recovery(
+    session: AsyncSession
+) -> List[TaskModel]:
+    """
+    Get tasks that need recovery - either assigned or pending with a worker_id.
+    
+    This handles cases where:
+    1. Task is "assigned" but worker disconnected
+    2. Task is "pending" but still has worker_id (from incomplete cleanup)
+    
+    Returns:
+        List of tasks that have a worker_id and status in ('assigned', 'pending')
+    """
+    from sqlalchemy import or_
+    
+    query = select(TaskModel).where(
+        TaskModel.worker_id != None,
+        or_(TaskModel.status == "assigned", TaskModel.status == "pending")
+    ).order_by(TaskModel.id)
+    
     result = await session.execute(query)
     return result.scalars().all()
 
