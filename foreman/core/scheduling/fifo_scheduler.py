@@ -34,7 +34,7 @@ if not logger.handlers:
 
 class FIFOScheduler(TaskScheduler):
     """First-In-First-Out scheduler - assigns tasks in order received"""
-    
+
     def __init__(self):
         """Initialize FIFO scheduler"""
         logger.info(f"\n{'='*80}")
@@ -42,52 +42,53 @@ class FIFOScheduler(TaskScheduler):
         logger.info(f"{'='*80}")
         logger.info(f"Strategy: First-In-First-Out (simple queue-based)")
         logger.info(f"{'='*80}\n")
-    
+
     async def select_worker(
-        self, 
-        task: Task, 
+        self,
+        task: Task,
         available_workers: Set[str],
-        all_workers: dict
+        all_workers: dict,
+        ordered_available_workers: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Select first available worker"""
         logger.info(f"\n{'='*80}")
         logger.info(f"WORKER SELECTION - Task ID: {task.id} (Job: {task.job_id})")
         logger.info(f"{'='*80}")
-        logger.info(f"Available workers: {sorted(list(available_workers))}")
+        ordered_list = ordered_available_workers or list(available_workers)
+        logger.info(f"Available workers (FIFO order): {ordered_list}")
         logger.info(f"Total workers in system: {len(all_workers)}")
-        
-        if not available_workers:
+
+        if not ordered_list:
             logger.warning("No available workers")
             logger.info(f"{'='*80}\n")
             return None
-        
-        selected_worker = next(iter(available_workers))
-        
+
+        selected_worker = ordered_list[0]
+
         logger.info(f"\n{'─'*80}")
         logger.info(f"FIFO SELECTION (First Available):")
         logger.info(f"{'─'*80}")
-        for i, worker_id in enumerate(sorted(available_workers), 1):
+        for i, worker_id in enumerate(ordered_list, 1):
             marker = "→ SELECTED" if worker_id == selected_worker else "  available"
             logger.info(f"  [{i}] {worker_id} {marker}")
         logger.info(f"{'─'*80}")
-        
+
         logger.info(f"\n✓ SELECTED: {selected_worker}")
         logger.info(f"{'='*80}\n")
-        
+
         return selected_worker
-    
+
     async def select_task(
-        self,
-        pending_tasks: List[Task],
-        worker_id: str
+        self, pending_tasks: List[Task], worker_id: str
     ) -> Optional[Task]:
         """Select first pending task"""
         if not pending_tasks:
             logger.debug(f"No pending tasks for worker {worker_id}")
             return None
-        
-        selected_task = pending_tasks[0]
-        logger.debug(f"Selected task {selected_task.id} for worker {worker_id} (FIFO - first in queue)")
-        
-        return selected_task
 
+        selected_task = pending_tasks[0]
+        logger.debug(
+            f"Selected task {selected_task.id} for worker {worker_id} (FIFO - first in queue)"
+        )
+
+        return selected_task

@@ -176,12 +176,21 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         return matrix, worker_ids
 
     async def select_worker(
-        self, task: Task, available_workers: Set[str], all_workers: Dict[str, Worker]
+        self,
+        task: Task,
+        available_workers: Set[str],
+        all_workers: Dict[str, Worker],
+        ordered_available_workers: Optional[List[str]] = None,
     ) -> Optional[str]:
         logger.info(f"\n{'='*80}")
         logger.info(f"WORKER SELECTION - Task ID: {task.id} (Job: {task.job_id})")
         logger.info(f"{'='*80}")
-        logger.info(f"Available workers: {sorted(list(available_workers))}")
+        ordered_list = (
+            ordered_available_workers
+            if ordered_available_workers is not None
+            else sorted(list(available_workers))
+        )
+        logger.info(f"Available workers: {ordered_list}")
         logger.info(f"Total workers in system: {len(all_workers)}")
 
         if not available_workers or not all_workers:
@@ -288,6 +297,7 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         tasks: List[Task],
         available_workers: Set[str],
         all_workers: Dict[str, Worker],
+        ordered_available_workers: Optional[List[str]] = None,
     ) -> List[tuple]:
         """
         Optimized batch assignment: select workers for multiple tasks at once.
@@ -317,7 +327,18 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
             logger.warning("No tasks or no available workers for batch assignment")
             return []
 
-        available_list = list(available_workers)
+        if ordered_available_workers:
+            seen = set()
+            available_list = []
+            for worker_id in ordered_available_workers:
+                if worker_id in available_workers and worker_id not in seen:
+                    available_list.append(worker_id)
+                    seen.add(worker_id)
+            available_list.extend(
+                [worker_id for worker_id in available_workers if worker_id not in seen]
+            )
+        else:
+            available_list = list(available_workers)
         n_tasks = len(tasks)
         n_workers = len(available_list)
 
