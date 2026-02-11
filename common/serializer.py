@@ -3,6 +3,7 @@ Serialization utilities for CrowdCompute
 """
 
 import inspect
+import re
 import sys
 import types 
 from typing import Any, Callable, List
@@ -18,10 +19,62 @@ def get_runtime_info() -> str:
     return _env_info()
 
 
-def serialize_function(func: str):
-    """Serialize a Python function as a str"""
+def _strip_decorators(source: str) -> str:
+    """
+    Strip decorator lines from function source code.
+    
+    Removes @decorator(...) lines that precede function definitions,
+    including multi-line decorators with parentheses.
+    
+    Args:
+        source: Function source code string
+        
+    Returns:
+        Source code with decorators removed
+    """
+    lines = source.split('\n')
+    result_lines = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        
+        # Check if this is a decorator line
+        if stripped.startswith('@'):
+            # Skip decorator lines (including multi-line decorators)
+            paren_count = stripped.count('(') - stripped.count(')')
+            i += 1
+            
+            # Continue skipping if we're inside parentheses
+            while paren_count > 0 and i < len(lines):
+                paren_count += lines[i].count('(') - lines[i].count(')')
+                i += 1
+        else:
+            result_lines.append(line)
+            i += 1
+    
+    return '\n'.join(result_lines)
+
+
+def serialize_function(func: Callable) -> str:
+    """
+    Serialize a Python function as a str
+    
+    Strips any decorators from the source code so the function
+    can be executed on workers without needing decorator dependencies.
+    
+    Args:
+        func: Function to serialize
+        
+    Returns:
+        Function source code string (without decorators)
+    """
     try:
-        return inspect.getsource(func)
+        source = inspect.getsource(func)
+        # Strip decorators so workers don't need decorator dependencies
+        source = _strip_decorators(source)
+        return source
     except Exception as e:
         raise ValueError(f"Failed to serialize function ({_env_info()}): {e}")
 

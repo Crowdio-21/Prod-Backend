@@ -9,8 +9,13 @@ dependencies = [
     "asyncio-mqtt==0.16.1",
     "cloudpickle==3.0.0",
     "fastapi==0.104.1",
+    "numpy>=2.2.6",
+    "psutil>=7.2.1",
     "pydantic==2.5.0",
     "sqlalchemy==2.0.23",
+    "torch>=2.10.0",
+    "transformers>=5.0.0",
+    "textblob>=0.19.0",
     "uvicorn==0.24.0",
     "websockets==12.0",
 ]

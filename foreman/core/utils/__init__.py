@@ -2,8 +2,17 @@
 # Import them from the current module
 from .utils import (
     _record_worker_failure,
+    _decode_checkpoint_blob,
+    _make_json_serializable,
+    _get_latest_task_failure_with_checkpoint,
+    _decode_checkpoint_blob,
+    _make_json_serializable,
+    _decode_checkpoint_blob,
+    _make_json_serializable,
+    _get_latest_task_failure_with_checkpoint,
     _get_job_tasks,
     _get_pending_tasks,
+    _get_assigned_tasks,
     _get_job_by_id,
     _create_job_in_database,
     _create_worker_in_database,
@@ -20,8 +29,14 @@ from .utils import (
 
 __all__ = [
     "_record_worker_failure",
+    "_decode_checkpoint_blob",
+    "_make_json_serializable",
+    "_get_latest_task_failure_with_checkpoint",
+    "_decode_checkpoint_blob",
+    "_make_json_serializable",
     "_get_job_tasks",
     "_get_pending_tasks",
+    "_get_assigned_tasks",
     "_get_job_by_id",
     "_create_job_in_database",
     "_create_worker_in_database",

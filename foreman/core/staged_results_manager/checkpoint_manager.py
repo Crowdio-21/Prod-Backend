@@ -3,6 +3,7 @@ Foreman-side checkpoint management for incremental task state recovery
 
 Handles storing, validating, compacting, and reconstructing checkpoint data.
 Uses hybrid storage: SQLite for deltas <1MB, filesystem for larger checkpoints.
+Supports declarative checkpointing with configurable state variables.
 """
 
 import json
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from foreman.db.models import TaskModel
 from .storage_handler import StorageHandler
+from common.protocol import CheckpointType
 
 
 class CheckpointManager:
@@ -41,7 +43,10 @@ class CheckpointManager:
         delta_data_bytes: bytes,
         progress_percent: float,
         checkpoint_id: int,
-        compression_type: str = "gzip"
+        compression_type: str = "gzip",
+        checkpoint_type: str = None,
+        checkpoint_state_vars: List[str] = None,
+        state_size_bytes: int = None
     ) -> bool:
         """
         Store a checkpoint from worker
@@ -55,6 +60,9 @@ class CheckpointManager:
             progress_percent: Task progress (0-100)
             checkpoint_id: Sequential checkpoint number
             compression_type: Type of compression applied
+            checkpoint_type: Type of checkpoint (BASE, DELTA, COMPACTED) - from declarative API
+            checkpoint_state_vars: List of state variables being checkpointed
+            state_size_bytes: Uncompressed size of checkpoint state
             
         Returns:
             True if stored successfully, False otherwise
@@ -71,42 +79,86 @@ class CheckpointManager:
             task.last_checkpoint_at = datetime.now()
             task.checkpoint_count = checkpoint_id
             
-            if is_base:
-                # Store base checkpoint
-                await self.storage_handler.store_checkpoint(
+            # Determine checkpoint type - use explicit type if provided, else infer from is_base
+            effective_checkpoint_type = checkpoint_type
+            if effective_checkpoint_type is None:
+                effective_checkpoint_type = CheckpointType.BASE.value if is_base else CheckpointType.DELTA.value
+            
+            # Log declarative checkpointing details if state vars provided
+            state_vars_str = ""
+            if checkpoint_state_vars:
+                state_vars_str = f" | State vars: {checkpoint_state_vars}"
+            
+            if is_base or effective_checkpoint_type == CheckpointType.BASE.value:
+                # Store base checkpoint - returns (storage_ref, blob_data_or_None)
+                storage_ref, blob_data = await self.storage_handler.store_checkpoint(
                     task_id, delta_data_bytes, is_base=True
                 )
-                task.base_checkpoint_data = f"stored_{checkpoint_id}"
+                task.base_checkpoint_data = storage_ref
                 task.base_checkpoint_size = len(delta_data_bytes)
                 task.delta_checkpoints = json.dumps([])
                 
-                print(f"CheckpointManager: Stored base checkpoint {checkpoint_id} "
-                      f"for task {task_id} (size: {len(delta_data_bytes)} bytes)")
+                # Store blob in database if small enough, otherwise set filesystem path
+                if blob_data is not None:
+                    task.base_checkpoint_blob = blob_data
+                    task.checkpoint_storage_path = "db"
+                    storage_location = "database (blob)"
+                else:
+                    task.base_checkpoint_blob = None
+                    task.checkpoint_storage_path = os.path.join(self.checkpoint_dir, task_id)
+                    storage_location = task.checkpoint_storage_path
+                
+                # Clear delta blobs when new base is set
+                task.delta_checkpoint_blobs = json.dumps({})
+                
+                print(f"[Checkpoint DB] Task {task_id} | BASE #{checkpoint_id} | "
+                      f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
+                      f"Storage: {storage_location}{state_vars_str}")
             else:
                 # Append delta checkpoint
                 deltas = json.loads(task.delta_checkpoints or "[]")
+                delta_blobs = json.loads(task.delta_checkpoint_blobs or "{}")
                 
                 delta_info = {
                     "checkpoint_id": checkpoint_id,
                     "size": len(delta_data_bytes),
                     "stored_at": datetime.now().isoformat(),
-                    "compression": compression_type
+                    "compression": compression_type,
+                    "checkpoint_type": effective_checkpoint_type,
                 }
                 
-                # Store delta and get reference
-                storage_ref = await self.storage_handler.store_checkpoint(
+                # Add state vars if provided (declarative checkpointing)
+                if checkpoint_state_vars:
+                    delta_info["state_vars"] = checkpoint_state_vars
+                if state_size_bytes is not None:
+                    delta_info["uncompressed_size"] = state_size_bytes
+                
+                # Store delta and get reference + optional blob
+                storage_ref, blob_data = await self.storage_handler.store_checkpoint(
                     task_id, delta_data_bytes, is_base=False, checkpoint_id=checkpoint_id
                 )
                 delta_info["storage_ref"] = storage_ref
                 
+                # Store blob in database if small enough
+                if blob_data is not None:
+                    import base64
+                    delta_blobs[str(checkpoint_id)] = base64.b64encode(blob_data).decode('ascii')
+                    delta_info["storage_type"] = "db"
+                else:
+                    delta_info["storage_type"] = "fs"
+                
                 deltas.append(delta_info)
                 task.delta_checkpoints = json.dumps(deltas)
+                task.delta_checkpoint_blobs = json.dumps(delta_blobs)
                 
-                print(f"CheckpointManager: Stored delta {checkpoint_id} for task {task_id} "
-                      f"(size: {len(delta_data_bytes)} bytes)")
+                storage_type = "database" if blob_data else "filesystem"
+                print(f"[Checkpoint DB] Task {task_id} | DELTA #{checkpoint_id} | "
+                      f"Size: {len(delta_data_bytes):,} bytes | Progress: {progress_percent:.1f}% | "
+                      f"Total deltas: {len(deltas)} | Storage: {storage_type}{state_vars_str}")
                 
                 # Compact if too many deltas (merge into new base every 50)
                 if len(deltas) >= 50:
+                    print(f"[Checkpoint DB] Compacting {len(deltas)} deltas for task {task_id}...")
                     await self._compact_checkpoints(session, task_id)
             
             await session.commit()

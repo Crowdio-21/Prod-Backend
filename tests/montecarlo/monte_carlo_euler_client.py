@@ -20,34 +20,77 @@ import os
 import json
 import time
 
-# Add parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add root directory to Python path (go up two levels from tests/montecarlo/)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import connect, map as distributed_map, disconnect, crowdio
 
 
+@crowdio.task(
+    checkpoint=True,
+    checkpoint_interval=5.0,  # Checkpoint every 5 seconds
+    checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
+)
 def monte_carlo_euler_worker(num_trials):
     """
     Worker function to perform Monte Carlo trials for estimating e
+    WITH DECLARATIVE CHECKPOINTING - PURE LOGIC, NO RESUME CODE!
     
     Args:
         num_trials: Number of simulation trials to run
     
     Returns:
         Dictionary containing trial results and statistics
+        
+    Note:
+        The @crowdio.task decorator enables automatic checkpointing:
+        - State variables are captured automatically via frame introspection
+        - TRANSPARENT RESUME - framework handles everything automatically!
+        - Just write your pure algorithm logic
+        - Include 'progress_percent' in checkpoint_state for progress tracking
+        
+        DEVELOPER WRITES PURE LOGIC - NO RESUME CODE NEEDED!
+        The framework automatically:
+        1. Captures checkpoint_state variables during execution
+        2. On resume, injects saved values into variables
+        3. Adjusts loop ranges to continue from checkpoint position
     """
     import random
     import time
     
     start = time.time()
     
+    # Minimum execution time to ensure checkpointing (in seconds)
+    MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
+    
+    # ========================================================================
+    # CHECKPOINT STATE VARIABLES - just declare them normally!
+    # Framework handles resume automatically - no manual checkpoint code needed!
+    # ========================================================================
+    trials_completed = 0
+    total_count = 0
+    estimated_e = 0.0
+    progress_percent = 0.0  # Include in checkpoint_state for progress tracking
+    
+    random.seed()  # Ensure different seeds on different workers
+    
+    # Run Monte Carlo trials with periodic state updates
+    log_interval = max(1, num_trials // 100)  # Log every 1%
+    
+    # Calculate delay per update to stretch execution time for checkpointing
+    estimated_time_per_trial = 0.00001  # Rough estimate: 10 microseconds per trial
+    estimated_total_time = num_trials * estimated_time_per_trial
+    
+    if estimated_total_time < MIN_EXECUTION_TIME:
+        delay_per_update = (MIN_EXECUTION_TIME - estimated_total_time) / 100
+    else:
+        delay_per_update = 0
+    
+    print(f"[Worker] Starting {num_trials:,} trials (target runtime: {MIN_EXECUTION_TIME}s)")
+    
     try:
-        random.seed()  # Ensure different seeds on different workers
-        
-        total_count = 0
-        
-        # Run Monte Carlo trials
-        for _ in range(num_trials):
+        # Simple loop - framework automatically adjusts range on resume!
+        for i in range(num_trials):
             random_sum = 0.0
             count = 0
             
@@ -57,9 +100,30 @@ def monte_carlo_euler_worker(num_trials):
                 count += 1
             
             total_count += count
+            trials_completed = i + 1
+            
+            # Update progress and estimate - these are captured automatically!
+            progress_percent = (trials_completed / num_trials) * 100
+            estimated_e = total_count / trials_completed if trials_completed > 0 else 0.0
+            
+            # Periodic logging and delay
+            if trials_completed % log_interval == 0 or trials_completed == num_trials:
+                # Add delay to stretch execution time for checkpointing
+                if delay_per_update > 0:
+                    time.sleep(delay_per_update)
+                
+                # Log progress every 10%
+                if int(progress_percent) % 10 == 0:
+                    elapsed = time.time() - start
+                    print(f"[Worker] Progress: {progress_percent:.1f}% ({trials_completed:,}/{num_trials:,} trials) | "
+                          f"Current e ≈ {estimated_e:.6f} | Elapsed: {elapsed:.1f}s")
         
-        # Calculate average count (estimate of e)
-        estimated_e = total_count / num_trials
+        # Ensure minimum execution time for checkpointing
+        elapsed = time.time() - start
+        if elapsed < MIN_EXECUTION_TIME:
+            remaining = MIN_EXECUTION_TIME - elapsed
+            print(f"[Worker] Waiting {remaining:.1f}s to ensure checkpoints are captured...")
+            time.sleep(remaining)
         
         latency_ms = int((time.time() - start) * 1000)
         
@@ -71,7 +135,7 @@ def monte_carlo_euler_worker(num_trials):
             "status": "success"
         }
         
-        print(f"[Worker] Completed {num_trials} trials | e ≈ {estimated_e:.6f}")
+        print(f"[Worker] Completed {num_trials:,} trials | e ≈ {estimated_e:.6f} | Total time: {latency_ms/1000:.1f}s")
         return result
         
     except Exception as e:
@@ -186,7 +250,7 @@ async def run_distributed_monte_carlo_euler(total_trials, num_workers=None, fore
         foreman_host: Hostname/IP of foreman server
     """
     print("\n" + "=" * 70)
-    print("🎲 DISTRIBUTED MONTE CARLO ESTIMATION OF EULER'S NUMBER (e)")
+    print("DISTRIBUTED MONTE CARLO ESTIMATION OF EULER'S NUMBER (e)")
     print("=" * 70)
     
     print(f"\n📡 Connecting to foreman at {foreman_host}:9000...")
@@ -261,8 +325,8 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 1000000  # Default: 1 million trials
-    num_workers = 8  # Default: 8 workers
+    total_trials = 1000000  # Default: 1 million trials (reduced for faster testing)
+    num_workers = 5  # Default: 8 workers
     foreman_host = "localhost"
     
     if len(sys.argv) > 1:

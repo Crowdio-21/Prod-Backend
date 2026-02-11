@@ -36,11 +36,19 @@ class JobManager:
 
         # Track job metadata: job_id -> metadata dict
         self._job_metadata: Dict[str, Dict[str, Any]] = {}
+        
+        # Track task metadata for checkpointing: job_id -> task_metadata dict
+        self._task_metadata_cache: Dict[str, Dict[str, Any]] = {}
 
     # ==================== Job Creation ====================
 
     async def create_job(
-        self, job_id: str, func_code: str, args_list: List[Any], total_tasks: int
+        self, 
+        job_id: str, 
+        func_code: str, 
+        args_list: List[Any], 
+        total_tasks: int,
+        task_metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Create a new job with tasks
@@ -50,14 +58,34 @@ class JobManager:
             func_code: Function code to execute
             args_list: List of arguments for each task
             total_tasks: Total number of tasks
+            task_metadata: Optional checkpoint configuration from @task decorator
 
         Raises:
             Exception: If job creation fails
         """
-        print(f"JobManager: Creating job {job_id} with {total_tasks} tasks")
+        # Extract checkpoint configuration
+        checkpoint_enabled = False
+        checkpoint_interval = 10.0
+        checkpoint_state_vars = []
+        
+        if task_metadata:
+            checkpoint_enabled = task_metadata.get("checkpoint_enabled", False)
+            checkpoint_interval = task_metadata.get("checkpoint_interval", 10.0)
+            checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
+        
+        checkpoint_info = ""
+        if checkpoint_enabled:
+            vars_str = ", ".join(checkpoint_state_vars) if checkpoint_state_vars else "all"
+            checkpoint_info = f" | Checkpoint: enabled (interval={checkpoint_interval}s, vars={vars_str})"
+        
+        print(f"JobManager: Creating job {job_id} with {total_tasks} tasks{checkpoint_info}")
 
         # Store func_code in cache for quick access
         self._job_cache[job_id] = func_code
+        
+        # Store task metadata for checkpoint-aware dispatching
+        if task_metadata:
+            self._task_metadata_cache[job_id] = task_metadata
 
         # Store metadata
         self._job_metadata[job_id] = {
@@ -65,10 +93,13 @@ class JobManager:
             "completed_tasks": 0,
             "failed_tasks": 0,
             "created_at": None,  # Will be set by database
+            "checkpoint_enabled": checkpoint_enabled,
+            "checkpoint_interval": checkpoint_interval,
+            "checkpoint_state": checkpoint_state_vars
         }
 
-        # Create job in database
-        await _create_job_in_database(job_id, total_tasks)
+        # Create job in database (with checkpoint support flag)
+        await _create_job_in_database(job_id, total_tasks, supports_checkpointing=checkpoint_enabled)
 
         # Create tasks in database
         await _create_tasks_for_job(job_id, args_list)
@@ -89,6 +120,18 @@ class JobManager:
             Function code string or None if not found
         """
         return self._job_cache.get(job_id)
+
+    def get_task_metadata(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached task metadata for a job
+        
+        Args:
+            job_id: Job identifier
+            
+        Returns:
+            Task metadata dictionary or None if not found
+        """
+        return self._task_metadata_cache.get(job_id)
 
     def has_job(self, job_id: str) -> bool:
         """
@@ -121,8 +164,11 @@ class JobManager:
         """
         print(f"JobManager: Marking task {task_id} as completed")
 
+        # Serialize result to JSON string for storage
+        result_str = json.dumps(result) if not isinstance(result, str) else result
+
         accepted, _, completed_count, total_tasks = await _complete_task_if_assigned(
-            task_id, worker_id, str(result)
+            task_id, worker_id, result_str
         )
 
         if not accepted:

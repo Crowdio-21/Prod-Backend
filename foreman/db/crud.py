@@ -7,9 +7,25 @@ from foreman.schema.schema import JobStats, WorkerFailureStats
 from .models import *
 
 
-async def create_job(session: AsyncSession, job_id: str, total_tasks: int) -> JobModel:
-    """Create a new job"""
-    job = JobModel(id=job_id, total_tasks=total_tasks)
+async def create_job(
+    session: AsyncSession, 
+    job_id: str, 
+    total_tasks: int,
+    supports_checkpointing: bool = False
+) -> JobModel:
+    """Create a new job
+    
+    Args:
+        session: Database session
+        job_id: Unique job identifier
+        total_tasks: Total number of tasks in the job
+        supports_checkpointing: Whether this job supports declarative checkpointing
+    """
+    job = JobModel(
+        id=job_id, 
+        total_tasks=total_tasks,
+        supports_checkpointing=supports_checkpointing
+    )
     session.add(job)
     await session.commit()
     await session.refresh(job)
@@ -114,6 +130,37 @@ async def get_workers(session: AsyncSession) -> List[WorkerModel]:
     """Get all workers"""
     result = await session.execute(select(WorkerModel))
     return result.scalars().all()
+
+
+async def delete_worker(session: AsyncSession, worker_id: str) -> bool:
+    """Delete a worker by ID"""
+    result = await session.execute(select(WorkerModel).filter_by(id=worker_id))
+    worker = result.scalar_one_or_none()
+    if worker:
+        await session.delete(worker)
+        await session.commit()
+        return True
+    return False
+
+
+async def clear_database(session: AsyncSession) -> dict:
+    """Clear all workers, jobs, tasks, and worker failures from the database"""
+    from sqlalchemy import delete as sql_delete
+    
+    # Delete in order to respect foreign key constraints
+    worker_failures_result = await session.execute(sql_delete(WorkerFailureModel))
+    tasks_result = await session.execute(sql_delete(TaskModel))
+    jobs_result = await session.execute(sql_delete(JobModel))
+    workers_result = await session.execute(sql_delete(WorkerModel))
+    
+    await session.commit()
+    
+    return {
+        "workers_deleted": workers_result.rowcount,
+        "jobs_deleted": jobs_result.rowcount,
+        "tasks_deleted": tasks_result.rowcount,
+        "worker_failures_deleted": worker_failures_result.rowcount
+    }
 
 
 async def update_job_status(
@@ -258,6 +305,7 @@ async def complete_task_if_assigned(
     task.status = "completed"
     task.result = result
     task.completed_at = datetime.now()
+    task.progress_percent = 100.0  # Task is complete, so progress is 100%
     if not task.worker_id:
         task.worker_id = worker_id
 
@@ -282,14 +330,28 @@ async def record_worker_failure(
     task_id: str,
     error_message: str,
     job_id: Optional[str] = None,
+    checkpoint_available: bool = False,
+    latest_checkpoint_data: Optional[str] = None,
 ) -> None:
-    """Insert a worker failure record"""
+    """Insert a worker failure record
+    
+    Args:
+        session: Database session
+        worker_id: Worker identifier
+        task_id: Task identifier
+        error_message: Error description
+        job_id: Job identifier (optional)
+        checkpoint_available: Whether checkpoint exists for recovery
+        latest_checkpoint_data: JSON string of decoded latest checkpoint delta
+    """
     failure = WorkerFailureModel(
         worker_id=worker_id,
         task_id=task_id,
         job_id=job_id or "",
         error_message=error_message,
         failed_at=datetime.now(),
+        checkpoint_available=checkpoint_available,
+        latest_checkpoint_data=latest_checkpoint_data,
     )
     session.add(failure)
     await session.commit()
@@ -342,6 +404,33 @@ async def get_worker_failure_stats(
         total_tasks=total_tasks,
         failure_rate=round(failure_rate, 4),
     )
+
+
+async def get_latest_task_failure_with_checkpoint(
+    session: AsyncSession, task_id: str
+) -> Optional[WorkerFailureModel]:
+    """
+    Get the most recent failure record for a task that has checkpoint data.
+    
+    This is used when reassigning orphaned tasks to determine if we can
+    resume from a checkpoint instead of starting from scratch.
+    
+    Args:
+        session: Database session
+        task_id: Task identifier
+        
+    Returns:
+        WorkerFailureModel with checkpoint data, or None if not found
+    """
+    result = await session.execute(
+        select(WorkerFailureModel)
+        .where(WorkerFailureModel.task_id == task_id)
+        .where(WorkerFailureModel.checkpoint_available == True)
+        .where(WorkerFailureModel.latest_checkpoint_data != None)
+        .order_by(WorkerFailureModel.failed_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 async def get_online_workers_count(session: AsyncSession) -> int:
@@ -404,6 +493,19 @@ async def get_pending_tasks(
     # Order by task ID to ensure sequential processing
     query = query.order_by(TaskModel.id)
 
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
+async def get_assigned_tasks(
+    session: AsyncSession, job_id: str = None
+) -> List[TaskModel]:
+    """Get tasks with 'assigned' status, optionally filtered by job_id"""
+    query = select(TaskModel).where(TaskModel.status == "assigned")
+    if job_id:
+        query = query.where(TaskModel.job_id == job_id)
+    
+    query = query.order_by(TaskModel.id)
     result = await session.execute(query)
     return result.scalars().all()
 

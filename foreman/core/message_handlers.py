@@ -70,16 +70,29 @@ class ClientMessageHandler:
             func_code = message.data["func_code"]
             args_list = message.data["args_list"]
             total_tasks = message.data["total_tasks"]
+            
+            # Extract task metadata for declarative checkpointing
+            task_metadata = message.data.get("task_metadata")
 
             print(
                 f"ClientMessageHandler: Received job {job_id} with {total_tasks} tasks | foreman_runtime={get_runtime_info()}"
             )
+            
+            # Log checkpoint configuration if present
+            if task_metadata and task_metadata.get("checkpoint_enabled"):
+                print(
+                    f"ClientMessageHandler: Job {job_id} has checkpointing enabled "
+                    f"(interval={task_metadata.get('checkpoint_interval')}s, "
+                    f"state_vars={task_metadata.get('checkpoint_state', [])})"
+                )
 
             # Register client websocket
             self.connection_manager.add_client(job_id, websocket)
 
-            # Create job and tasks
-            await self.job_manager.create_job(job_id, func_code, args_list, total_tasks)
+            # Create job and tasks with task_metadata
+            await self.job_manager.create_job(
+                job_id, func_code, args_list, total_tasks, task_metadata=task_metadata
+            )
 
             # Try to assign tasks to available workers
             assigned = await self.task_dispatcher.assign_tasks_for_job(
@@ -131,8 +144,12 @@ class WorkerMessageHandler:
     """
 
     def __init__(
-        self, connection_manager, job_manager, task_dispatcher, completion_handler,
-        checkpoint_manager: CheckpointManager = None
+        self,
+        connection_manager,
+        job_manager,
+        task_dispatcher,
+        completion_handler,
+        checkpoint_manager: CheckpointManager = None,
     ):
         """
         Initialize worker message handler
@@ -168,6 +185,9 @@ class WorkerMessageHandler:
             await self._handle_task_error(message, websocket)
         elif message.type == MessageType.PONG:
             await self._handle_pong(message, websocket)
+        elif message.type == MessageType.WORKER_HEARTBEAT:
+            # Fallback for workers sending heartbeat instead of PONG
+            await self._handle_pong(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
         else:
@@ -175,7 +195,7 @@ class WorkerMessageHandler:
 
     async def _handle_pong(self, message: Message, websocket: WebSocketServerProtocol):
         """
-        Handle pong from worker (heartbeat response)
+        Handle pong from worker (heartbeat response + performance metrics)
 
         Args:
             message: Pong message
@@ -187,11 +207,57 @@ class WorkerMessageHandler:
             # Update worker's last seen time in database
             await _update_worker_status(worker_id, "online")
 
+            # Update performance metrics if provided
+            if "performance_metrics" in message.data:
+                metrics = message.data["performance_metrics"]
+                await self._update_worker_performance_metrics(worker_id, metrics)
+
+    async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
+        """
+        Update worker performance metrics in database
+
+        Args:
+            worker_id: Worker identifier
+            metrics: Performance metrics dictionary
+        """
+        try:
+            from foreman.db.base import async_session
+            from foreman.db.models import WorkerModel
+            from sqlalchemy import select, update
+            from datetime import datetime
+
+            async with async_session() as session:
+                # Update worker performance fields
+                stmt = (
+                    update(WorkerModel)
+                    .where(WorkerModel.id == worker_id)
+                    .values(
+                        cpu_usage_percent=metrics.get("cpu_usage_percent"),
+                        ram_available_mb=metrics.get("ram_available_mb"),
+                        battery_level=metrics.get("battery_level"),
+                        is_charging=metrics.get("is_charging"),
+                        network_speed_mbps=metrics.get("network_speed_mbps"),
+                        storage_available_gb=metrics.get("storage_available_gb"),
+                        last_performance_update=datetime.now(),
+                    )
+                )
+                await session.execute(stmt)
+                await session.commit()
+
+        except Exception as e:
+            print(
+                f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}"
+            )
+
     async def _handle_worker_ready(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
         """
         Handle worker ready message (worker registration)
+        
+        Extended to extract worker capabilities for mobile support.
+        Workers report their platform, runtime, and capabilities, which
+        determines if code instrumentation is needed.
 
         Args:
             message: Worker ready message
@@ -200,9 +266,16 @@ class WorkerMessageHandler:
         try:
             worker_id = message.data["worker_id"]
             device_specs = message.data.get("device_specs", {})
+            
+            # Extract platform/runtime info for mobile worker support
+            worker_type = message.data.get("worker_type", "pc_python")
+            platform = message.data.get("platform", "unknown")
+            runtime = message.data.get("runtime", "cpython")
+            capabilities = message.data.get("capabilities", {})
 
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
-            
+            print(f"  Type: {worker_type} | Platform: {platform} | Runtime: {runtime}")
+
             # Log device specs if available
             if device_specs:
                 device_type = device_specs.get("device_type", "Unknown")
@@ -213,9 +286,24 @@ class WorkerMessageHandler:
                 print(f"  📱 Device: {device_type} | OS: {os_info}")
                 print(f"  🖥️  CPU: {cpu}")
                 print(f"  💾 RAM: {ram_info}")
+            
+            # Log capabilities for mobile workers
+            if capabilities:
+                settrace_support = capabilities.get("supports_settrace", True)
+                frame_support = capabilities.get("supports_frame_introspection", True)
+                if not settrace_support or not frame_support:
+                    print(f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
 
-            # Register worker
-            self.connection_manager.add_worker(worker_id, websocket)
+            # Create WorkerInfo for extended capability tracking
+            from .connection_manager import WorkerInfo
+            worker_info = WorkerInfo.from_worker_ready_message(
+                worker_id=worker_id,
+                websocket=websocket,
+                message_data=message.data
+            )
+            
+            # Register worker with capabilities
+            self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
 
             # Create or update worker in database with device specs
             await _create_worker_in_database(worker_id, device_specs)
@@ -264,26 +352,40 @@ class WorkerMessageHandler:
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
 
             if not worker_id:
-                print(f"WorkerMessageHandler: Could not find worker for task result")
+                print(
+                    f"⚠️ [RESULT DEBUG] Could not find worker for task result - task_id={task_id}, job_id={job_id}"
+                )
+                print(
+                    f"⚠️ [RESULT DEBUG] This may indicate worker was disconnected before result was processed!"
+                )
                 return
 
             print(
-                f"WorkerMessageHandler: Task {task_id} completed by worker {worker_id} for job {job_id}"
+                f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
             )
+
+            # Result should already be a string from worker, but ensure it
+            result_str = str(result) if result is not None else ""
+            
+            print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
 
             # Mark task as completed in job manager (idempotent)
             accepted, job_complete = await self.job_manager.mark_task_completed(
-                task_id, job_id, worker_id, result
+                task_id, job_id, worker_id, result_str
             )
 
             if not accepted:
                 print(
-                    f"WorkerMessageHandler: Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
+                    f"⚠️ [RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
                 )
                 # Even if ignored, free the worker to take new tasks
                 self.connection_manager.mark_worker_available(worker_id)
                 await _update_worker_status(worker_id, "online", current_task_id=None)
                 return
+
+            print(
+                f"[RESULT DEBUG] Task {task_id} accepted, job_complete={job_complete}"
+            )
 
             # Update worker statistics
             await _update_worker_task_stats(worker_id, task_completed=True)
@@ -295,7 +397,7 @@ class WorkerMessageHandler:
             # Check if job is complete and handle completion
             if job_complete:
                 print(
-                    f"WorkerMessageHandler: Job {job_id} completed, triggering completion handler"
+                    f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler"
                 )
                 await self.completion_handler.handle_job_completion(job_id)
 
@@ -305,14 +407,19 @@ class WorkerMessageHandler:
             )
 
             if assigned:
-                print(f"WorkerMessageHandler: Assigned next task to worker {worker_id}")
+                print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
+            else:
+                print(
+                    f"[RESULT DEBUG] No more tasks to assign to worker {worker_id}"
+                )
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
-        except Exception as e:
-            print(f"WorkerMessageHandler: Error handling task result: {e}")
             import traceback
-
+            traceback.print_exc()
+        except Exception as e:
+            print(f"[RESULT DEBUG] Error handling task result: {e}")
+            import traceback
             traceback.print_exc()
 
     async def _handle_task_error(
@@ -376,11 +483,16 @@ class WorkerMessageHandler:
             import traceback
 
             traceback.print_exc()
-    
-    async def _handle_task_checkpoint(self, message: Message, websocket: WebSocketServerProtocol):
+
+    async def _handle_task_checkpoint(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
         """
         Handle checkpoint message from worker (incremental state save)
         
+        Supports both legacy checkpoints and declarative checkpointing with
+        additional metadata (checkpoint_type, checkpoint_state_vars, state_size_bytes).
+
         Args:
             message: Task checkpoint message
             websocket: Worker websocket connection
@@ -394,22 +506,35 @@ class WorkerMessageHandler:
             checkpoint_id = message.data["checkpoint_id"]
             compression_type = message.data.get("compression_type", "gzip")
             
+            # Extract declarative checkpointing metadata (optional)
+            checkpoint_type = message.data.get("checkpoint_type")
+            checkpoint_state_vars = message.data.get("checkpoint_state_vars")
+            state_size_bytes = message.data.get("state_size_bytes")
+
             # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-            
+
             if not worker_id:
                 print(f"WorkerMessageHandler: Could not find worker for checkpoint")
                 return
-            
+
             # Convert hex back to bytes
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
             
-            print(f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
-                  f"for task {task_id} (size: {len(checkpoint_data_bytes)} bytes, "
-                  f"progress: {progress_percent}%)")
-            
+            # Build log message with declarative checkpoint details if present
+            state_vars_info = ""
+            if checkpoint_state_vars:
+                state_vars_info = f", state_vars: {checkpoint_state_vars}"
+
+            print(
+                f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
+                f"for task {task_id} (size: {len(checkpoint_data_bytes)} bytes, "
+                f"progress: {progress_percent}%{state_vars_info})"
+            )
+
             # Get database session and store checkpoint
             from foreman.db.base import get_db_session
+
             async with get_db_session() as session:
                 success = await self.checkpoint_manager.store_checkpoint(
                     session=session,
@@ -419,22 +544,33 @@ class WorkerMessageHandler:
                     delta_data_bytes=checkpoint_data_bytes,
                     progress_percent=progress_percent,
                     checkpoint_id=checkpoint_id,
-                    compression_type=compression_type
+                    compression_type=compression_type,
+                    checkpoint_type=checkpoint_type,
+                    checkpoint_state_vars=checkpoint_state_vars,
+                    state_size_bytes=state_size_bytes,
                 )
-            
+
             if success:
-                print(f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}")
-                
+                print(
+                    f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}"
+                )
+
                 # Send acknowledgment to worker
                 from common.protocol import create_checkpoint_ack_message
+
                 ack_msg = create_checkpoint_ack_message(task_id, job_id, checkpoint_id)
                 await websocket.send(ack_msg.to_json())
             else:
-                print(f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}")
-        
+                print(
+                    f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}"
+                )
+
         except KeyError as e:
-            print(f"WorkerMessageHandler: Missing required field in checkpoint message: {e}")
+            print(
+                f"WorkerMessageHandler: Missing required field in checkpoint message: {e}"
+            )
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
             import traceback
+
             traceback.print_exc()

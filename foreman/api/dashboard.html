@@ -1,0 +1,1817 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CROWDio Foreman Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f0f2f5;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        h1 { 
+            color: #1a1a2e; 
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: #fff;
+            border: none;
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #666;
+            transition: all 0.2s;
+        }
+        .tab:hover { background: #e8e8e8; }
+        .tab.active { 
+            background: #3498db; 
+            color: white;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        /* Stats Cards */
+        .stats { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); 
+            gap: 15px; 
+            margin-bottom: 25px; 
+        }
+        .stat-card { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 12px; 
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: transform 0.2s;
+        }
+        .stat-card:hover { transform: translateY(-2px); }
+        .stat-number { 
+            font-size: 2em; 
+            font-weight: bold; 
+            color: #2c3e50; 
+        }
+        .stat-label { color: #7f8c8d; margin-top: 5px; font-size: 0.9em; }
+        .stat-card.highlight { border-left: 4px solid #3498db; }
+        .stat-card.success { border-left: 4px solid #27ae60; }
+        .stat-card.warning { border-left: 4px solid #f39c12; }
+        
+        /* Charts Section */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .chart-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .chart-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .chart-container {
+            position: relative;
+            height: 250px;
+        }
+        
+        /* Metrics Cards */
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .metric-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .metric-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1em;
+        }
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .metric-item:last-child { border-bottom: none; }
+        .metric-label { color: #7f8c8d; }
+        .metric-value { font-weight: 600; color: #2c3e50; }
+        .metric-value.good { color: #27ae60; }
+        .metric-value.warning { color: #f39c12; }
+        .metric-value.bad { color: #e74c3c; }
+        
+        /* Tables */
+        .section { margin-bottom: 25px; }
+        .section h2 { 
+            color: #2c3e50;
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        th, td { padding: 12px 15px; text-align: left; }
+        th { 
+            background: #f8f9fa; 
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 0.85em;
+            text-transform: uppercase;
+        }
+        td { border-bottom: 1px solid #eee; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: #f8f9fa; }
+        
+        /* Status Badges */
+        .status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+        .status-pending { background: #ffeaa7; color: #d68910; }
+        .status-running { background: #81ecec; color: #00838f; }
+        .status-completed { background: #a5d6a7; color: #2e7d32; }
+        .status-failed { background: #ef9a9a; color: #c62828; }
+        .status-online { background: #a5d6a7; color: #2e7d32; }
+        .status-offline { background: #ef9a9a; color: #c62828; }
+        .status-busy { background: #ffeaa7; color: #d68910; }
+        .status-assigned { background: #81ecec; color: #00838f; }
+        .status-resumed { background: #b39ddb; color: #4527a0; }
+        
+        /* Checkpoint-specific styles */
+        .checkpoint-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            font-weight: 500;
+        }
+        .checkpoint-badge.enabled { background: #e8f5e9; color: #2e7d32; }
+        .checkpoint-badge.disabled { background: #fafafa; color: #9e9e9e; }
+        .checkpoint-badge.resumed { background: #ede7f6; color: #4527a0; }
+        
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #3498db, #2ecc71);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .progress-bar.resumed {
+            background: linear-gradient(90deg, #9b59b6, #3498db);
+        }
+        
+        /* Timeline styles */
+        .timeline-container {
+            display: none;
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+        }
+        .timeline-container.expanded { display: block; }
+        
+        .timeline {
+            position: relative;
+            padding-left: 0;
+        }
+        
+        .timeline-expand-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            margin-top: 8px;
+            background: #e3f2fd;
+            border: 1px solid #90caf9;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            color: #1976d2;
+            transition: all 0.2s;
+        }
+        .timeline-expand-btn:hover {
+            background: #bbdefb;
+        }
+        .timeline-expand-btn .arrow {
+            transition: transform 0.2s;
+        }
+        .timeline-expand-btn.expanded .arrow {
+            transform: rotate(90deg);
+        }
+        .timeline-hidden-events {
+            display: none;
+        }
+        .timeline-hidden-events.expanded {
+            display: block;
+        }
+        
+        /* Expandable row */
+        .expandable-row { cursor: pointer; }
+        .expandable-row:hover { background: #e3f2fd !important; }
+        .expand-icon {
+            display: inline-block;
+            width: 20px;
+            transition: transform 0.2s;
+        }
+        .expand-icon.expanded { transform: rotate(90deg); }
+        
+        /* Summary cards grid */
+        .checkpoint-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .summary-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+            border-left: 3px solid #ddd;
+        }
+        .summary-card.primary { border-left-color: #3498db; }
+        .summary-card.success { border-left-color: #27ae60; }
+        .summary-card.warning { border-left-color: #f39c12; }
+        .summary-card.danger { border-left-color: #e74c3c; }
+        .summary-card.purple { border-left-color: #9b59b6; }
+        .summary-card .card-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .summary-card .card-label {
+            font-size: 0.8em;
+            color: #7f8c8d;
+            margin-top: 4px;
+        }
+        
+        /* Job selector */
+        .job-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        }
+        .job-selector label {
+            font-weight: 500;
+            color: #2c3e50;
+        }
+        .job-selector select {
+            flex: 1;
+            width: 100%;
+            max-width: none;
+            min-width: 0;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.9em;
+            box-sizing: border-box;
+        }
+        .job-status-indicator {
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        
+        /* Pagination styles */
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 15px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+            border-radius: 0 0 12px 12px;
+        }
+        .pagination-info {
+            color: #7f8c8d;
+            font-size: 0.85em;
+        }
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .pagination-btn {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }
+        .pagination-btn:hover:not(:disabled) {
+            background: #e3f2fd;
+            border-color: #3498db;
+        }
+        .pagination-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .pagination-page {
+            padding: 6px 10px;
+            font-size: 0.85em;
+            color: #2c3e50;
+        }
+        
+        /* Danger button (clear database) */
+        .danger-btn {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .danger-btn:hover {
+            background: #c0392b;
+        }
+        
+        /* Section header with actions */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .section-header h2 {
+            margin: 0;
+        }
+        
+        /* Job row click */
+        .job-row { cursor: pointer; }
+        .job-row:hover { background: #e3f2fd !important; }
+        
+        /* Refresh indicator */
+        .refresh-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #3498db;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .refresh-indicator.show { opacity: 1; }
+        
+        /* Loading spinner */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            color: #7f8c8d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CROWDio Foreman Dashboard</h1>
+        
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('overview')">Overview</button>
+            <button class="tab" onclick="showTab('evaluation')">Evaluation</button>
+            <button class="tab" onclick="showTab('checkpointing')">Checkpointing</button>
+            <button class="tab" onclick="showTab('jobs')">Jobs</button>
+            <button class="tab" onclick="showTab('workers')">Workers</button>
+            <button class="tab" onclick="showTab('scheduling')">Scheduling</button>
+        </div>
+        
+        <!-- Overview Tab -->
+        <div id="overview-tab" class="tab-content active">
+            <div class="stats" id="stats">
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="total-jobs">-</div>
+                    <div class="stat-label">Total Jobs</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="completed-jobs">-</div>
+                    <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-number" id="running-jobs">-</div>
+                    <div class="stat-label">Running</div>
+                </div>
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="online-workers">-</div>
+                    <div class="stat-label">Workers Online</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="throughput">-</div>
+                    <div class="stat-label">Avg Throughput</div>
+                </div>
+            </div>
+            
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Recent Job Throughput</h3>
+                    <div class="chart-container">
+                        <canvas id="throughputChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Load Distribution</h3>
+                    <div class="chart-container">
+                        <canvas id="loadChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Recent Jobs</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Throughput</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-jobs-body"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Evaluation Tab -->
+        <div id="evaluation-tab" class="tab-content">
+            <div class="stats">
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="eval-throughput">-</div>
+                    <div class="stat-label">Avg Throughput (tasks/s)</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="eval-fairness">-</div>
+                    <div class="stat-label">Jain's Fairness Index</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-number" id="eval-cv">-</div>
+                    <div class="stat-label">Load CoV</div>
+                </div>
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="eval-avg-task">-</div>
+                    <div class="stat-label">Avg Task Time (s)</div>
+                </div>
+            </div>
+            
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Job Throughput Comparison</h3>
+                    <div class="chart-container">
+                        <canvas id="evalThroughputChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Job Execution Times</h3>
+                    <div class="chart-container">
+                        <canvas id="evalExecTimeChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Worker Task Distribution</h3>
+                    <div class="chart-container">
+                        <canvas id="workerTasksChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>Task Time per Job</h3>
+                    <div class="chart-container">
+                        <canvas id="taskTimeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="metrics-row">
+                <div class="metric-card">
+                    <h3>Performance Metrics</h3>
+                    <div class="metric-item">
+                        <span class="metric-label">Total Tasks Completed</span>
+                        <span class="metric-value" id="perf-tasks">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Avg Job Completion Time</span>
+                        <span class="metric-value" id="perf-job-time">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Avg Task Execution Time</span>
+                        <span class="metric-value" id="perf-task-time">-</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <h3>Load Balancing</h3>
+                    <div class="metric-item">
+                        <span class="metric-label">Most Loaded Worker</span>
+                        <span class="metric-value" id="lb-most">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Least Loaded Worker</span>
+                        <span class="metric-value" id="lb-least">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Imbalance Ratio</span>
+                        <span class="metric-value" id="lb-imbalance">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Checkpointing & Recovery Tab -->
+        <div id="checkpointing-tab" class="tab-content">
+            <!-- Job Selector + Pause Refresh Button -->
+            <div class="job-selector" style="gap: 16px;">
+                <label for="checkpoint-job-select">Select Job:</label>
+                <select id="checkpoint-job-select" onchange="loadCheckpointData()">
+                    <option value="">Select a job</option>
+                </select>
+                <span id="job-status-badge" class="job-status-indicator status-pending" style="display: none;">-</span>
+                <button id="pause-refresh-btn" class="pagination-btn" style="margin-left: 12px; min-width: 90px;" onclick="toggleCheckpointRefresh()">⏸ Pause Refresh</button>
+            </div>
+            
+            <!-- Job-Level Summary -->
+            <div class="checkpoint-summary" id="checkpoint-summary">
+                <div class="summary-card primary">
+                    <div class="card-value" id="cp-total-tasks">-</div>
+                    <div class="card-label">Total Tasks</div>
+                </div>
+                <div class="summary-card success">
+                    <div class="card-value" id="cp-completed-tasks">-</div>
+                    <div class="card-label">Completed</div>
+                </div>
+                <div class="summary-card danger">
+                    <div class="card-value" id="cp-failed-tasks">-</div>
+                    <div class="card-label">Failed</div>
+                </div>
+                <div class="summary-card purple">
+                    <div class="card-value" id="cp-resumed-tasks">-</div>
+                    <div class="card-label">Resumed</div>
+                </div>
+                <div class="summary-card warning">
+                    <div class="card-value" id="cp-total-checkpoints">-</div>
+                    <div class="card-label">Total Checkpoints</div>
+                </div>
+                <div class="summary-card">
+                    <div class="card-value" id="cp-enabled">-</div>
+                    <div class="card-label">Checkpointing</div>
+                </div>
+            </div>
+            
+            <!-- Worker-Task Checkpoint Table -->
+            <div class="section">
+                <h2> Task Checkpoints & Recovery Status</h2>
+                <table id="checkpoint-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 30px;"></th>
+                            <th>Worker ID</th>
+                            <th>Worker Status</th>
+                            <th>Task ID</th>
+                            <th>Task Status</th>
+                            <th>Progress</th>
+                            <th>Last Checkpoint</th>
+                            <th>Checkpoints</th>
+                            <th>Resumed</th>
+                        </tr>
+                    </thead>
+                    <tbody id="checkpoint-table-body">
+                        <tr>
+                            <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                                Select a job to view checkpoint details
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="checkpoint-pagination" style="display: none;">
+                    <span class="pagination-info" id="checkpoint-pagination-info">Showing 1-10 of 0</span>
+                    <div class="pagination-controls">
+                        <button class="pagination-btn" id="checkpoint-prev-btn" onclick="changeCheckpointPage(-1)" disabled>← Prev</button>
+                        <span class="pagination-page" id="checkpoint-page-indicator">Page 1 of 1</span>
+                        <button class="pagination-btn" id="checkpoint-next-btn" onclick="changeCheckpointPage(1)" disabled>Next →</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Recovery Events Log -->
+            <div class="section">
+                <h2> Recent Recovery Events</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Event Type</th>
+                            <th>Task ID</th>
+                            <th>Worker ID</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recovery-events-body">
+                        <tr>
+                            <td colspan="5" style="text-align: center; color: #7f8c8d; padding: 20px;">
+                                No recovery events yet
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="recovery-pagination" style="display: none;">
+                    <span class="pagination-info" id="recovery-pagination-info">Showing 1-10 of 0</span>
+                    <div class="pagination-controls">
+                        <button class="pagination-btn" id="recovery-prev-btn" onclick="changeRecoveryPage(-1)" disabled>← Prev</button>
+                        <span class="pagination-page" id="recovery-page-indicator">Page 1 of 1</span>
+                        <button class="pagination-btn" id="recovery-next-btn" onclick="changeRecoveryPage(1)" disabled>Next →</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Jobs Tab -->
+        <div id="jobs-tab" class="tab-content">
+            <div class="section">
+                <h2>All Jobs</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Status</th>
+                            <th>Tasks</th>
+                            <th>Progress</th>
+                            <th>Throughput</th>
+                            <th>Duration</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-body"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Workers Tab -->
+        <div id="workers-tab" class="tab-content">
+            <div class="section">
+                <div class="section-header">
+                    <h2>Workers</h2>
+                    <button class="danger-btn" onclick="clearDatabase()">Clear Workers</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Worker ID</th>
+                            <th>Status</th>
+                            <th>Device</th>
+                            <th>CPU Model</th>
+                            <th>Cores</th>
+                            <th>CPU Freq</th>
+                            <th>RAM Total</th>
+                            <th>Score</th>
+                            <th>Tasks Done</th>
+                            <th>Failed</th>
+                            <th>Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workers-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Scheduling Tab -->
+        <div id="scheduling-tab" class="tab-content">
+            <!-- Active Scheduler Info -->
+            <div class="section">
+                <h2>Active Scheduler</h2>
+                <div class="stats" id="scheduler-stats">
+                    <div class="stat-card highlight">
+                        <div class="stat-number" id="sched-algorithm">-</div>
+                        <div class="stat-label">Algorithm</div>
+                    </div>
+                    <div class="stat-card success">
+                        <div class="stat-number" id="sched-workers">-</div>
+                        <div class="stat-label">Workers</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-number" id="sched-criteria">-</div>
+                        <div class="stat-label">Criteria</div>
+                    </div>
+                </div>
+                <div id="sched-criteria-details" style="margin-top:10px;"></div>
+            </div>
+
+            <!-- Worker Rankings -->
+            <div class="section">
+                <h2>Worker Rankings (by Scheduling Score)</h2>
+                <div id="worker-rankings-chart" style="margin-bottom: 15px;">
+                    <canvas id="workerRankChart" height="250"></canvas>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Rank</th>
+                            <th>Worker ID</th>
+                            <th>Status</th>
+                            <th>Device</th>
+                            <th>CPU Cores</th>
+                            <th>RAM Avail</th>
+                            <th>Battery</th>
+                            <th>Success Rate</th>
+                            <th>Score</th>
+                            <th>Tasks Done</th>
+                            <th>Current Task</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sched-workers-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Task Distribution Gantt -->
+            <div class="section">
+                <h2>Task Distribution Across Workers</h2>
+                <p style="color:#888;font-size:0.9em;">Shows how tasks from each job were assigned to workers</p>
+                <div id="gantt-container"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="refresh-indicator" id="refresh-indicator">Refreshing...</div>
+    
+    <script>
+        // Chart instances
+        let throughputChart, loadChart, evalThroughputChart, evalExecTimeChart, workerTasksChart, taskTimeChart;
+        
+        // Chart colors
+        const colors = {
+            primary: '#3498db',
+            success: '#27ae60',
+            warning: '#f39c12',
+            danger: '#e74c3c',
+            purple: '#9b59b6',
+            teal: '#1abc9c'
+        };
+        
+        // Initialize charts
+        function initCharts() {
+            // Overview - Throughput Chart
+            const throughputCtx = document.getElementById('throughputChart');
+            if (throughputCtx) {
+                throughputChart = new Chart(throughputCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Throughput (tasks/s)', data: [], backgroundColor: colors.primary }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Overview - Load Distribution Chart
+            const loadCtx = document.getElementById('loadChart');
+            if (loadCtx) {
+                loadChart = new Chart(loadCtx, {
+                    type: 'doughnut',
+                    data: { labels: [], datasets: [{ data: [], backgroundColor: [colors.primary, colors.success, colors.warning, colors.purple, colors.teal] }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Throughput Chart
+            const evalThroughputCtx = document.getElementById('evalThroughputChart');
+            if (evalThroughputCtx) {
+                evalThroughputChart = new Chart(evalThroughputCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Throughput (tasks/s)', data: [], backgroundColor: colors.success }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Execution Time Chart
+            const evalExecCtx = document.getElementById('evalExecTimeChart');
+            if (evalExecCtx) {
+                evalExecTimeChart = new Chart(evalExecCtx, {
+                    type: 'bar',
+                    data: { labels: [], datasets: [{ label: 'Execution Time (s)', data: [], backgroundColor: colors.warning }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+            
+            // Evaluation - Worker Tasks Chart
+            const workerTasksCtx = document.getElementById('workerTasksChart');
+            if (workerTasksCtx) {
+                workerTasksChart = new Chart(workerTasksCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            { label: 'Completed', data: [], backgroundColor: colors.success },
+                            { label: 'Failed', data: [], backgroundColor: colors.danger }
+                        ]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } } }
+                });
+            }
+            
+            // Evaluation - Task Time Chart
+            const taskTimeCtx = document.getElementById('taskTimeChart');
+            if (taskTimeCtx) {
+                taskTimeChart = new Chart(taskTimeCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            { label: 'Avg', data: [], borderColor: colors.primary, fill: false },
+                            { label: 'Min', data: [], borderColor: colors.success, fill: false },
+                            { label: 'Max', data: [], borderColor: colors.danger, fill: false }
+                        ]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+        }
+        
+        // Tab switching
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+            
+            if (tabName === 'evaluation') {
+                loadEvaluationData();
+            } else if (tabName === 'checkpointing') {
+                loadJobsForCheckpointSelector();
+                loadRecoveryEvents();
+            } else if (tabName === 'scheduling') {
+                loadSchedulingInfo();
+            }
+        }
+        
+        // Show refresh indicator
+        function showRefreshing() {
+            const indicator = document.getElementById('refresh-indicator');
+            indicator.classList.add('show');
+            setTimeout(() => indicator.classList.remove('show'), 1000);
+        }
+        
+        // Load stats
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('total-jobs').textContent = stats.total_jobs;
+                document.getElementById('running-jobs').textContent = stats.running_jobs;
+                document.getElementById('completed-jobs').textContent = stats.completed_jobs;
+                document.getElementById('online-workers').textContent = stats.online_workers || 0;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+        
+        // Load throughput history for overview chart
+        async function loadThroughputHistory() {
+            try {
+                const response = await fetch('/api/evaluation/throughput-history?limit=10');
+                const data = await response.json();
+                
+                if (throughputChart && data.labels.length > 0) {
+                    throughputChart.data.labels = data.labels;
+                    throughputChart.data.datasets[0].data = data.throughputs;
+                    throughputChart.update();
+                    
+                    // Update avg throughput stat
+                    const avg = data.throughputs.reduce((a, b) => a + b, 0) / data.throughputs.length;
+                    document.getElementById('throughput').textContent = avg.toFixed(2);
+                }
+            } catch (error) {
+                console.error('Error loading throughput:', error);
+            }
+        }
+        
+        // Load load distribution for overview
+        async function loadLoadDistribution() {
+            try {
+                const response = await fetch('/api/evaluation/load-distribution');
+                const data = await response.json();
+                
+                if (loadChart && data.labels.length > 0) {
+                    loadChart.data.labels = data.labels.map(l => l.substring(0, 8));
+                    loadChart.data.datasets[0].data = data.data;
+                    loadChart.update();
+                }
+            } catch (error) {
+                console.error('Error loading load distribution:', error);
+            }
+        }
+        
+        // Load evaluation data
+        async function loadEvaluationData() {
+            try {
+                const response = await fetch('/api/evaluation/metrics');
+                const data = await response.json();
+                
+                // Update stats
+                document.getElementById('eval-throughput').textContent = data.performance.overall_throughput.toFixed(2);
+                document.getElementById('eval-fairness').textContent = data.load_balancing.jains_fairness_index.toFixed(3);
+                document.getElementById('eval-cv').textContent = data.load_balancing.coefficient_of_variation.toFixed(3);
+                document.getElementById('eval-avg-task').textContent = data.performance.avg_task_execution_time.toFixed(2);
+                
+                // Update metric cards
+                document.getElementById('perf-tasks').textContent = data.performance.completed_tasks;
+                document.getElementById('perf-job-time').textContent = data.performance.avg_job_completion_time.toFixed(2) + 's';
+                document.getElementById('perf-task-time').textContent = data.performance.avg_task_execution_time.toFixed(2) + 's';
+                
+                const mostLoaded = data.load_balancing.most_loaded_worker;
+                const leastLoaded = data.load_balancing.least_loaded_worker;
+                document.getElementById('lb-most').textContent = mostLoaded ? mostLoaded.substring(0, 12) : '-';
+                document.getElementById('lb-least').textContent = leastLoaded ? leastLoaded.substring(0, 12) : '-';
+                document.getElementById('lb-imbalance').textContent = (data.load_balancing.load_imbalance_ratio * 100).toFixed(1) + '%';
+                
+                // Update charts
+                const charts = data.charts;
+                
+                if (evalThroughputChart) {
+                    evalThroughputChart.data.labels = charts.job_throughput.labels;
+                    evalThroughputChart.data.datasets[0].data = charts.job_throughput.data;
+                    evalThroughputChart.update();
+                }
+                
+                if (evalExecTimeChart) {
+                    evalExecTimeChart.data.labels = charts.job_execution_time.labels;
+                    evalExecTimeChart.data.datasets[0].data = charts.job_execution_time.data;
+                    evalExecTimeChart.update();
+                }
+                
+                if (workerTasksChart) {
+                    workerTasksChart.data.labels = charts.worker_tasks.labels;
+                    workerTasksChart.data.datasets[0].data = charts.worker_tasks.completed;
+                    workerTasksChart.data.datasets[1].data = charts.worker_tasks.failed;
+                    workerTasksChart.update();
+                }
+                
+                if (taskTimeChart) {
+                    taskTimeChart.data.labels = charts.task_time_distribution.labels;
+                    taskTimeChart.data.datasets[0].data = charts.task_time_distribution.avg;
+                    taskTimeChart.data.datasets[1].data = charts.task_time_distribution.min;
+                    taskTimeChart.data.datasets[2].data = charts.task_time_distribution.max;
+                    taskTimeChart.update();
+                }
+            } catch (error) {
+                console.error('Error loading evaluation data:', error);
+            }
+        }
+        
+        // Load jobs
+        async function loadJobs() {
+            try {
+                const response = await fetch('/api/jobs');
+                const jobs = await response.json();
+                
+                // Recent jobs (overview)
+                const recentBody = document.getElementById('recent-jobs-body');
+                recentBody.innerHTML = '';
+                
+                jobs.slice(0, 5).forEach(job => {
+                    const row = document.createElement('tr');
+                    row.className = 'job-row';
+                    const progress = job.total_tasks > 0 ? Math.round((job.completed_tasks / job.total_tasks) * 100) : 0;
+                    const throughput = job.completed_at && job.created_at ? 
+                        (job.completed_tasks / ((new Date(job.completed_at) - new Date(job.created_at)) / 1000)).toFixed(2) : '-';
+                    
+                    row.innerHTML = `
+                        <td>${job.id.substring(0, 12)}...</td>
+                        <td><span class="status status-${job.status}">${job.status}</span></td>
+                        <td>${progress}% (${job.completed_tasks}/${job.total_tasks})</td>
+                        <td>${throughput} t/s</td>
+                        <td>${new Date(job.created_at).toLocaleString()}</td>
+                    `;
+                    recentBody.appendChild(row);
+                });
+                
+                // All jobs
+                const jobsBody = document.getElementById('jobs-body');
+                jobsBody.innerHTML = '';
+                
+                jobs.forEach(job => {
+                    const row = document.createElement('tr');
+                    const progress = job.total_tasks > 0 ? Math.round((job.completed_tasks / job.total_tasks) * 100) : 0;
+                    
+                    let duration = '-';
+                    let throughput = '-';
+                    if (job.completed_at && job.created_at) {
+                        const durSec = (new Date(job.completed_at) - new Date(job.created_at)) / 1000;
+                        duration = durSec.toFixed(1) + 's';
+                        throughput = (job.completed_tasks / durSec).toFixed(2) + ' t/s';
+                    }
+                    
+                    row.innerHTML = `
+                        <td>${job.id.substring(0, 16)}...</td>
+                        <td><span class="status status-${job.status}">${job.status}</span></td>
+                        <td>${job.completed_tasks}/${job.total_tasks}</td>
+                        <td>${progress}%</td>
+                        <td>${throughput}</td>
+                        <td>${duration}</td>
+                        <td>${new Date(job.created_at).toLocaleString()}</td>
+                    `;
+                    jobsBody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading jobs:', error);
+            }
+        }
+        
+        // Calculate device score for scheduling based on WRR algorithm
+        // Weights: success_rate 35%, cpu_cores 25%, ram_available 20%, battery 20%
+        function calculateDeviceScore(worker) {
+            let score = 0.0;
+            
+            // Success rate: 35 points
+            const totalTasks = worker.total_tasks_completed + worker.total_tasks_failed;
+            if (totalTasks > 0) {
+                const successRate = worker.total_tasks_completed / totalTasks;
+                score += successRate * 35;
+            } else {
+                // New worker gets full success_rate points
+                score += 35;
+            }
+            
+            // CPU cores: 25 points (max 16 cores = full points)
+            if (worker.cpu_cores) {
+                score += Math.min(worker.cpu_cores / 16.0, 1.0) * 25;
+            }
+            
+            // RAM available: 20 points (max 16GB = full points)
+            if (worker.ram_available_mb) {
+                score += Math.min(worker.ram_available_mb / 16384.0, 1.0) * 20;
+            }
+            
+            // Battery level: 20 points
+            if (worker.is_charging) {
+                score += 20;
+            } else if (worker.battery_level !== null && worker.battery_level !== undefined) {
+                score += (worker.battery_level / 100.0) * 20;
+            } else {
+                // Desktop with no battery = full points
+                score += 20;
+            }
+            
+            return score.toFixed(1);
+        }
+        
+        // Get score color class based on value
+        function getScoreClass(score) {
+            if (score >= 70) return 'good';
+            if (score >= 40) return 'warning';
+            return 'bad';
+        }
+        
+        // Load workers
+        async function loadWorkers() {
+            try {
+                const response = await fetch('/api/workers');
+                const workers = await response.json();
+                
+                const tbody = document.getElementById('workers-body');
+                tbody.innerHTML = '';
+                
+                workers.forEach(worker => {
+                    const row = document.createElement('tr');
+                    const score = calculateDeviceScore(worker);
+                    const cpuModel = worker.cpu_model ? (worker.cpu_model.length > 25 ? worker.cpu_model.substring(0, 25) + '...' : worker.cpu_model) : '-';
+                    const cpuFreq = worker.cpu_frequency_mhz ? (worker.cpu_frequency_mhz / 1000).toFixed(2) + ' GHz' : '-';
+                    const ramTotal = worker.ram_total_mb ? (worker.ram_total_mb / 1024).toFixed(1) + ' GB' : '-';
+                    
+                    row.innerHTML = `
+                        <td>${worker.id.substring(0, 16)}...</td>
+                        <td><span class="status status-${worker.status}">${worker.status}</span></td>
+                        <td>${worker.device_type || '-'}</td>
+                        <td title="${worker.cpu_model || ''}">${cpuModel}</td>
+                        <td>${worker.cpu_cores || '-'}</td>
+                        <td>${cpuFreq}</td>
+                        <td>${ramTotal}</td>
+                        <td><span class="metric-value ${getScoreClass(parseFloat(score))}">${score}</span></td>
+                        <td>${worker.total_tasks_completed}</td>
+                        <td>${worker.total_tasks_failed}</td>
+                        <td>${new Date(worker.last_seen).toLocaleString()}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading workers:', error);
+            }
+        }
+        
+        // ==================== Scheduling Visualization ====================
+        let workerRankChart = null;
+
+        async function loadSchedulingInfo() {
+            try {
+                const response = await fetch('/api/scheduling-info');
+                const data = await response.json();
+                renderSchedulerInfo(data.scheduler);
+                renderWorkerRankings(data.workers);
+                renderGanttChart(data.jobs, data.workers);
+            } catch (error) {
+                console.error('Error loading scheduling info:', error);
+            }
+        }
+
+        function renderSchedulerInfo(scheduler) {
+            document.getElementById('sched-algorithm').textContent = scheduler.algorithm.toUpperCase();
+            document.getElementById('sched-criteria').textContent = scheduler.criteria_names.length || 'N/A';
+
+            const detailsDiv = document.getElementById('sched-criteria-details');
+            if (scheduler.criteria_names.length > 0) {
+                let html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
+                scheduler.criteria_names.forEach((name, i) => {
+                    const weight = scheduler.criteria_weights[i];
+                    const type = scheduler.criteria_types[i] === 1 ? 'Benefit' : 'Cost';
+                    const typeColor = type === 'Benefit' ? '#27ae60' : '#e74c3c';
+                    html += `<div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 14px;font-size:0.85em;">
+                        <b>${name.replace(/_/g, ' ')}</b><br>
+                        <span style="color:#888;">Weight: ${(weight * 100).toFixed(0)}%</span>
+                        <span style="color:${typeColor};margin-left:6px;">${type}</span>
+                    </div>`;
+                });
+                html += '</div>';
+                detailsDiv.innerHTML = html;
+            } else {
+                detailsDiv.innerHTML = '<span style="color:#888;">Simple scheduler — no MCDM criteria configured</span>';
+            }
+        }
+
+        function renderWorkerRankings(workers) {
+            document.getElementById('sched-workers').textContent = workers.length;
+
+            // Calculate scores and sort
+            const scored = workers.map(w => {
+                const score = parseFloat(calculateDeviceScore(w));
+                return { ...w, score };
+            }).sort((a, b) => b.score - a.score);
+
+            // Render table
+            const tbody = document.getElementById('sched-workers-body');
+            tbody.innerHTML = '';
+            scored.forEach((w, idx) => {
+                const row = document.createElement('tr');
+                const ramAvail = w.ram_available_mb ? (w.ram_available_mb / 1024).toFixed(1) + ' GB' : '-';
+                const battery = w.is_charging ? 'Charging' : (w.battery_level != null ? w.battery_level.toFixed(0) + '%' : 'N/A');
+                const currentTask = w.current_task_id ? w.current_task_id.substring(0, 12) + '...' : '<span style="color:#888">idle</span>';
+                row.innerHTML = `
+                    <td><b>#${idx + 1}</b></td>
+                    <td>${w.id.substring(0, 16)}...</td>
+                    <td><span class="status status-${w.status}">${w.status}</span></td>
+                    <td>${w.device_type}</td>
+                    <td>${w.cpu_cores || '-'}</td>
+                    <td>${ramAvail}</td>
+                    <td>${battery}</td>
+                    <td>${w.success_rate}%</td>
+                    <td><span class="metric-value ${getScoreClass(w.score)}">${w.score.toFixed(1)}</span></td>
+                    <td>${w.total_tasks_completed}</td>
+                    <td>${currentTask}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            // Render bar chart
+            const ctx = document.getElementById('workerRankChart');
+            if (!ctx) return;
+
+            if (workerRankChart) workerRankChart.destroy();
+
+            const labels = scored.map((w, i) => 'W' + (i + 1) + ': ' + w.id.substring(0, 8));
+            const scores = scored.map(w => w.score);
+            const bgColors = scored.map(w => {
+                if (w.score >= 70) return colors.success;
+                if (w.score >= 40) return colors.warning;
+                return colors.danger;
+            });
+
+            workerRankChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Device Score',
+                        data: scores,
+                        backgroundColor: bgColors,
+                        borderRadius: 4,
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { min: 0, max: 100, title: { display: true, text: 'Score (0-100)' } }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                afterLabel: function(context) {
+                                    const w = scored[context.dataIndex];
+                                    return `Cores: ${w.cpu_cores || '?'} | RAM: ${w.ram_available_mb ? (w.ram_available_mb/1024).toFixed(1)+'GB' : '?'} | Success: ${w.success_rate}%`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderGanttChart(jobs, workers) {
+            const container = document.getElementById('gantt-container');
+            if (!jobs || jobs.length === 0) {
+                container.innerHTML = '<p style="color:#888;">No jobs to display</p>';
+                return;
+            }
+
+            // Build worker color map
+            const workerIds = [...new Set(workers.map(w => w.id))];
+            const ganttColors = ['#3498db', '#27ae60', '#e74c3c', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#2980b9', '#c0392b', '#16a085'];
+            const workerColorMap = {};
+            workerIds.forEach((wid, i) => { workerColorMap[wid] = ganttColors[i % ganttColors.length]; });
+
+            let html = '';
+            jobs.forEach(job => {
+                if (!job.task_assignments || job.task_assignments.length === 0) return;
+
+                // Group tasks by worker
+                const byWorker = {};
+                job.task_assignments.forEach(t => {
+                    const wid = t.worker_id || 'unassigned';
+                    if (!byWorker[wid]) byWorker[wid] = [];
+                    byWorker[wid].push(t);
+                });
+
+                html += `<div style="background:#fff;border-radius:10px;padding:15px;margin-bottom:15px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">`;
+                html += `<h3 style="margin:0 0 10px;font-size:0.95em;">Job: ${job.job_id.substring(0, 20)}... <span class="status status-${job.status}">${job.status}</span> (${job.completed_tasks}/${job.total_tasks} tasks)</h3>`;
+
+                // Render a row per worker with task blocks
+                Object.keys(byWorker).forEach(wid => {
+                    const tasks = byWorker[wid];
+                    const color = workerColorMap[wid] || '#999';
+                    const shortId = wid === 'unassigned' ? 'Unassigned' : wid.substring(0, 12) + '...';
+
+                    html += `<div style="display:flex;align-items:center;margin-bottom:6px;">`;
+                    html += `<div style="width:140px;font-size:0.8em;color:#555;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${wid}">${shortId}</div>`;
+                    html += `<div style="flex:1;display:flex;gap:3px;flex-wrap:wrap;">`;
+
+                    tasks.forEach(t => {
+                        const statusColor = t.status === 'completed' ? color :
+                                            t.status === 'assigned' ? color + '99' :
+                                            t.status === 'failed' ? '#e74c3c' : '#ccc';
+                        const icon = t.status === 'completed' ? '&#10003;' :
+                                     t.status === 'assigned' ? '&#9654;' :
+                                     t.status === 'failed' ? '&#10007;' : '&#8943;';
+                        html += `<div style="background:${statusColor};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.75em;cursor:default;" title="Task: ${t.task_id}\nStatus: ${t.status}\nAssigned: ${t.assigned_at || 'N/A'}\nCompleted: ${t.completed_at || 'N/A'}">${icon}</div>`;
+                    });
+
+                    html += `</div></div>`;
+                });
+
+                // Legend
+                html += `<div style="margin-top:8px;display:flex;gap:12px;font-size:0.75em;color:#888;">`;
+                html += `<span>&#10003; Completed</span><span>&#9654; In Progress</span><span>&#10007; Failed</span><span>&#8943; Pending</span>`;
+                html += `</div>`;
+                html += `</div>`;
+            });
+
+            container.innerHTML = html || '<p style="color:#888;">No task assignments yet</p>';
+        }
+
+        // Clear entire database (all workers, jobs, tasks)
+        async function clearDatabase() {
+            if (!confirm('Are you sure you want to clear the entire database?\\n\\nThis will delete ALL workers, jobs, and tasks. This action cannot be undone.')) {
+                return;
+            }
+            try {
+                const response = await fetch('/api/database/clear', {
+                    method: 'DELETE'
+                });
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(result.message);
+                    await refreshAll();
+                } else {
+                    const error = await response.json();
+                    alert('Failed to clear database: ' + (error.detail || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error clearing database:', error);
+                alert('Failed to clear database: ' + error.message);
+            }
+        }
+        
+        // ==================== Checkpointing & Recovery Functions ====================
+        
+        // Load jobs for checkpoint selector dropdown
+        async function loadJobsForCheckpointSelector() {
+            try {
+                const response = await fetch('/api/jobs');
+                const jobs = await response.json();
+                
+                const select = document.getElementById('checkpoint-job-select');
+                const currentValue = select.value;
+                
+                // Keep first option, clear rest
+                select.innerHTML = '<option value="">-- Select a job --</option>';
+                
+                jobs.forEach(job => {
+                    const option = document.createElement('option');
+                    option.value = job.id;
+                    const statusIcon = job.status === 'completed' ? '' : job.status === 'running' ? '' : '';
+                    option.textContent = `${statusIcon} ${job.id} (${job.completed_tasks}/${job.total_tasks} tasks)`;
+                    select.appendChild(option);
+                });
+                
+                // Restore selection if still valid
+                if (currentValue && jobs.find(j => j.id === currentValue)) {
+                    select.value = currentValue;
+                }
+            } catch (error) {
+                console.error('Error loading jobs for checkpoint selector:', error);
+            }
+        }
+        
+        // Load checkpoint data for selected job
+        async function loadCheckpointData() {
+            const jobId = document.getElementById('checkpoint-job-select').value;
+            const statusBadge = document.getElementById('job-status-badge');
+            
+            if (!jobId) {
+                // Reset to default state
+                document.getElementById('cp-total-tasks').textContent = '-';
+                document.getElementById('cp-completed-tasks').textContent = '-';
+                document.getElementById('cp-failed-tasks').textContent = '-';
+                document.getElementById('cp-resumed-tasks').textContent = '-';
+                document.getElementById('cp-total-checkpoints').textContent = '-';
+                document.getElementById('cp-enabled').textContent = '-';
+                statusBadge.style.display = 'none';
+                
+                document.getElementById('checkpoint-table-body').innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                            Select a job to view checkpoint details
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/checkpoints/job/${jobId}`);
+                const data = await response.json();
+                
+                // Update job status badge
+                statusBadge.style.display = 'inline-block';
+                statusBadge.textContent = data.job_status.toUpperCase();
+                statusBadge.className = `job-status-indicator status-${data.job_status}`;
+                
+                // Update summary cards
+                document.getElementById('cp-total-tasks').textContent = data.total_tasks;
+                document.getElementById('cp-completed-tasks').textContent = data.completed_tasks;
+                document.getElementById('cp-failed-tasks').textContent = data.failed_tasks;
+                document.getElementById('cp-resumed-tasks').textContent = data.resumed_tasks;
+                document.getElementById('cp-total-checkpoints').textContent = data.total_checkpoints;
+                document.getElementById('cp-enabled').innerHTML = data.checkpointing_enabled 
+                    ? '<span class="checkpoint-badge enabled">✓ Enabled</span>'
+                    : '<span class="checkpoint-badge disabled">✗ Disabled</span>';
+                
+                // Update task table
+                renderCheckpointTable(data.tasks);
+                
+            } catch (error) {
+                console.error('Error loading checkpoint data:', error);
+                document.getElementById('checkpoint-table-body').innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #e74c3c; padding: 40px;">
+                            Error loading checkpoint data
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+        
+        // Render checkpoint table with expandable timeline rows
+        // Pagination state for checkpoint table
+        let checkpointAllTasks = [];
+        let checkpointCurrentPage = 1;
+        const checkpointPageSize = 10;
+        
+        function renderCheckpointTable(tasks) {
+            // Store all tasks for pagination
+            checkpointAllTasks = tasks || [];
+            checkpointCurrentPage = 1;
+            renderCheckpointPage();
+        }
+        
+        function renderCheckpointPage() {
+            const tbody = document.getElementById('checkpoint-table-body');
+            const pagination = document.getElementById('checkpoint-pagination');
+            tbody.innerHTML = '';
+            
+            if (!checkpointAllTasks || checkpointAllTasks.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; color: #7f8c8d; padding: 40px;">
+                            No tasks found for this job
+                        </td>
+                    </tr>
+                `;
+                pagination.style.display = 'none';
+                return;
+            }
+            
+            // Calculate pagination
+            const totalPages = Math.ceil(checkpointAllTasks.length / checkpointPageSize);
+            const startIndex = (checkpointCurrentPage - 1) * checkpointPageSize;
+            const endIndex = Math.min(startIndex + checkpointPageSize, checkpointAllTasks.length);
+            const pageTasks = checkpointAllTasks.slice(startIndex, endIndex);
+            
+            function formatTaskId(id) {
+                if (!id || id.length <= 15) return id;
+                return id.substring(0, 7) + '...' + id.substring(id.length - 7);
+            }
+            
+            pageTasks.forEach((task, i) => {
+                const index = startIndex + i;
+                // Main row
+                const row = document.createElement('tr');
+                row.className = 'expandable-row';
+                row.onclick = () => toggleTimeline(index);
+                
+                const progressClass = task.resumed_from_checkpoint ? 'resumed' : '';
+                const lastCheckpoint = task.last_checkpoint_at 
+                    ? new Date(task.last_checkpoint_at).toLocaleTimeString() 
+                    : '-';
+                
+                row.innerHTML = `
+                    <td><span class="expand-icon" id="expand-icon-${index}">▶</span></td>
+                    <td>${task.worker_id ? task.worker_id.substring(0, 30) + '...' : '<em>Unassigned</em>'}</td>
+                    <td><span class="status status-${task.worker_status || 'offline'}">${task.worker_status || 'N/A'}</span></td>
+                    <td>${formatTaskId(task.task_id)}</td>
+                    <td><span class="status status-${task.status}">${task.status}</span></td>
+                    <td>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar ${progressClass}" style="width: ${task.progress_percent}%"></div>
+                        </div>
+                        <small>${task.progress_percent.toFixed(1)}%</small>
+                    </td>
+                    <td>${lastCheckpoint}</td>
+                    <td><strong>${task.checkpoint_count}</strong></td>
+                    <td>${task.resumed_from_checkpoint 
+                        ? '<span class="checkpoint-badge resumed">Yes</span>' 
+                        : '<span style="color: #9e9e9e;">No</span>'}</td>
+                `;
+                tbody.appendChild(row);
+                
+                // Timeline row (hidden by default)
+                const timelineRow = document.createElement('tr');
+                timelineRow.id = `timeline-row-${index}`;
+                timelineRow.innerHTML = `
+                    <td colspan="9" style="padding: 0;">
+                        <div class="timeline-container" id="timeline-${index}">
+                            ${renderTimeline(task.timeline || [])}
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(timelineRow);
+            });
+            
+            // Update pagination UI
+            pagination.style.display = 'flex';
+            document.getElementById('checkpoint-pagination-info').textContent = 
+                `Showing ${startIndex + 1}-${endIndex} of ${checkpointAllTasks.length}`;
+            document.getElementById('checkpoint-page-indicator').textContent = 
+                `Page ${checkpointCurrentPage} of ${totalPages}`;
+            document.getElementById('checkpoint-prev-btn').disabled = checkpointCurrentPage <= 1;
+            document.getElementById('checkpoint-next-btn').disabled = checkpointCurrentPage >= totalPages;
+        }
+        
+        function changeCheckpointPage(delta) {
+            const totalPages = Math.ceil(checkpointAllTasks.length / checkpointPageSize);
+            const newPage = checkpointCurrentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                checkpointCurrentPage = newPage;
+                renderCheckpointPage();
+            }
+        }
+        
+        // Render timeline for a task
+        function renderTimeline(events) {
+            if (!events || events.length === 0) {
+                return '<div style="padding: 10px; color: #7f8c8d; font-size: 0.9em;">No checkpoint events recorded yet</div>';
+            }
+
+            const uniqueId = 'timeline-events-' + Math.random().toString(36).substr(2, 9);
+            const showInitially = 3;
+            const hasMoreEvents = events.length > showInitially;
+            
+            function getEventStyle(eventType) {
+                switch(eventType) {
+                    case 'base_checkpoint': return { color: '#2ecc71', bg: '#e8f5e9' };
+                    case 'delta_checkpoint': return { color: '#3498db', bg: '#e3f2fd' };
+                    case 'failure': return { color: '#e74c3c', bg: '#ffebee' };
+                    case 'resume': return { color: '#9b59b6', bg: '#f3e5f5' };
+                    case 'complete': return { color: '#27ae60', bg: '#e8f5e9' };
+                    default: return { color: '#3498db', bg: '#e3f2fd' };
+                }
+            }
+            
+            function renderEvent(event, showLine) {
+                const time = new Date(event.timestamp).toLocaleString();
+                const style = getEventStyle(event.type);
+                return `
+                <div class="timeline-event-item" style="display: flex; align-items: flex-start; position: relative; min-height: 48px;">
+                    <div style="position: relative; width: 32px; display: flex; flex-direction: column; align-items: center;">
+                        <div style="width: 18px; height: 18px; border-radius: 50%; background: ${style.bg}; border: 3px solid ${style.color}; z-index: 2;"></div>
+                        ${showLine ? `<div style="width: 3px; background: linear-gradient(to bottom, ${style.color}, #ddd); flex: 1 1 auto; min-height: 24px; z-index: 1;"></div>` : ''}
+                    </div>
+                    <div style="margin-left: 10px; flex: 1; padding-bottom: 8px;">
+                        <div style="font-weight: 600; color: #2c3e50; font-size: 0.95em;">${event.description}</div>
+                        <div style="color: #7f8c8d; font-size: 0.85em; margin-top: 2px;">${time}</div>
+                    </div>
+                </div>`;
+            }
+
+            let html = `<div class="timeline">`;
+            
+            // Render first 3 events always visible
+            const visibleEvents = events.slice(0, showInitially);
+            visibleEvents.forEach((event, idx) => {
+                // Show line if not the last visible OR if there are more hidden events
+                const isLastVisible = idx === visibleEvents.length - 1;
+                const showLine = !isLastVisible || hasMoreEvents;
+                html += renderEvent(event, showLine);
+            });
+            
+            // If more than 3 events, add expandable section
+            if (hasMoreEvents) {
+                const hiddenEvents = events.slice(showInitially);
+                html += `
+                <div class="timeline-hidden-events" id="${uniqueId}" data-count="${hiddenEvents.length}">`;
+                hiddenEvents.forEach((event, idx) => {
+                    const isLastHidden = idx === hiddenEvents.length - 1;
+                    html += renderEvent(event, !isLastHidden);
+                });
+                html += `</div>
+                <button class="timeline-expand-btn" onclick="toggleTimelineEvents('${uniqueId}', this, event)">
+                    <span class="arrow">▶</span>
+                    <span class="btn-text">Show ${hiddenEvents.length} more event${hiddenEvents.length > 1 ? 's' : ''}</span>
+                </button>`;
+            }
+            
+            html += '</div>';
+            return html;
+        }
+        
+        // Toggle hidden timeline events
+        function toggleTimelineEvents(id, btn, e) {
+            e.stopPropagation(); // Prevent row collapse
+            const container = document.getElementById(id);
+            const btnText = btn.querySelector('.btn-text');
+            const eventCount = parseInt(container.dataset.count, 10);
+            
+            if (container.classList.contains('expanded')) {
+                container.classList.remove('expanded');
+                btn.classList.remove('expanded');
+                btnText.textContent = `Show ${eventCount} more event${eventCount > 1 ? 's' : ''}`;
+            } else {
+                container.classList.add('expanded');
+                btn.classList.add('expanded');
+                btnText.textContent = 'Show less';
+            }
+        }
+        
+        // Toggle timeline expansion
+        function toggleTimeline(index) {
+            const timeline = document.getElementById(`timeline-${index}`);
+            const icon = document.getElementById(`expand-icon-${index}`);
+            const isCurrentlyExpanded = timeline.classList.contains('expanded');
+
+            // Collapse all other expanded timelines and their icons
+            document.querySelectorAll('.timeline-container.expanded').forEach(expandedTimeline => {
+                if (expandedTimeline.id !== `timeline-${index}`) {
+                    expandedTimeline.classList.remove('expanded');
+                    // Extract the index from the timeline id and collapse its icon
+                    const timelineId = expandedTimeline.id;
+                    const expandedIndex = timelineId.replace('timeline-', '');
+                    const expandedIcon = document.getElementById(`expand-icon-${expandedIndex}`);
+                    if (expandedIcon) {
+                        expandedIcon.classList.remove('expanded');
+                    }
+                }
+            });
+
+            // Toggle the clicked row
+            if (isCurrentlyExpanded) {
+                timeline.classList.remove('expanded');
+                icon.classList.remove('expanded');
+            } else {
+                timeline.classList.add('expanded');
+                icon.classList.add('expanded');
+            }
+        }
+        
+        // Load recovery events with pagination
+        let recoveryAllEvents = [];
+        let recoveryCurrentPage = 1;
+        const recoveryPageSize = 10;
+        
+        async function loadRecoveryEvents() {
+            try {
+                const response = await fetch('/api/checkpoints/recovery-events?limit=100');
+                const events = await response.json();
+                
+                // Store all events for pagination
+                recoveryAllEvents = events || [];
+                recoveryCurrentPage = 1;
+                renderRecoveryPage();
+                
+            } catch (error) {
+                console.error('Error loading recovery events:', error);
+            }
+        }
+        
+        function renderRecoveryPage() {
+            const tbody = document.getElementById('recovery-events-body');
+            const pagination = document.getElementById('recovery-pagination');
+            tbody.innerHTML = '';
+            
+            if (!recoveryAllEvents || recoveryAllEvents.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: #7f8c8d; padding: 20px;">
+                            No recovery events yet
+                        </td>
+                    </tr>
+                `;
+                pagination.style.display = 'none';
+                return;
+            }
+            
+            // Calculate pagination
+            const totalPages = Math.ceil(recoveryAllEvents.length / recoveryPageSize);
+            const startIndex = (recoveryCurrentPage - 1) * recoveryPageSize;
+            const endIndex = Math.min(startIndex + recoveryPageSize, recoveryAllEvents.length);
+            const pageEvents = recoveryAllEvents.slice(startIndex, endIndex);
+            
+            function formatTaskId(id) {
+                if (!id || id.length <= 15) return id;
+                return id.substring(0, 7) + '...' + id.substring(id.length - 7);
+            }
+            
+            pageEvents.forEach(event => {
+                const row = document.createElement('tr');
+                const time = new Date(event.timestamp).toLocaleString();
+                let eventIcon = '';
+                let eventClass = 'warning';
+                if (event.event_type === 'worker_failure') {
+                    eventClass = 'danger';
+                } else if (event.event_type === 'task_resumed') {
+                    eventClass = 'purple';
+                } else if (event.event_type === 'checkpoint_recovery') {
+                    eventClass = 'primary';
+                }
+                row.innerHTML = `
+                    <td>${time}</td>
+                    <td><span class="status status-${event.event_type === 'worker_failure' ? 'failed' : 'resumed'}">${eventIcon} ${event.event_type}</span></td>
+                    <td>${event.task_id ? formatTaskId(event.task_id) : '-'}</td>
+                    <td>${event.worker_id ? event.worker_id.substring(0, 12) + '...' : '-'}</td>
+                    <td>${event.details || '-'}</td>
+                `;
+                tbody.appendChild(row);
+            });
+            // Update pagination UI
+            pagination.style.display = 'flex';
+            document.getElementById('recovery-pagination-info').textContent = 
+                `Showing ${startIndex + 1}-${endIndex} of ${recoveryAllEvents.length}`;
+            document.getElementById('recovery-page-indicator').textContent = 
+                `Page ${recoveryCurrentPage} of ${totalPages}`;
+            document.getElementById('recovery-prev-btn').disabled = recoveryCurrentPage <= 1;
+            document.getElementById('recovery-next-btn').disabled = recoveryCurrentPage >= totalPages;
+        }
+        
+        function changeRecoveryPage(delta) {
+            const totalPages = Math.ceil(recoveryAllEvents.length / recoveryPageSize);
+            const newPage = recoveryCurrentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                recoveryCurrentPage = newPage;
+                renderRecoveryPage();
+            }
+        }
+        
+        // Checkpoint refresh state
+        let checkpointRefreshPaused = false;
+        
+        function toggleCheckpointRefresh() {
+            checkpointRefreshPaused = !checkpointRefreshPaused;
+            const btn = document.getElementById('pause-refresh-btn');
+            if (checkpointRefreshPaused) {
+                btn.textContent = '▶ Resume Refresh';
+                btn.style.background = '#e8f5e9';
+                btn.style.borderColor = '#27ae60';
+            } else {
+                btn.textContent = '⏸ Pause Refresh';
+                btn.style.background = '';
+                btn.style.borderColor = '';
+            }
+        }
+        
+        async function refreshCheckpointingTab() {
+            // Only refresh if checkpointing tab is active and refresh is not paused
+            const checkpointingTab = document.getElementById('checkpointing-tab');
+            if (!checkpointingTab.classList.contains('active') || checkpointRefreshPaused) {
+                return;
+            }
+            
+            const jobId = document.getElementById('checkpoint-job-select').value;
+            if (jobId) {
+                await loadCheckpointData();
+            }
+            await loadRecoveryEvents();
+        }
+        
+        // Refresh all data
+        async function refreshAll() {
+            showRefreshing();
+            await Promise.all([
+                loadStats(),
+                loadJobs(),
+                loadWorkers(),
+                loadThroughputHistory(),
+                loadLoadDistribution()
+            ]);
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            refreshAll();
+            
+            // Refresh every 0.5 seconds
+            setInterval(refreshAll, 500);
+            
+            // Refresh checkpointing tab every 3 seconds for more responsive updates
+            setInterval(refreshCheckpointingTab, 3000);
+        });
+    </script>
+</body>
+</html>
