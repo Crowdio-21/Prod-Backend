@@ -7,10 +7,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from developer_sdk import connect, disconnect, crowdio
-from developer_sdk.image_utils import (
-    split_image_into_tiles,
-    reassemble_tiles 
-)
+from developer_sdk.image_utils import split_image_into_tiles, reassemble_tiles
 
 
 @crowdio.task(
@@ -92,21 +89,27 @@ async def main():
     """Main function demonstrating distributed image tile processing with checkpointing"""
 
     try:
-        foreman_host = "localhost" 
-        await connect(foreman_host, 9000) 
+        foreman_host = "localhost"
+        await connect(foreman_host, 9000)
 
-        image_path = "image.png" 
-        
+        image_path = "image.png"
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
         original_image = Image.open(image_path)
-        
+
         tile_size = 200
         tiles = split_image_into_tiles(original_image, tile_size=tile_size)
-        
+        if not tiles:
+            raise ValueError(
+                "No tiles produced from image. Check image size or tile_size."
+            )
+
         # filter_types = ["sharpen", "enhance", "blur", "grayscale", "edge"]
         filter_types = ["sharpen"]
 
         for filter_type in filter_types:
-        
+
             # Prepare tile data with filter type
             tile_inputs = [
                 {
@@ -136,12 +139,17 @@ async def main():
             print(f"\n📊 Processing Statistics:")
             print(f"   Total time: {total_time:.2f}s")
             print(f"   Average time per tile: {avg_tile_time:.4f}s")
-            print(f"   Speedup factor: {sum(processing_times) / total_time:.2f}x")
+            if total_time > 0:
+                print(f"   Speedup factor: {sum(processing_times) / total_time:.2f}x")
+            else:
+                print("   Speedup factor: N/A (total time is zero)")
 
             print(f"\n🔧 Reassembling tiles...")
             result_image = reassemble_tiles(processed_tiles, original_image.size)
 
-            result_path = os.path.join("output", f"processed_{filter_type}.png")
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            result_path = os.path.join(output_dir, f"processed_{filter_type}.png")
             result_image.save(result_path)
             print(f"✓ Processed image saved to: {result_path}")
 
