@@ -244,7 +244,7 @@ class TaskDispatcher:
         return tasks_assigned
 
     async def assign_task_to_available_worker(
-        self, worker_id: str, worker_threshold: int = 2
+        self, worker_id: str, worker_threshold: int = 1
     ) -> bool:
         """
         Assign pending tasks when enough workers are available

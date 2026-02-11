@@ -42,7 +42,7 @@ class WebSocketManager:
         manager = WebSocketManager(scheduler=custom_scheduler)
     """
 
-    def __init__(self, scheduler: TaskScheduler = None, scheduler_type: str = "aras"):
+    def __init__(self, scheduler: TaskScheduler = None, scheduler_type: str = "fifo"):
         """
         Initialize WebSocket manager
 
