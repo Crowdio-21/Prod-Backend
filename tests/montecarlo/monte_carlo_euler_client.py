@@ -27,7 +27,7 @@ from developer_sdk import connect, map as distributed_map, disconnect, crowdio
 
 
 @crowdio.task(
-    checkpoint=True,
+    checkpoint=False,
     checkpoint_interval=2.0,  # Checkpoint every 5 seconds
     checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
 )
@@ -286,8 +286,8 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 10000000  # Default: 5 million trials (reduced for faster testing)
-    num_workers = 4  # Default: 6 workers
+    total_trials = 5000000  # Default: 100 million trials (reduced for faster testing)
+    num_workers = 2  # Default: 6 workers
     foreman_host = "localhost"
     
     if len(sys.argv) > 1:
