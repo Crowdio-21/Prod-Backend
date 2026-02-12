@@ -77,16 +77,18 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
             "criteria_types": [1, 1, 1, 1],
         },
         "wrr": {
-            "criteria_weights": [0.4, 0.3, 0.3],
-            "criteria_names": ["cpu_cores", "ram_total_mb", "success_rate"],
-            "criteria_types": [1, 1, 1],
+            "criteria_weights": [0, 0, 1, 0],
+            "criteria_names": ["cpu_cores", "ram_total_mb", "cpu_frequency_mhz","success_rate"],
+            "criteria_types": [1, 1, 1, 1],
         },
     }
     return defaults.get(algorithm_name, defaults["aras"])
 
 
 # Scheduler factory
-async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
+async def create_scheduler_async(
+    scheduler_type: str = "fifo", use_dynamic_weighting: bool = False
+) -> TaskScheduler:
     """
     Factory function to create scheduler instances (async version for MCDM)
 
@@ -94,7 +96,7 @@ async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weigh
         scheduler_type: Type of scheduler
                        Simple: "fifo", "round_robin", "performance", "least_loaded", "priority"
                        MCDM: "aras", "edas", "mabac", "wrr"
-        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting (default: False)
 
     Returns:
         TaskScheduler instance
@@ -134,7 +136,9 @@ async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weigh
     raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
 
-def create_scheduler(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
+def create_scheduler(
+    scheduler_type: str = "fifo", use_dynamic_weighting: bool = False
+) -> TaskScheduler:
     """
     Synchronous factory function for backward compatibility
 
@@ -142,7 +146,7 @@ def create_scheduler(scheduler_type: str = "fifo", use_dynamic_weighting: bool =
 
     Args:
         scheduler_type: Type of scheduler (simple schedulers only)
-        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting (default: False)
 
     Returns:
         TaskScheduler instance
