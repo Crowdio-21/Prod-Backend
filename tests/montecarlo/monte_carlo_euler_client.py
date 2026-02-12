@@ -28,7 +28,7 @@ from developer_sdk import connect, map as distributed_map, disconnect, crowdio
 
 @crowdio.task(
     checkpoint=True,
-    checkpoint_interval=5.0,  # Checkpoint every 5 seconds
+    checkpoint_interval=2.0,  # Checkpoint every 5 seconds
     checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
 )
 def monte_carlo_euler_worker(num_trials):
@@ -59,14 +59,6 @@ def monte_carlo_euler_worker(num_trials):
     import time
     
     start = time.time()
-    
-    # Minimum execution time to ensure checkpointing (in seconds)
-    MIN_EXECUTION_TIME = 25.0  # Run for at least 25 seconds to capture multiple checkpoints
-    
-    # ========================================================================
-    # CHECKPOINT STATE VARIABLES - just declare them normally!
-    # Framework handles resume automatically - no manual checkpoint code needed!
-    # ========================================================================
     trials_completed = 0
     total_count = 0
     estimated_e = 0.0
@@ -74,19 +66,6 @@ def monte_carlo_euler_worker(num_trials):
     
     random.seed()  # Ensure different seeds on different workers
     
-    # Run Monte Carlo trials with periodic state updates
-    log_interval = max(1, num_trials // 100)  # Log every 1%
-    
-    # Calculate delay per update to stretch execution time for checkpointing
-    estimated_time_per_trial = 0.00001  # Rough estimate: 10 microseconds per trial
-    estimated_total_time = num_trials * estimated_time_per_trial
-    
-    if estimated_total_time < MIN_EXECUTION_TIME:
-        delay_per_update = (MIN_EXECUTION_TIME - estimated_total_time) / 100
-    else:
-        delay_per_update = 0
-    
-    print(f"[Worker] Starting {num_trials:,} trials (target runtime: {MIN_EXECUTION_TIME}s)")
     
     try:
         # Simple loop - framework automatically adjusts range on resume!
@@ -106,24 +85,6 @@ def monte_carlo_euler_worker(num_trials):
             progress_percent = (trials_completed / num_trials) * 100
             estimated_e = total_count / trials_completed if trials_completed > 0 else 0.0
             
-            # Periodic logging and delay
-            if trials_completed % log_interval == 0 or trials_completed == num_trials:
-                # Add delay to stretch execution time for checkpointing
-                if delay_per_update > 0:
-                    time.sleep(delay_per_update)
-                
-                # Log progress every 10%
-                if int(progress_percent) % 10 == 0:
-                    elapsed = time.time() - start
-                    print(f"[Worker] Progress: {progress_percent:.1f}% ({trials_completed:,}/{num_trials:,} trials) | "
-                          f"Current e ≈ {estimated_e:.6f} | Elapsed: {elapsed:.1f}s")
-        
-        # Ensure minimum execution time for checkpointing
-        elapsed = time.time() - start
-        if elapsed < MIN_EXECUTION_TIME:
-            remaining = MIN_EXECUTION_TIME - elapsed
-            print(f"[Worker] Waiting {remaining:.1f}s to ensure checkpoints are captured...")
-            time.sleep(remaining)
         
         latency_ms = int((time.time() - start) * 1000)
         
@@ -325,8 +286,8 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 1000000  # Default: 1 million trials (reduced for faster testing)
-    num_workers = 5  # Default: 8 workers
+    total_trials = 10000000  # Default: 5 million trials (reduced for faster testing)
+    num_workers = 4  # Default: 6 workers
     foreman_host = "localhost"
     
     if len(sys.argv) > 1:

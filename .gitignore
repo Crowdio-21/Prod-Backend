@@ -219,3 +219,6 @@ customer_sentiment_report.txt
 
 #inputs
 archive/
+
+# Outputs
+*.csv
