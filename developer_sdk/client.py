@@ -29,9 +29,19 @@ class CrowdComputeClient:
             self.foreman_host = host
             self.foreman_port = port
             uri = f"ws://{host}:{port}"
-            
+
             print(f"Connecting to foreman at {uri}...")
-            self.websocket = await websockets.connect(uri)
+            # Increase max_size and disable built-in ping to match foreman server settings.
+            # Large job results (e.g., base64 encoded images) routinely exceed the
+            # 1 MiB default limit, which previously caused the foreman to close
+            # the connection while streaming results back to the client.
+            self.websocket = await websockets.connect(
+                uri,
+                max_size=None,  # Allow arbitrarily large result payloads
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=30,
+            )
             self.connected = True
             
             # Start listening for responses

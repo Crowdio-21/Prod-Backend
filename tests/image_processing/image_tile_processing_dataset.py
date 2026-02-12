@@ -13,7 +13,7 @@ from developer_sdk.image_utils import split_image_into_tiles, reassemble_tiles
 
 
 @crowdio.task(
-    checkpoint=True,
+    checkpoint=False,
     checkpoint_interval=3.0,
     checkpoint_state=["processed_count", "total_tiles", "avg_time", "progress"],
 )
