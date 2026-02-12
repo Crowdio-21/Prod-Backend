@@ -46,27 +46,25 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
     """Get default MCDM configuration"""
     defaults = {
         "aras": {
-            "criteria_weights": [0.25, 0.20, 0.15, 0.15, 0.15, 0.10],
+            "criteria_weights": [0.28, 0.23, 0.18, 0.18, 0.13],
             "criteria_names": [
                 "cpu_cores",
                 "ram_available_mb",
                 "battery_level",
-                "network_speed_mbps",
-                "success_rate",
-                "avg_task_duration_sec",
-            ],
-            "criteria_types": [1, 1, 1, 1, 1, -1],
-        },
-        "edas": {
-            "criteria_weights": [0.30, 0.25, 0.20, 0.15, 0.10],
-            "criteria_names": [
-                "cpu_cores",
-                "ram_available_mb",
-                "network_speed_mbps",
                 "success_rate",
                 "avg_task_duration_sec",
             ],
             "criteria_types": [1, 1, 1, 1, -1],
+        },
+        "edas": {
+            "criteria_weights": [0.34, 0.29, 0.24, 0.13],
+            "criteria_names": [
+                "cpu_cores",
+                "ram_available_mb",
+                "success_rate",
+                "avg_task_duration_sec",
+            ],
+            "criteria_types": [1, 1, 1, -1],
         },
         "mabac": {
             "criteria_weights": [0.35, 0.30, 0.20, 0.15],
