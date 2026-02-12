@@ -77,14 +77,13 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
             "criteria_types": [1, 1, 1, 1],
         },
         "wrr": {
-            "criteria_weights": [0, 0, 1, 0],
-            "criteria_names": [
-                "cpu_cores",
+            "criteria_weights": [ 0, 0.8, 0.2],
+            "criteria_names": [ 
                 "ram_total_mb",
                 "cpu_frequency_mhz",
                 "success_rate",
             ],
-            "criteria_types": [1, 1, 1, 1],
+            "criteria_types": [1, 1, 1],
         },
     }
     return defaults.get(algorithm_name, defaults["aras"])
