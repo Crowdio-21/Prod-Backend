@@ -218,6 +218,7 @@ class TaskDispatcher:
                 job_id=task.job_id,
                 args=task.args,
                 priority=getattr(task, "priority", 0),
+                stage_func_code=getattr(task, "stage_func_code", None),
             )
             for task in pending_tasks
         ]
@@ -234,8 +235,12 @@ class TaskDispatcher:
         tasks_assigned = 0
         for scheduler_task, worker_id in assignments:
             task_args = json.loads(scheduler_task.args) if scheduler_task.args else []
+            
+            # For pipeline tasks, use per-stage func_code stored on SchedulerTask
+            task_func_code = getattr(scheduler_task, "stage_func_code", None) or func_code
+            
             success = await self._assign_task_to_worker(
-                job_id, scheduler_task.id, func_code, task_args, worker_id
+                job_id, scheduler_task.id, task_func_code, task_args, worker_id
             )
             if success:
                 tasks_assigned += 1
@@ -302,7 +307,9 @@ class TaskDispatcher:
             # Pick the first pending task
             task = pending_tasks[0]
             job_id = task.job_id
-            func_code = self.job_manager.get_func_code(job_id)
+
+            # For pipeline tasks, use per-stage func_code if available
+            func_code = self._get_func_code_for_task(task)
 
             if not func_code:
                 print(f"TaskDispatcher: No func_code found for job {job_id}, skipping")
@@ -580,6 +587,28 @@ class TaskDispatcher:
         return workers
 
     # ==================== Statistics ====================
+
+    def _get_func_code_for_task(self, task) -> Optional[str]:
+        """
+        Get the correct function code for a task.
+
+        For pipeline tasks, each task may have its own stage_func_code
+        (stored on the DB row).  Falls back to the job-level func_code.
+
+        Args:
+            task: TaskModel instance (DB row)
+
+        Returns:
+            Function code string or None
+        """
+        # Try per-task stage func_code first (pipeline tasks)
+        stage_func = getattr(task, "stage_func_code", None)
+        if stage_func:
+            return stage_func
+
+        # Fall back to job-level func_code
+        job_id = task.job_id
+        return self.job_manager.get_func_code(job_id)
 
     def get_scheduler_name(self) -> str:
         """Get the name of the current scheduler"""
