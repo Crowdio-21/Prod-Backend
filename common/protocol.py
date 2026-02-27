@@ -16,6 +16,7 @@ class MessageType(Enum):
     """Message types for WebSocket communication"""
     # Client -> Foreman
     SUBMIT_JOB = "submit_job"
+    SUBMIT_PIPELINE_JOB = "submit_pipeline_job"
     GET_RESULTS = "get_results"
     DISCONNECT = "disconnect"
     
@@ -99,6 +100,50 @@ def create_submit_job_message(func_code: str, args_list: List[Any], job_id: str)
             "total_tasks": len(args_list)
         },
         job_id=job_id
+    )
+
+
+def create_submit_pipeline_job_message(
+    job_id: str,
+    stages: List[Dict[str, Any]],
+    dependency_map: Optional[Dict[str, List[str]]] = None,
+    task_metadata: Optional[Dict[str, Any]] = None,
+) -> Message:
+    """
+    Create a pipeline job submission message.
+
+    A pipeline job consists of multiple stages where tasks in later stages
+    depend on the completion of tasks in earlier stages.  The system uses
+    a dependency counter per task: when all upstream tasks complete, the
+    counter reaches zero and the task becomes eligible for scheduling.
+
+    Args:
+        job_id: Unique job identifier
+        stages: List of stage dicts, each containing:
+            - func_code (str): Serialised function code for this stage
+            - args_list (list): Arguments for each task in the stage
+            - pass_upstream_results (bool): Inject upstream results into args
+            - task_metadata (dict, optional): Checkpoint config for stage
+            - name (str, optional): Human-readable stage label
+        dependency_map: Optional explicit task→[dependency] mapping for
+                       arbitrary DAG topologies.  If omitted, sequential
+                       stage-to-stage barriers are used.
+        task_metadata: Optional global checkpoint metadata for all stages.
+
+    Returns:
+        Message ready to send over WebSocket
+    """
+    total_tasks = sum(len(s["args_list"]) for s in stages)
+    return Message(
+        msg_type=MessageType.SUBMIT_PIPELINE_JOB,
+        data={
+            "stages": stages,
+            "total_tasks": total_tasks,
+            "total_stages": len(stages),
+            "dependency_map": dependency_map,
+            "task_metadata": task_metadata,
+        },
+        job_id=job_id,
     )
 
 
