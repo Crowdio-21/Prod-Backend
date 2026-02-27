@@ -29,6 +29,8 @@ class JobModel(Base):
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     supports_checkpointing = Column(Boolean, default=False)
+    is_pipeline = Column(Boolean, default=False)  # Whether this is a pipeline job with dependent stages
+    total_stages = Column(Integer, default=1)  # Number of pipeline stages
     # serialized code could be added here if needed
     # arguments for the job could be added here if needed
 
@@ -63,6 +65,13 @@ class TaskModel(Base):
     progress_percent = Column(Float, default=0.0)  # Task progress 0-100
     checkpoint_count = Column(Integer, default=0)  # Number of checkpoints taken
     checkpoint_storage_path = Column(String, nullable=True)  # Path if stored externally or 'db' if in blob
+
+    # Pipeline / Dependency fields
+    stage = Column(Integer, default=0)  # Pipeline stage number (0 = first stage)
+    dependency_count = Column(Integer, default=0)  # Number of unmet upstream dependencies
+    depends_on = Column(Text, nullable=True)  # JSON list of task IDs this task depends on
+    dependents = Column(Text, nullable=True)  # JSON list of task IDs that depend on this task
+    stage_func_code = Column(Text, nullable=True)  # Per-stage function code (if different from job-level)
 
     # Relationships
     job = relationship("JobModel", back_populates="tasks")

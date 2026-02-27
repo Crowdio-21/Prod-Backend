@@ -16,7 +16,7 @@ _client = CrowdComputeClient()
 
 # Re-export decorator for convenient import
 __all__ = [
-    'connect', 'disconnect', 'map', 'run', 'get', 'submit',
+    'connect', 'disconnect', 'map', 'run', 'get', 'submit', 'pipeline',
     'task', 'TaskMetadata', 'TaskConfig', 
     'get_task_metadata', 'get_task_config', 'is_checkpoint_task',
     'create_state_dict', 'crowdio'
@@ -99,3 +99,46 @@ async def get(job_id: str, timeout: Optional[float] = None) -> Any:
         List of results or raises TimeoutError
     """
     return await _client.get_results(job_id, timeout)
+
+
+async def pipeline(
+    stages: List[Dict],
+    dependency_map: Optional[Dict[str, List[str]]] = None,
+    **kwargs,
+) -> List[Any]:
+    """
+    Execute a pipeline of dependent stages on distributed workers.
+
+    Each stage defines a function and a list of arguments.  Tasks in later
+    stages are automatically blocked until their upstream dependencies
+    complete (tracked via a dependency counter).  When all upstream tasks
+    finish, the downstream task's counter reaches zero and it becomes
+    eligible for scheduling — just like how checkpointing is transparent
+    to the user.
+
+    Args:
+        stages: Ordered list of stage dicts, each with:
+            - func: Callable (optionally decorated with @task)
+            - args_list: List of arguments (one per task in this stage)
+            - pass_upstream_results: bool (default False) – if True,
+              upstream results are injected into downstream args
+            - name: Optional human-readable stage label
+        dependency_map: Optional explicit task→[deps] mapping for
+            arbitrary DAG topologies.  If omitted, stages form
+            sequential barriers.
+        **kwargs: Extra options (checkpoint, checkpoint_interval, …)
+
+    Returns:
+        List of results from the final stage.
+
+    Example::
+
+        results = await crowdio.pipeline([
+            {"func": preprocess,  "args_list": raw_data},
+            {"func": compute,     "args_list": [None]*len(raw_data),
+             "pass_upstream_results": True},
+            {"func": aggregate,   "args_list": [None],
+             "pass_upstream_results": True},
+        ])
+    """
+    return await _client.pipeline(stages, dependency_map=dependency_map, **kwargs)
