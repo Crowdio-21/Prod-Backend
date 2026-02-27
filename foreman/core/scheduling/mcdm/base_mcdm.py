@@ -360,15 +360,36 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
             # Get scores if available
             scores = getattr(self.strategy, "_last_scores", None)
 
-            # Log complete ranking
+            # Log complete ranking with clear separation of selected vs waitlisted
             logger.info(f"\n{'─'*80}")
             logger.info(f"WORKER RANKINGS (computed once for batch):")
             logger.info(f"{'─'*80}")
+
+            ranking_info = []
             for rank, idx in enumerate(ranked_indices, 1):
                 worker_id = worker_ids[idx]
-                score_str = f", Score: {scores[idx]:.6f}" if scores is not None else ""
-                selected_marker = "→ SELECTED" if rank <= n_tasks else ""
-                logger.info(f"  Rank {rank}: {worker_id}{score_str} {selected_marker}")
+                score_value = None
+                if scores is not None:
+                    score_value = float(scores[idx])
+                ranking_info.append((rank, worker_id, score_value))
+
+            selected_count = min(n_tasks, len(ranking_info))
+            if selected_count:
+                logger.info(f"SELECTED WORKERS (top {selected_count}):")
+                for rank, worker_id, score_value in ranking_info[:selected_count]:
+                    score_str = (
+                        f", Score: {score_value:.6f}" if score_value is not None else ""
+                    )
+                    logger.info(f"  Rank {rank}: {worker_id}{score_str} [SELECTED]")
+
+            if selected_count < len(ranking_info):
+                logger.info("WAITLISTED WORKERS:")
+                for rank, worker_id, score_value in ranking_info[selected_count:]:
+                    score_str = (
+                        f", Score: {score_value:.6f}" if score_value is not None else ""
+                    )
+                    logger.info(f"  Rank {rank}: {worker_id}{score_str}")
+
             logger.info(f"{'─'*80}")
 
             # Assign tasks to top-ranked workers

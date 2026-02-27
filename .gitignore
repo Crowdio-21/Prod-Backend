@@ -217,4 +217,8 @@ dataset_cache.json
 customer_sentiment_results.json
 customer_sentiment_report.txt
 
- 
+#inputs
+archive/
+
+# Outputs
+*.csv

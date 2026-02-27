@@ -46,27 +46,25 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
     """Get default MCDM configuration"""
     defaults = {
         "aras": {
-            "criteria_weights": [0.25, 0.20, 0.15, 0.15, 0.15, 0.10],
+            "criteria_weights": [0.28, 0.23, 0.18, 0.18, 0.13],
             "criteria_names": [
                 "cpu_cores",
                 "ram_available_mb",
                 "battery_level",
-                "network_speed_mbps",
-                "success_rate",
-                "avg_task_duration_sec",
-            ],
-            "criteria_types": [1, 1, 1, 1, 1, -1],
-        },
-        "edas": {
-            "criteria_weights": [0.30, 0.25, 0.20, 0.15, 0.10],
-            "criteria_names": [
-                "cpu_cores",
-                "ram_available_mb",
-                "network_speed_mbps",
                 "success_rate",
                 "avg_task_duration_sec",
             ],
             "criteria_types": [1, 1, 1, 1, -1],
+        },
+        "edas": {
+            "criteria_weights": [0.34, 0.29, 0.24, 0.13],
+            "criteria_names": [
+                "cpu_cores",
+                "ram_available_mb",
+                "success_rate",
+                "avg_task_duration_sec",
+            ],
+            "criteria_types": [1, 1, 1, -1],
         },
         "mabac": {
             "criteria_weights": [0.35, 0.30, 0.20, 0.15],
@@ -79,8 +77,12 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
             "criteria_types": [1, 1, 1, 1],
         },
         "wrr": {
-            "criteria_weights": [0.4, 0.3, 0.3],
-            "criteria_names": ["cpu_cores", "ram_total_mb", "success_rate"],
+            "criteria_weights": [ 0, 0.8, 0.2],
+            "criteria_names": [ 
+                "ram_total_mb",
+                "cpu_frequency_mhz",
+                "success_rate",
+            ],
             "criteria_types": [1, 1, 1],
         },
     }
@@ -88,7 +90,9 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
 
 
 # Scheduler factory
-async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
+async def create_scheduler_async(
+    scheduler_type: str = "fifo", use_dynamic_weighting: bool = False
+) -> TaskScheduler:
     """
     Factory function to create scheduler instances (async version for MCDM)
 
@@ -96,7 +100,7 @@ async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weigh
         scheduler_type: Type of scheduler
                        Simple: "fifo", "round_robin", "performance", "least_loaded", "priority"
                        MCDM: "aras", "edas", "mabac", "wrr"
-        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting (default: False)
 
     Returns:
         TaskScheduler instance
@@ -136,7 +140,9 @@ async def create_scheduler_async(scheduler_type: str = "fifo", use_dynamic_weigh
     raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
 
-def create_scheduler(scheduler_type: str = "fifo", use_dynamic_weighting: bool = True) -> TaskScheduler:
+def create_scheduler(
+    scheduler_type: str = "fifo", use_dynamic_weighting: bool = False
+) -> TaskScheduler:
     """
     Synchronous factory function for backward compatibility
 
@@ -144,7 +150,7 @@ def create_scheduler(scheduler_type: str = "fifo", use_dynamic_weighting: bool =
 
     Args:
         scheduler_type: Type of scheduler (simple schedulers only)
-        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting
+        use_dynamic_weighting: For MCDM schedulers, whether to use Shannon Entropy for dynamic weighting (default: False)
 
     Returns:
         TaskScheduler instance

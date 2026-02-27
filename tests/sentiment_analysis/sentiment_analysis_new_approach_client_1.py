@@ -9,37 +9,117 @@ import nltk
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import connect, map as distributed_map, disconnect, crowdio
 
 # Download required NLTK data
 nltk.download('punkt_tab')
 
+@crowdio.task(
+    checkpoint=True,
+    checkpoint_interval=3.0,  # Checkpoint every 3 seconds
+    checkpoint_state=["sentiment", "confidence", "progress_percent", "processing_stage"]
+)
 def sentiment_worker(text):
     """
     Function to be executed on worker devices for sentiment analysis
+    WITH DECLARATIVE CHECKPOINTING - PURE LOGIC, NO RESUME CODE!
+    
+    Args:
+        text: Text segment to analyze for sentiment
+    
+    Returns:
+        Dictionary containing sentiment analysis results
+        
+    Note:
+        The @crowdio.task decorator enables automatic checkpointing:
+        - State variables are captured automatically via frame introspection
+        - TRANSPARENT RESUME - framework handles everything automatically!
+        - Just write your pure algorithm logic
+        - Include 'progress_percent' in checkpoint_state for progress tracking
+        
+        DEVELOPER WRITES PURE LOGIC - NO RESUME CODE NEEDED!
     """
     import time
     import random
     from textblob import TextBlob
 
     start = time.time()
-
-    analysis = TextBlob(text)
-    sentiment = analysis.sentiment.polarity  # [-1, 1]
-
-    # Fake confidence: higher magnitude = higher confidence
-    confidence = min(1.0, abs(sentiment) + random.uniform(0.1, 0.3))
-
-    # Simulate device variability
-    time.sleep(random.uniform(0.05, 0.15))
-
-    latency_ms = int((time.time() - start) * 1000)
-
-    return {
-        "sentiment": sentiment,
-        "confidence": confidence,
-        "latency_ms": latency_ms
-    }
+    
+    # Minimum execution time to ensure checkpointing (in seconds)
+    MIN_EXECUTION_TIME = 5.0  # Run for at least 5 seconds to capture checkpoints
+    
+    # ========================================================================
+    # CHECKPOINT STATE VARIABLES - just declare them normally!
+    # Framework handles resume automatically - no manual checkpoint code needed!
+    # ========================================================================
+    sentiment = 0.0
+    confidence = 0.0
+    progress_percent = 0.0
+    processing_stage = "initializing"
+    
+    print(f"[Worker] Starting sentiment analysis (target runtime: {MIN_EXECUTION_TIME}s)")
+    
+    try:
+        # Stage 1: Pre-processing
+        processing_stage = "preprocessing"
+        progress_percent = 10.0
+        time.sleep(0.5)
+        
+        # Stage 2: Sentiment analysis
+        processing_stage = "analyzing"
+        progress_percent = 40.0
+        analysis = TextBlob(text)
+        sentiment = analysis.sentiment.polarity  # [-1, 1]
+        time.sleep(1.0)
+        
+        # Stage 3: Confidence calculation
+        processing_stage = "calculating_confidence"
+        progress_percent = 70.0
+        # Fake confidence: higher magnitude = higher confidence
+        confidence = min(1.0, abs(sentiment) + random.uniform(0.1, 0.3))
+        time.sleep(1.0)
+        
+        # Stage 4: Finalizing
+        processing_stage = "finalizing"
+        progress_percent = 90.0
+        # Simulate device variability
+        time.sleep(random.uniform(0.05, 0.15))
+        
+        progress_percent = 100.0
+        processing_stage = "complete"
+        
+        # Ensure minimum execution time for checkpointing
+        elapsed = time.time() - start
+        if elapsed < MIN_EXECUTION_TIME:
+            remaining = MIN_EXECUTION_TIME - elapsed
+            print(f"[Worker] Waiting {remaining:.1f}s to ensure checkpoints are captured...")
+            time.sleep(remaining)
+        
+        latency_ms = int((time.time() - start) * 1000)
+        
+        result = {
+            "sentiment": sentiment,
+            "confidence": confidence,
+            "latency_ms": latency_ms,
+            "status": "success"
+        }
+        
+        print(f"[Worker] Completed sentiment analysis | sentiment: {sentiment:.3f} | confidence: {confidence:.3f} | time: {latency_ms/1000:.1f}s")
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        
+        latency_ms = int((time.time() - start) * 1000)
+        
+        return {
+            "sentiment": 0.0,
+            "confidence": 0.0,
+            "latency_ms": latency_ms,
+            "status": "error",
+            "error": str(e)
+        }
 
 async def run_distributed_sentiment(text, foreman_host="localhost"):
     def split_text(text):
