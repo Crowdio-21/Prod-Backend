@@ -32,6 +32,7 @@ from .api import (
     get, 
     disconnect,
     submit,
+    pipeline,
     task,
     TaskMetadata,
     TaskConfig,
@@ -52,6 +53,7 @@ __all__ = [
     "run", 
     "get",
     "submit",
+    "pipeline",
     # Declarative Checkpointing API
     "task",
     "TaskMetadata",
