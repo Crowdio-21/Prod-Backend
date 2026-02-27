@@ -50,6 +50,8 @@ class ClientMessageHandler:
         """
         if message.type == MessageType.SUBMIT_JOB:
             await self._handle_job_submission(message, websocket)
+        elif message.type == MessageType.SUBMIT_PIPELINE_JOB:
+            await self._handle_pipeline_submission(message, websocket)
         elif message.type == MessageType.DISCONNECT:
             await websocket.close()
         else:
@@ -124,6 +126,94 @@ class ClientMessageHandler:
             print(f"ClientMessageHandler: Error handling job submission: {e}")
             import traceback
 
+            traceback.print_exc()
+
+            error_msg = Message(
+                MessageType.JOB_ERROR, {"error": str(e)}, message.job_id
+            )
+            await websocket.send(error_msg.to_json())
+
+    async def _handle_pipeline_submission(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
+        """
+        Handle a pipeline job submission from client.
+
+        A pipeline job defines multiple stages with dependency relationships.
+        The system creates all tasks up-front with dependency counters:
+        - Stage 0 tasks start as "pending" and are dispatched immediately
+        - Later stages start as "blocked" and are unblocked automatically
+          when their upstream dependencies complete
+
+        This is the pipeline equivalent of _handle_job_submission().
+
+        Args:
+            message: Pipeline job submission message
+            websocket: Client websocket connection
+        """
+        try:
+            job_id = message.job_id
+            stages = message.data["stages"]
+            total_tasks = message.data["total_tasks"]
+            total_stages = message.data["total_stages"]
+            dependency_map = message.data.get("dependency_map")
+            task_metadata = message.data.get("task_metadata")
+
+            print(
+                f"ClientMessageHandler: Received pipeline job {job_id} "
+                f"with {total_stages} stages, {total_tasks} tasks | "
+                f"foreman_runtime={get_runtime_info()}"
+            )
+
+            # Log stage details
+            for i, stage in enumerate(stages):
+                stage_name = stage.get("name", f"stage_{i}")
+                stage_tasks = len(stage["args_list"])
+                pass_results = stage.get("pass_upstream_results", False)
+                print(
+                    f"  Stage {i} ({stage_name}): {stage_tasks} tasks"
+                    f"{' [receives upstream results]' if pass_results else ''}"
+                )
+
+            # Register client websocket
+            self.connection_manager.add_client(job_id, websocket)
+
+            # Create pipeline job with dependency wiring
+            created = await self.job_manager.create_pipeline_job(
+                job_id, stages, dependency_map, task_metadata
+            )
+
+            # Dispatch Stage 0 tasks (they are "pending" from creation)
+            stage_0_func_code = stages[0]["func_code"]
+            assigned = await self.task_dispatcher.assign_tasks_for_job(
+                job_id, stage_0_func_code, stages[0]["args_list"]
+            )
+
+            print(
+                f"ClientMessageHandler: Pipeline job {job_id} — "
+                f"Assigned {assigned} stage-0 tasks immediately"
+            )
+
+            # Send job accepted message
+            response = create_job_accepted_message(job_id)
+            await websocket.send(response.to_json())
+
+            print(f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged")
+
+        except KeyError as e:
+            print(
+                f"ClientMessageHandler: Missing required field in pipeline submission: {e}"
+            )
+            error_msg = Message(
+                MessageType.JOB_ERROR,
+                {"error": f"Missing required field: {e}"},
+                message.job_id,
+            )
+            await websocket.send(error_msg.to_json())
+
+        except Exception as e:
+            print(f"ClientMessageHandler: Error handling pipeline submission: {e}")
+            import traceback
             traceback.print_exc()
 
             error_msg = Message(
@@ -394,6 +484,34 @@ class WorkerMessageHandler:
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
+            # --- Pipeline dependency resolution ---
+            # If this is a pipeline job, decrement dependency counters of
+            # downstream tasks.  When all tasks in a stage complete (barrier
+            # lifts), batch-dispatch the entire next stage to ALL available
+            # workers at once – not just the worker that finished last.
+            pipeline_batch_dispatched = False
+            if self.job_manager.is_pipeline_job(job_id):
+                dep_mgr = self.job_manager.dependency_manager
+                newly_unblocked = await dep_mgr.on_task_completed(
+                    task_id, job_id, result
+                )
+                if newly_unblocked:
+                    print(
+                        f"[PIPELINE] 🚀 Stage barrier lifted! {len(newly_unblocked)} "
+                        f"downstream tasks unblocked for job {job_id}"
+                    )
+                    # Batch-dispatch ALL unblocked tasks to the best available
+                    # workers (including the current worker and any idle ones).
+                    func_code = self.job_manager.get_func_code(job_id)
+                    batch_assigned = await self.task_dispatcher.assign_tasks_for_job(
+                        job_id, func_code or "", []
+                    )
+                    print(
+                        f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage "
+                        f"tasks across available workers"
+                    )
+                    pipeline_batch_dispatched = True
+
             # Check if job is complete and handle completion
             if job_complete:
                 print(
@@ -401,17 +519,19 @@ class WorkerMessageHandler:
                 )
                 await self.completion_handler.handle_job_completion(job_id)
 
-            # Assign next task to this worker
-            assigned = await self.task_dispatcher.assign_task_to_available_worker(
-                worker_id
-            )
-
-            if assigned:
-                print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
-            else:
-                print(
-                    f"[RESULT DEBUG] No more tasks to assign to worker {worker_id}"
+            # For non-pipeline jobs, or if the pipeline batch didn't assign
+            # anything to THIS worker, try assigning the next task normally.
+            if not pipeline_batch_dispatched:
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id
                 )
+
+                if assigned:
+                    print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
+                else:
+                    print(
+                        f"[RESULT DEBUG] No more tasks to assign to worker {worker_id}"
+                    )
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
