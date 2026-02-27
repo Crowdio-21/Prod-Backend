@@ -7,6 +7,7 @@ from common.protocol import (
     Message,
     MessageType,
     create_submit_job_message,
+    create_submit_pipeline_job_message,
     create_ping_message,
     create_pong_message,
 )
@@ -346,6 +347,130 @@ class CrowdComputeClient:
             del self._submitted_jobs[job_id]
 
         return results
+
+    async def pipeline(
+        self,
+        stages: List[Dict[str, Any]],
+        dependency_map: Optional[Dict[str, List[str]]] = None,
+        **kwargs,
+    ) -> List[Any]:
+        """
+        Execute a pipeline of dependent stages on distributed workers.
+
+        Each stage defines a function and its input arguments.  Tasks in
+        later stages are automatically blocked until their upstream
+        dependencies complete.  The system tracks a *dependency counter*
+        per task and decrements it as upstream tasks finish; when the
+        counter reaches zero the task becomes eligible for scheduling.
+
+        This is the pipeline equivalent of ``map()`` – it submits the
+        whole pipeline as a single job and waits for the final results.
+
+        Args:
+            stages: Ordered list of stage definitions.  Each stage is a dict:
+                {
+                    "func": <callable>,        # function for this stage
+                    "args_list": [arg1, ...],  # one entry per task
+                    "pass_upstream_results": False,  # inject upstream results?
+                    "name": "stage_name",      # optional human label
+                }
+            dependency_map: Optional explicit mapping of
+                task_id → [upstream_task_ids] for arbitrary DAGs.
+                If omitted, sequential barriers between stages are used.
+            **kwargs: Additional options (checkpoint, checkpoint_interval, etc.)
+
+        Returns:
+            List of results from the final stage.
+
+        Example (sequential pipeline)::
+
+            results = await client.pipeline([
+                {"func": preprocess,  "args_list": raw_data},
+                {"func": compute,     "args_list": [None]*len(raw_data),
+                 "pass_upstream_results": True},
+                {"func": aggregate,   "args_list": [None]*1,
+                 "pass_upstream_results": True},
+            ])
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected to foreman. Call connect() first.")
+
+        job_id = str(uuid.uuid4())
+
+        # Create future
+        future = asyncio.Future()
+        self.pending_jobs[job_id] = future
+
+        try:
+            # Build stage definitions for the protocol message
+            stage_defs = []
+            for stage_def in stages:
+                func = stage_def["func"]
+                args_list = stage_def["args_list"]
+
+                # Serialise function
+                if hasattr(func, "__crowdio_original__"):
+                    func_code = serialize_function(func.__crowdio_original__)
+                else:
+                    func_code = serialize_function(func)
+
+                # Extract per-stage task metadata
+                metadata = get_task_metadata(func)
+                task_meta_dict = None
+                if metadata:
+                    task_meta_dict = metadata.to_dict()
+
+                stage_defs.append({
+                    "func_code": func_code,
+                    "args_list": args_list,
+                    "pass_upstream_results": stage_def.get(
+                        "pass_upstream_results", False
+                    ),
+                    "task_metadata": task_meta_dict,
+                    "name": stage_def.get("name", func.__name__),
+                })
+
+            # Global task metadata from kwargs
+            global_meta = None
+            if kwargs.get("checkpoint"):
+                global_meta = {
+                    "checkpoint_enabled": True,
+                    "checkpoint_interval": kwargs.get("checkpoint_interval", 10.0),
+                    "checkpoint_state": kwargs.get("checkpoint_state", []),
+                }
+
+            # Build and send protocol message
+            message = create_submit_pipeline_job_message(
+                job_id=job_id,
+                stages=stage_defs,
+                dependency_map=dependency_map,
+                task_metadata=global_meta,
+            )
+
+            self._submitted_jobs[job_id] = {
+                "type": "pipeline",
+                "stages": len(stage_defs),
+                "total_tasks": sum(len(s["args_list"]) for s in stage_defs),
+            }
+
+            await self.websocket.send(message.to_json())
+
+            total_tasks = sum(len(s["args_list"]) for s in stage_defs)
+            print(
+                f"[SDK] Pipeline job {job_id[:8]}... submitted "
+                f"({len(stage_defs)} stages, {total_tasks} tasks)"
+            )
+
+            # Wait for results (same flow as map)
+            results = await future
+            return results
+
+        except Exception as e:
+            if job_id in self.pending_jobs:
+                del self.pending_jobs[job_id]
+            if job_id in self._submitted_jobs:
+                del self._submitted_jobs[job_id]
+            raise
 
     async def run(self, func: Callable, *args, **kwargs) -> Any:
         """Run a single function with arguments in one worker"""
