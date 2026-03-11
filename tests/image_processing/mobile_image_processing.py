@@ -58,7 +58,16 @@ from developer_sdk import connect, disconnect, crowdio, map as distributed_map
 # Worker function — runs entirely on the device
 # =====================================================================
 
-@crowdio.task()
+@crowdio.task(
+    checkpoint=True,
+    checkpoint_interval=3.0,
+    checkpoint_state=[
+        "image_paths",
+        "results",
+        "errors",
+        "thumbnails",
+    ],
+)
 def process_images_on_device(config):
     """
     Scan a directory on the LOCAL device for images, apply a filter,

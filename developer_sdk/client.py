@@ -12,6 +12,10 @@ from common.protocol import (
     create_pong_message,
 )
 from common.serializer import serialize_function
+from common.code_instrumenter import (
+    instrument_for_task_control,
+    generate_task_control_wrapper,
+)
 from .decorators import get_task_metadata, TaskMetadata
 
 
@@ -177,6 +181,20 @@ class CrowdComputeClient:
             else:
                 func_code = serialize_function(func)
 
+            # Pre-instrument with task control (pause/kill) at SDK level
+            # This is a static transformation that reduces foreman load
+            checkpoint_state_vars = task_metadata.checkpoint_state or []
+            func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
+                func_code, checkpoint_state_vars=checkpoint_state_vars
+            )
+            control_wrapper = generate_task_control_wrapper()
+            func_code = control_wrapper + "\n" + func_code
+            if num_funcs > 0:
+                print(
+                    f"[SDK] Task control: instrumented {num_funcs} functions, "
+                    f"{num_ctrl_loops} loops"
+                )
+                
             # Create submission message with metadata
             message = self._create_submit_job_message_with_metadata(
                 func_code, iterable, job_id, task_metadata
@@ -288,6 +306,19 @@ class CrowdComputeClient:
             func_code = serialize_function(func.__crowdio_original__)
         else:
             func_code = serialize_function(func)
+
+        # Pre-instrument with task control (pause/kill) at SDK level
+        checkpoint_state_vars = task_metadata.checkpoint_state or []
+        func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
+            func_code, checkpoint_state_vars=checkpoint_state_vars
+        )
+        control_wrapper = generate_task_control_wrapper()
+        func_code = control_wrapper + "\n" + func_code
+        if num_funcs > 0:
+            print(
+                f"[SDK] Task control: instrumented {num_funcs} functions, "
+                f"{num_ctrl_loops} loops"
+            )
 
         # Create future for this job
         future = asyncio.Future()
@@ -413,6 +444,16 @@ class CrowdComputeClient:
                     func_code = serialize_function(func.__crowdio_original__)
                 else:
                     func_code = serialize_function(func)
+
+                # Pre-instrument with task control (pause/kill) at SDK level
+                stage_ckpt_vars = []
+                if metadata:
+                    stage_ckpt_vars = metadata.checkpoint_state or []
+                func_code, _, _ = instrument_for_task_control(
+                    func_code, checkpoint_state_vars=stage_ckpt_vars
+                )
+                ctrl_wrapper = generate_task_control_wrapper()
+                func_code = ctrl_wrapper + "\n" + func_code
 
                 # Extract per-stage task metadata
                 metadata = get_task_metadata(func)

@@ -121,9 +121,9 @@ class TaskDispatcher:
                 print(f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker")
             
             # Prepend the mobile checkpoint wrapper
+            # Note: Task control (pause/kill) is already instrumented by the SDK
             wrapper = generate_mobile_checkpoint_wrapper()
-            prepared_code = wrapper + "\n\n" + prepared_code
-            
+            prepared_code = wrapper + "\n" + prepared_code
             return prepared_code
             
         except Exception as e:

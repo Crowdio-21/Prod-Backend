@@ -80,16 +80,26 @@ def serialize_function(func: Callable) -> str:
 
  
 def deserialize_function_for_PC(func_code: str):
-    """Turn function source code string into a callable function"""
+    """
+    Turn function source code string into a callable function.
     
-    # Create a local namespace for the exec
-    local_vars = {}
-    exec(func_code, {}, local_vars)
+    Handles code that includes a task control wrapper (pause/resume/kill 
+    functions prepended by the SDK) by using a shared namespace and 
+    selecting the user's task function (skipping internal wrapper functions).
+    """
+    
+    # Use a single namespace so wrapper globals (paused, killed, time)
+    # are accessible from the function's __globals__
+    namespace = {"__builtins__": __builtins__}
+    exec(func_code, namespace)
 
-    # Find the function object in local_vars
+    # Internal wrapper function names to skip
+    _internal_names = {'pause', 'resume', 'kill'}
+
+    # Find the user's function (skip wrapper functions)
     func = None
-    for val in local_vars.values():
-        if isinstance(val, types.FunctionType):
+    for name, val in namespace.items():
+        if isinstance(val, types.FunctionType) and name not in _internal_names:
             func = val
             break
 
