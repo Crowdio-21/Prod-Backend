@@ -266,7 +266,7 @@ def process_images_on_device(config):
             "processed": [],
             "total_images": 0,
             "total_time": 0,
-            "errors": [f"FATAL: {type(_e).__name__}: {_e}\n{''.join(_tb.format_exc())}"],
+            "errors": [f"FATAL: {_e}"],
             "thumbnails": [],
         }
 
