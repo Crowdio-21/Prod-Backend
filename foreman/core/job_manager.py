@@ -335,6 +335,11 @@ class JobManager:
             worker_id: Worker assigned to the task
         """
         await _update_task_status(task_id, "assigned", worker_id=worker_id)
+        # Increment total_tasks_assigned for this worker
+        from foreman.db.base import async_session
+        from foreman.db.crud import update_worker_tasks_assigned
+        async with async_session() as session:
+            await update_worker_tasks_assigned(session, worker_id)
 
     # ==================== Job Completion ====================
 
