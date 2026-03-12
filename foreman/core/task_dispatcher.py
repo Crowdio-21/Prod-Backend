@@ -796,6 +796,12 @@ class TaskDispatcher:
                 print(f"TaskDispatcher: Task {task_id} was already claimed, skipping")
                 return False
 
+            # Increment total_tasks_assigned for this worker
+            from foreman.db.base import async_session
+            from foreman.db.crud import update_worker_tasks_assigned
+            async with async_session() as session:
+                await update_worker_tasks_assigned(session, worker_id)
+
             # Send to worker
             await websocket.send(message.to_json())
 
