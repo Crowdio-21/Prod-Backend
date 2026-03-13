@@ -445,6 +445,9 @@ class CrowdComputeClient:
                 else:
                     func_code = serialize_function(func)
 
+                # Extract per-stage task metadata
+                metadata = get_task_metadata(func)
+
                 # Pre-instrument with task control (pause/kill) at SDK level
                 stage_ckpt_vars = []
                 if metadata:
@@ -454,9 +457,6 @@ class CrowdComputeClient:
                 )
                 ctrl_wrapper = generate_task_control_wrapper()
                 func_code = ctrl_wrapper + "\n" + func_code
-
-                # Extract per-stage task metadata
-                metadata = get_task_metadata(func)
                 task_meta_dict = None
                 if metadata:
                     task_meta_dict = metadata.to_dict()
