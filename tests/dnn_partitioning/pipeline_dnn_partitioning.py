@@ -24,7 +24,7 @@ Architecture (Kotlin ↔ Python bridge for Chaquopy):
 
 Stages in this pipeline:
     Stage 0  (partition_model)   – Load the full model, build the partition
-                                   plan (DAG → device map), and serialise
+                                   plan (DAG -> device map), and serialise
                                    sub-model weights for each partition.
     Stage 1  (run_layer_slice)   – Execute a partition slice on a worker.
                                    Multiple tasks may run in parallel for
@@ -128,6 +128,79 @@ def _deserialize_tensor(blob):
 
 
 # =====================================================================
+# TFLite helpers  (used by partition_model on the backend / PC worker)
+# =====================================================================
+
+def _tensorflow_available():
+    """Return True when TensorFlow is importable on this machine."""
+    try:
+        import tensorflow  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _build_tflite_sub_models(num_partitions, input_size, num_classes=1000):
+    """
+    Build real TFLite sub-models for each partition using TensorFlow.
+
+    Creates a sequential chain where partition *i* takes the output tensor
+    of partition *i-1* as its input.  The final partition appends a
+    GlobalAveragePooling2D -> Dense(num_classes, softmax) classification head.
+
+    Each sub-model is converted to a TFLite flatbuffer so it can be shipped
+    to Android workers and executed via ``tflite_runtime`` without requiring
+    TensorFlow on the device.
+
+    Returns:
+        dict  partition_index (int) ->
+              {"tflite_b64": str, "input_shape": list, "output_shape": list}
+    """
+    import tensorflow as tf
+    import base64
+
+    partitions = {}
+    h, w, c = input_size, input_size, 3
+
+    for i in range(num_partitions):
+        filters = min(64 * (2 ** i), 512)
+        stride = 2 if i < num_partitions - 1 else 1
+        is_last = (i == num_partitions - 1)
+        inp_shape = (h, w, c)
+
+        model_inp = tf.keras.Input(shape=inp_shape, batch_size=1)
+        x = tf.keras.layers.Conv2D(
+            filters, 3, strides=stride, padding="same", use_bias=False
+        )(model_inp)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.ReLU()(x)
+        x = tf.keras.layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.ReLU()(x)
+        if is_last:
+            x = tf.keras.layers.GlobalAveragePooling2D()(x)
+            x = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
+
+        model = tf.keras.Model(inputs=model_inp, outputs=x)
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        tflite_bytes = converter.convert()
+        out_shape = list(model.output_shape[1:])   # drop batch dim
+
+        partitions[i] = {
+            "tflite_b64": base64.b64encode(tflite_bytes).decode("utf-8"),
+            "input_shape": list(inp_shape),
+            "output_shape": out_shape,
+        }
+
+        # Compute next partition's input spatial size
+        h = (h + stride - 1) // stride
+        w = (w + stride - 1) // stride
+        c = filters
+
+    return partitions
+
+
+# =====================================================================
 # DAG builder – describes how layers relate to one another
 # =====================================================================
 
@@ -137,8 +210,8 @@ def build_resnet_dag(num_partitions=3, input_size=224):
 
     The graph has a main chain with one skip connection:
 
-        [input] → partition_0  → partition_1  →  fuse (skip join) → classify
-                  ╰──────────── skip branch ──────╯
+        [input] -> partition_0  -> partition_1  ->  fuse (skip join) -> classify
+                  ╰------------ skip branch ------╯
 
     The *fuse* node has dependency_count = 2 (main-branch + skip).
 
@@ -197,8 +270,8 @@ def build_resnet_dag(num_partitions=3, input_size=224):
         "partition_idx": min(num_partitions - 1, 2),
     })
 
-    # Edges: partition_0 → partition_1 → fuse → classify
-    #         partition_0 → skip_branch  → fuse
+    # Edges: partition_0 -> partition_1 -> fuse -> classify
+    #         partition_0 -> skip_branch  -> fuse
     edges = [
         ("partition_0", "partition_1"),
         ("partition_0", "skip_branch"),
@@ -270,28 +343,38 @@ def build_inception_dag(num_partitions=4, input_size=224):
 @crowdio.task()
 def partition_model(config):
     """
-    Analyse the model graph, build a DAG of layer slices, and produce a
-    partition plan mapping each slice to a worker partition index.
+    Build the partition plan and convert each partition to a TFLite sub-model.
 
-    This stage runs once.  Its output is consumed by Stage 1 tasks.
+    Stage 0 runs once on a device that has TensorFlow installed (e.g. a PC
+    worker).  Its output is forwarded to every Stage-1 Android device so that
+    workers can run actual TFLite inference without needing TensorFlow locally.
+
+    When TensorFlow is available the function creates real TFLite flatbuffers
+    (one per partition) embedded as base64 strings under ``tflite_models``.
+    Workers decode these bytes and run them via ``tflite_runtime``.
+
+    Falls back to synthetic shape metadata only when TensorFlow is absent,
+    allowing the pipeline to be exercised with simulated compute.
 
     Args:
         config (dict):
-            model       – "resnet" | "inception"
-            input_size  – spatial dimension (e.g. 224)
-            num_partitions – how many devices / partitions
-            dtype       – "float32" (default)
+            model          – architecture tag ("resnet" | "inception")
+            input_size     – spatial dimension of the input image (default 224)
+            num_partitions – number of TFLite sub-models / devices (default 3)
+            dtype          – tensor data type, "float32" (default)
+            num_classes    – classifier output size (default 1000)
 
     Returns:
         dict with:
             model, input_size, num_partitions, dtype,
-            layers     – list of layer descriptors
-            edges      – adjacency list
-            input_tensor – serialised random input for the first layer
-            plan       – per-layer partition assignment
+            layers         – one descriptor per partition (linear chain)
+            edges          – adjacency list (linear: i -> i+1)
+            input_tensor   – serialised 1xHxWx3 float32 image for partition 0
+            plan           – {layer_id: partition_idx}
+            tflite_models  – {str(partition_idx): {tflite_b64, input_shape,
+                               output_shape}}  (present when TF is available)
     """
     import time as _time
-    import random
 
     start = _time.time()
 
@@ -299,39 +382,78 @@ def partition_model(config):
     input_size = config.get("input_size", 224)
     num_partitions = config.get("num_partitions", 3)
     dtype = config.get("dtype", "float32")
+    num_classes = config.get("num_classes", 1000)
 
-    # Build the DAG
-    if model_name == "inception":
-        layers, edges = build_inception_dag(num_partitions, input_size)
-    else:
-        layers, edges = build_resnet_dag(num_partitions, input_size)
+    # -- Build TFLite sub-models on the machine that has TensorFlow -------
+    tflite_models = {}
+    if _tensorflow_available():
+        try:
+            print(
+                f"[partition_model] Building {num_partitions} TFLite "
+                f"sub-models (input {input_size}x{input_size}x3)..."
+            )
+            tflite_models = _build_tflite_sub_models(
+                num_partitions, input_size, num_classes
+            )
+            size_summary = ", ".join(
+                f"p{k}->{v['output_shape']} "
+                f"({len(v['tflite_b64']) * 3 // 4 // 1024} KB)"
+                for k, v in tflite_models.items()
+            )
+            print(f"[partition_model] TFLite models ready: {size_summary}")
+        except Exception as _exc:
+            print(
+                f"[partition_model] TFLite build failed ({_exc}); "
+                f"workers will use simulated inference"
+            )
 
-    # Create a synthetic input tensor (channels-last: 1×H×W×3)
-    random.seed(42)
+    # -- Build a linear partition chain as the DAG ------------------------
+    layers = []
+    edges = []
+    for i in range(num_partitions):
+        if tflite_models:
+            info = tflite_models[i]
+            out_s = info["output_shape"]
+            spatial = out_s[0] if len(out_s) >= 2 else 1
+            filters = out_s[-1]
+        else:
+            spatial = max(1, input_size // (2 ** i))
+            filters = min(64 * (2 ** i), 512)
+
+        layers.append({
+            "layer_id": f"partition_{i}",
+            "op": "tflite_partition",
+            "partition_idx": i,
+            "output_spatial": spatial,
+            "params": {"filters": filters},
+        })
+        if i > 0:
+            edges.append((f"partition_{i - 1}", f"partition_{i}"))
+
+    # -- Create the first-stage input image -------------------------------
     shape = (1, input_size, input_size, 3)
-
     try:
         import numpy as np
-        input_tensor = np.random.randn(*shape).astype(dtype)
+        rng = np.random.RandomState(42)
+        input_array = rng.randn(*shape).astype(dtype)
     except ImportError:
+        import random as _r
+        _r.seed(42)
         total = 1
-        for s in shape:
-            total *= s
-        input_tensor = [random.gauss(0, 1) for _ in range(total)]
+        for _s in shape:
+            total *= _s
+        input_array = [_r.gauss(0, 0.5) for _ in range(total)]
 
-    # Serialise the input
-    serialised_input = _serialize_tensor(input_tensor)
-
-    # Build per-layer partition plan
+    serialised_input = _serialize_tensor(input_array)
     plan = {l["layer_id"]: l["partition_idx"] for l in layers}
 
     elapsed = _time.time() - start
     print(
-        f"[partition_model] model={model_name} layers={len(layers)} "
-        f"edges={len(edges)} partitions={num_partitions} time={elapsed:.3f}s"
+        f"[partition_model] model={model_name} partitions={num_partitions} "
+        f"tflite_built={bool(tflite_models)} time={elapsed:.3f}s"
     )
 
-    return {
+    result = {
         "model": model_name,
         "input_size": input_size,
         "num_partitions": num_partitions,
@@ -342,49 +464,182 @@ def partition_model(config):
         "plan": plan,
         "partition_time": elapsed,
     }
+    if tflite_models:
+        # JSON requires string keys; convert int -> str
+        result["tflite_models"] = {str(k): v for k, v in tflite_models.items()}
+    return result
 
 
 # =====================================================================
-# Stage 1 – Execute a single layer slice (simulated inference)
+# Stage 1 – Execute a TFLite partition slice on a worker device
 # =====================================================================
 
 @crowdio.task(
     checkpoint=True,
     checkpoint_interval=5.0,
-    checkpoint_state=["layer_id", "progress_percent"],
+    checkpoint_state=["partition_idx", "progress_percent"],
 )
-def run_layer_slice(task_input):
+def run_tflite_partition(task_input):
     """
-    Run inference on one layer slice.
+    Run actual TFLite inference for one partition on a worker device.
 
-    Receives upstream partition plan + input tensor.  Simulates
-    compute proportional to the filter count and spatial size to mimic
-    realistic latency differences between layers.
+    Designed to execute on Android workers via Chaquopy (tflite_runtime)
+    or on PC workers with TensorFlow installed.
+
+    IMPORTANT – SELF-CONTAINED DESIGN
+    ----------------------------------
+    All helper logic (tensor encode/decode, TFLite interpreter invocation)
+    is defined as nested functions.  This is mandatory: the SDK serialises
+    this function via ``inspect.getsource()`` and the Android executor
+    ``exec()``s it in an isolated namespace.  Module-level helpers such as
+    ``_serialize_tensor`` are NOT available in that namespace.
+
+    Flow
+    ----
+    1. Extract the TFLite flatbuffer (base64) for this partition from
+       upstream results.
+    2. Reconstruct the input tensor:
+         – partition 0  ->  original 1xHxWx3 image from ``partition_model``
+         – partition N  ->  ``output_tensor`` from partition N-1
+    3. Run ``tflite_runtime.interpreter.Interpreter`` (Android / Chaquopy)
+       or ``tensorflow.lite.Interpreter`` (PC fallback).
+    4. Return the output tensor and a pass-through of ``tflite_models`` so
+       the next sequential stage can retrieve its own sub-model bytes.
+
+    Falls back to a random (simulated) output when no TFLite backend is
+    found, keeping the pipeline runnable for profiling / testing.
+
+    Android build.gradle requirements
+    ----------------------------------
+    In your Chaquopy configuration add::
+
+        python {
+            pip {
+                install "tflite-runtime"   // TFLite interpreter
+                install "numpy"            // tensor math
+            }
+        }
+
+    Args:
+        task_input (dict):
+            original_args    – {"partition_idx": int}
+            upstream_results – dict of previous stage task results
 
     Returns:
-        dict with layer_id, output_tensor (serialised), exec_time
+        dict with partition_idx, output_tensor, output_shape, exec_time,
+        backend_used, tflite_models (pass-through for next stage), dtype
     """
     import time as _time
-    import random
-    import hashlib
+    import base64
+    import io
+    import numpy as np
 
+    # -- Inline helpers ----------------------------------------------------
+    # Defined inside the function so the serialised source is self-contained
+    # when exec'd on Android workers via Chaquopy.
+
+    def _decode_tensor(blob):
+        """Reconstruct a numpy array from a serialised tensor dict."""
+        if isinstance(blob, str):
+            import json as _j
+            try:
+                blob = _j.loads(blob)
+            except Exception:
+                import ast as _a
+                blob = _a.literal_eval(blob)
+        fmt = blob.get("format", "json")
+        if fmt == "npy":
+            raw = base64.b64decode(blob["data_b64"])
+            return np.load(io.BytesIO(raw))
+        data = blob.get("data", [])
+        shape = blob.get("shape")
+        arr = np.array(data, dtype=blob.get("dtype", "float32"))
+        if shape:
+            arr = arr.reshape(shape)
+        return arr
+
+    def _encode_tensor(arr):
+        """Serialise a numpy array to a portable base64 dict."""
+        arr = np.asarray(arr)
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        return {
+            "format": "npy",
+            "dtype": str(arr.dtype),
+            "shape": list(arr.shape),
+            "data_b64": base64.b64encode(buf.getvalue()).decode("utf-8"),
+        }
+
+    def _run_tflite(tflite_b64_str, input_array):
+        """
+        Run TFLite inference from a base64-encoded flatbuffer string.
+
+        Tries ``tflite_runtime`` first (lightweight package shipped with
+        Chaquopy APKs), then falls back to ``tensorflow.lite`` on PC.
+
+        Returns (output_ndarray, backend_name) or (None, error_string).
+        """
+        tflite_bytes = base64.b64decode(tflite_b64_str)
+
+        _Interp = None
+        _backend = "none"
+        try:
+            # Android / Chaquopy path
+            from tflite_runtime.interpreter import Interpreter as _IR
+            _Interp = _IR
+            _backend = "tflite_runtime"
+        except ImportError:
+            try:
+                # PC fallback
+                import tensorflow as _tf
+                _Interp = _tf.lite.Interpreter
+                _backend = "tensorflow.lite"
+            except ImportError:
+                return None, "no_tflite_backend"
+
+        # Prefer loading from bytes (avoids disk I/O).
+        # Older tflite_runtime builds only accept a file path, so we fall
+        # back to writing a temp file in that case.
+        try:
+            interp = _Interp(model_content=tflite_bytes)
+        except TypeError:
+            import tempfile as _tmp
+            import os as _os
+            _f = _tmp.NamedTemporaryFile(suffix=".tflite", delete=False)
+            try:
+                _f.write(tflite_bytes)
+                _f.close()
+                interp = _Interp(model_path=_f.name)
+            finally:
+                _os.unlink(_f.name)
+
+        interp.allocate_tensors()
+        inp_det = interp.get_input_details()[0]
+        out_det = interp.get_output_details()[0]
+
+        arr = np.array(input_array, dtype=inp_det["dtype"]).reshape(inp_det["shape"])
+        interp.set_tensor(inp_det["index"], arr)
+        interp.invoke()
+        return interp.get_tensor(out_det["index"]), _backend
+
+    # -- Unpack task arguments ----------------------------------------------
     start = _time.time()
-
-    layer_id = "unknown"
     progress_percent = 0.0
 
-    # ── Unpack upstream results ─────────────────────────────────────
     upstream = task_input.get("upstream_results", {})
     original_args = task_input.get("original_args", {})
+    partition_idx = (
+        original_args.get("partition_idx", 0)
+        if isinstance(original_args, dict)
+        else int(original_args or 0)
+    )
 
     if not upstream:
-        return {"error": "No upstream results", "keys": list(task_input.keys())}
+        return {"error": "No upstream results", "partition_idx": partition_idx}
 
-    # Merge all upstream partition plans (there is normally one from stage-0)
-    partition_plan = {}
-    layers = []
+    # -- Gather tflite_models and the correct input tensor -----------------
+    tflite_models = {}
     input_tensor_blob = None
-    model_name = "resnet"
     input_size = 224
     dtype = "float32"
 
@@ -394,81 +649,96 @@ def run_layer_slice(task_input):
             try:
                 result = _json.loads(result)
             except Exception:
-                import ast
-                result = ast.literal_eval(result)
+                import ast as _ast
+                result = _ast.literal_eval(result)
+        if not isinstance(result, dict):
+            continue
 
-        partition_plan = result.get("plan", partition_plan)
-        layers = result.get("layers", layers)
-        if result.get("input_tensor"):
+        # Collect tflite_models from any upstream result that carries them
+        if result.get("tflite_models"):
+            tflite_models = result["tflite_models"]
+
+        # Partition 0: consume the original image from partition_model
+        if partition_idx == 0 and result.get("input_tensor") and input_tensor_blob is None:
             input_tensor_blob = result["input_tensor"]
-        model_name = result.get("model", model_name)
-        input_size = result.get("input_size", input_size)
-        dtype = result.get("dtype", dtype)
+            input_size = result.get("input_size", input_size)
+            dtype = result.get("dtype", dtype)
 
-    # Determine which layer(s) this task should execute.
-    # The task index inside stage-1 maps to the layer list order.
-    task_index = original_args if isinstance(original_args, int) else 0
-    if isinstance(original_args, dict):
-        task_index = original_args.get("layer_index", 0)
+        # Partition N>0: consume the output tensor from partition N-1
+        if partition_idx > 0 and result.get("output_tensor") is not None:
+            if result.get("partition_idx") == partition_idx - 1:
+                input_tensor_blob = result["output_tensor"]
+                dtype = result.get("dtype", dtype)
 
-    if task_index >= len(layers):
-        return {"error": f"layer_index {task_index} out of range ({len(layers)})"}
+    # Fallback: accept any output_tensor when the partition_idx tag is absent
+    if input_tensor_blob is None and partition_idx > 0:
+        for _tid, result in upstream.items():
+            if isinstance(result, dict) and result.get("output_tensor") is not None:
+                input_tensor_blob = result["output_tensor"]
+                break
 
-    layer = layers[task_index]
-    layer_id = layer["layer_id"]
-    op = layer.get("op", "conv_block")
-    params = layer.get("params", {})
+    if input_tensor_blob is None:
+        return {
+            "error": f"No input tensor found for partition {partition_idx}",
+            "upstream_keys": list(upstream.keys()),
+            "partition_idx": partition_idx,
+        }
 
-    # ── Simulate inference (CPU-bound work) ─────────────────────────
-    filters = params.get("filters", 64)
-    kernel = params.get("kernel", 3)
+    progress_percent = 10.0
 
-    # Use the pre-computed output spatial size from the DAG, or fall back
-    spatial = layer.get("output_spatial", input_size // max(params.get("stride", 1), 1))
-    print(f"[DEBUG] layer={layer_id} output_spatial_in_layer={layer.get('output_spatial', 'MISSING')} "
-          f"params_stride={params.get('stride', 'MISSING')} fallback={input_size // max(params.get('stride', 1), 1)} "
-          f"ACTUAL_spatial={spatial} layer_keys={list(layer.keys())}")
-    flops_proxy = filters * (kernel ** 2) * (spatial ** 2)
-    # Map to a synthetic sleep so heavier layers take proportionally longer
-    # Cap to keep tests fast: 0.05s – 2.0s
-    sim_time = min(2.0, max(0.05, flops_proxy / 5e6))
+    # -- Decode input tensor -----------------------------------------------
+    input_array = _decode_tensor(input_tensor_blob)
+    output = None
+    backend_used = "simulation"
 
-    # Actually burn some CPU to produce a deterministic "activation" hash
-    progress_percent = 0.0
-    steps = max(1, int(sim_time * 100))
-    accum = 0.0
-    random.seed(hash(layer_id) & 0xFFFFFFFF)
-    for step in range(steps):
-        accum += random.gauss(0, 1)
-        progress_percent = ((step + 1) / steps) * 100.0
-        _time.sleep(sim_time / steps)
+    # -- TFLite inference --------------------------------------------------
+    tflite_info = tflite_models.get(str(partition_idx))
+    if tflite_info and tflite_info.get("tflite_b64"):
+        output, backend_used = _run_tflite(tflite_info["tflite_b64"], input_array)
+        if output is None:
+            print(
+                f"[run_tflite_partition] p={partition_idx} "
+                f"backend failed ({backend_used}), falling back to simulation"
+            )
 
-    # Produce a synthetic output tensor of shape (1, spatial, spatial, filters)
-    out_shape = (1, spatial, spatial, filters)
+    progress_percent = 80.0
+
+    # -- Simulation fallback (no TFLite backend available) -----------------
+    if output is None:
+        out_shape_info = (tflite_info or {}).get("output_shape", [])
+        if out_shape_info:
+            out_shape = tuple([1] + [int(d) for d in out_shape_info])
+        else:
+            spatial = max(1, input_size // (2 ** partition_idx))
+            filters = min(64 * (2 ** partition_idx), 512)
+            out_shape = (1, spatial, spatial, filters)
+        rng = np.random.default_rng(partition_idx)
+        output = rng.standard_normal(out_shape).astype(dtype)
+
+    progress_percent = 90.0
+    output_blob = _encode_tensor(output)
     try:
-        import numpy as np
-        output = np.full(out_shape, accum / max(steps, 1), dtype=dtype)
-    except ImportError:
-        total_els = 1
-        for s in out_shape:
-            total_els *= s
-        output = [accum / max(steps, 1)] * total_els
+        out_shape_list = list(output.shape)
+    except AttributeError:
+        out_shape_list = []
 
-    output_blob = _serialize_tensor(output)
-
+    progress_percent = 100.0
     elapsed = _time.time() - start
     print(
-        f"[run_layer_slice] layer={layer_id} op={op} filters={filters} "
-        f"spatial={spatial} sim_flops={flops_proxy:.0f} time={elapsed:.3f}s"
+        f"[run_tflite_partition] p={partition_idx} backend={backend_used} "
+        f"out_shape={out_shape_list} time={elapsed:.3f}s"
     )
 
     return {
-        "layer_id": layer_id,
-        "op": op,
+        "partition_idx": partition_idx,
         "output_tensor": output_blob,
-        "output_shape": list(out_shape),
+        "output_shape": out_shape_list,
         "exec_time": elapsed,
-        "sim_flops": flops_proxy,
+        "backend_used": backend_used,
+        # Pass tflite_models through so each subsequent partition stage
+        # can retrieve its own sub-model without a round-trip to stage-0.
+        "tflite_models": tflite_models,
+        "dtype": dtype,
     }
 
 
@@ -526,7 +796,7 @@ def fuse_branches(task_input):
                 "tensor": tensor,
                 "shape": result.get("fused_shape", []),
             })
-        # Also handle the partition_plan passthrough (from stage-0 → stage-2 skip)
+        # Also handle the partition_plan passthrough (from stage-0 -> stage-2 skip)
         elif "plan" in result:
             # This is the partition-model output; skip it for fusion
             continue
@@ -539,13 +809,13 @@ def fuse_branches(task_input):
         + ", ".join(b["layer_id"] for b in branch_outputs)
     )
 
-    # ── Fuse ────────────────────────────────────────────────────────
+    # -- Fuse --------------------------------------------------------
     try:
         import numpy as np
 
         tensors = [np.asarray(b["tensor"]) for b in branch_outputs]
 
-        # Determine fusion op: if shapes match → add; otherwise → concat
+        # Determine fusion op: if shapes match -> add; otherwise -> concat
         shapes_match = all(t.shape == tensors[0].shape for t in tensors)
         if shapes_match and len(tensors) == 2:
             fused = tensors[0] + tensors[1]  # ResNet skip-add
@@ -591,7 +861,7 @@ def fuse_branches(task_input):
 @crowdio.task()
 def classify(task_input):
     """
-    Run the classification head (Global Average Pooling → Dense → Softmax)
+    Run the classification head (Global Average Pooling -> Dense -> Softmax)
     on the fused feature map.
 
     Returns:
@@ -631,8 +901,8 @@ def classify(task_input):
     if fused_tensor is None:
         return {"error": "No feature map found for classification"}
 
-    # ── Simulate classification ─────────────────────────────────────
-    # Global average pooling → dense → softmax
+    # -- Simulate classification -------------------------------------
+    # Global average pooling -> dense -> softmax
     try:
         import numpy as np
         feature = np.asarray(fused_tensor)
@@ -684,36 +954,30 @@ def classify(task_input):
 
 async def run_dnn_pipeline(model_name, input_size, num_partitions, dtype="float32"):
     """
-    Submit the 4-stage DNN pipeline through CROWDio.
+    Submit the TFLite DNN inference pipeline through CROWDio.
 
-    Stage 0  → partition_model   (1 task)
-    Stage 1  → run_layer_slice   (N tasks, one per layer — independent branches
-                                  run in parallel on different workers)
-    Stage 2  → fuse_branches     (1 task — blocked until all Stage-1 complete)
-    Stage 3  → classify          (1 task — blocked until Stage-2 completes)
+    Dynamic stage list (determined by num_partitions):
 
-    The dependency counter on the fuse task equals the number of incoming
-    branches — exactly the mechanism the Kotlin AtomicInteger mirrors.
+        Stage 0          -> partition_model     (1 task – PC worker with TF)
+        Stage 1..N       -> run_tflite_partition (1 task each – sequential;
+                           each stage feeds its output_tensor to the next)
+        Stage N+1        -> classify             (1 task)
+
+    Sequential partitioning models real distributed pipeline inference:
+    device 0 runs the first sub-model, passes activations to device 1,
+    which runs the second sub-model, and so on.
+
+    Each ``run_tflite_partition`` task:
+      • Uses ``tflite_runtime.interpreter.Interpreter`` on Android (Chaquopy)
+      • Falls back to ``tensorflow.lite.Interpreter`` on PC
+      • Passes ``tflite_models`` through in its result so the subsequent
+        stage can find its own sub-model bytes without querying stage 0.
     """
-
-    # Build the DAG to determine how many layer-slice tasks we need
-    if model_name == "inception":
-        layers, edges = build_inception_dag(num_partitions, input_size)
-    else:
-        layers, edges = build_resnet_dag(num_partitions, input_size)
-
-    # Stage-1 needs one task per layer (excluding fuse & classify nodes)
-    # The slice tasks are the layers that actually compute feature maps.
-    slice_layers = [l for l in layers if l["op"] not in ("add", "concat", "classify")]
-    num_slices = len(slice_layers)
-
     print(f"\n{'='*65}")
-    print(f"DNN Pipeline: {model_name.upper()}")
+    print(f"DNN TFLite Pipeline: {model_name.upper()}")
     print(f"  Input        : {input_size}x{input_size}x3")
     print(f"  Partitions   : {num_partitions}")
-    print(f"  Slice tasks  : {num_slices} (parallel branches)")
-    print(f"  Total layers : {len(layers)}")
-    print(f"  Stages       : partition -> slice x{num_slices} -> fuse -> classify")
+    print(f"  Stages       : partition_model -> tflite_partitionx{num_partitions} -> classify")
     print(f"{'='*65}\n")
 
     config = {
@@ -725,42 +989,31 @@ async def run_dnn_pipeline(model_name, input_size, num_partitions, dtype="float3
 
     start = time.time()
 
-    # Build args_list for stage-1: one element per slice layer
-    slice_args = [{"layer_index": i} for i in range(num_slices)]
-
-    results = await pipeline([
-        # Stage 0 – partition (single task)
+    # Build stage list dynamically: one sequential TFLite stage per partition
+    stages = [
         {
             "func": partition_model,
             "args_list": [config],
             "name": "partition_model",
         },
-        # Stage 1 – layer slices (N tasks, can run in parallel on crowd)
-        {
-            "func": run_layer_slice,
-            "args_list": slice_args,
+    ]
+    for i in range(num_partitions):
+        stages.append({
+            "func": run_tflite_partition,
+            "args_list": [{"partition_idx": i}],
             "pass_upstream_results": True,
-            "name": "run_layer_slices",
-        },
-        # Stage 2 – fuse branches (1 task, blocked until ALL slices done)
-        {
-            "func": fuse_branches,
-            "args_list": [None],
-            "pass_upstream_results": True,
-            "name": "fuse_branches",
-        },
-        # Stage 3 – classification head (1 task, blocked until fuse done)
-        {
-            "func": classify,
-            "args_list": [None],
-            "pass_upstream_results": True,
-            "name": "classify",
-        },
-    ])
+            "name": f"tflite_partition_{i}",
+        })
+    stages.append({
+        "func": classify,
+        "args_list": [None],
+        "pass_upstream_results": True,
+        "name": "classify",
+    })
 
+    results = await pipeline(stages)
     elapsed = time.time() - start
 
-    # ── Parse results ───────────────────────────────────────────────
     print(f"\nPipeline completed in {elapsed:.2f}s")
     if results:
         final = results[0]
@@ -815,32 +1068,18 @@ def parse_args():
 
 async def run_dnn_pipeline_local(model_name, input_size, num_partitions, dtype="float32"):
     """
-    Run the full DNN pipeline locally on a single device.
+    Run the full TFLite pipeline locally on a single device.
 
-    Executes all 4 stages sequentially in-process, simulating the same
-    dependency-counter flow without requiring a foreman or workers.
-    This is useful for:
-      - Testing / debugging the pipeline logic
-      - Single-device baselines for comparison with distributed runs
-      - Environments where foreman/workers are not available
+    Executes all stages sequentially in-process.  Useful for:
+      - Verifying that TFLite sub-models build and run correctly on the PC
+      - Debugging the pipeline without a foreman / workers
+      - Single-device latency baselines
     """
-
-    # Build the DAG
-    if model_name == "inception":
-        layers, edges = build_inception_dag(num_partitions, input_size)
-    else:
-        layers, edges = build_resnet_dag(num_partitions, input_size)
-
-    slice_layers = [l for l in layers if l["op"] not in ("add", "concat", "classify")]
-    num_slices = len(slice_layers)
-
     print(f"\n{'='*65}")
-    print(f"DNN Pipeline (LOCAL): {model_name.upper()}")
+    print(f"DNN TFLite Pipeline (LOCAL): {model_name.upper()}")
     print(f"  Input        : {input_size}x{input_size}x3")
     print(f"  Partitions   : {num_partitions} (all on this device)")
-    print(f"  Slice tasks  : {num_slices}")
-    print(f"  Total layers : {len(layers)}")
-    print(f"  Stages       : partition -> slice x{num_slices} -> fuse -> classify")
+    print(f"  Stages       : partition_model -> tflite_partitionx{num_partitions} -> classify")
     print(f"{'='*65}\n")
 
     config = {
@@ -852,43 +1091,54 @@ async def run_dnn_pipeline_local(model_name, input_size, num_partitions, dtype="
 
     start = time.time()
 
-    # ── Stage 0: partition ──────────────────────────────────────────
+    # -- Stage 0: build TFLite sub-models and partition plan --------------
     print("[local] Stage 0: partition_model")
-    stage0_result = partition_model.__crowdio_original__(config) if hasattr(partition_model, "__crowdio_original__") else partition_model(config)
+    _pm = (
+        partition_model.__crowdio_original__
+        if hasattr(partition_model, "__crowdio_original__")
+        else partition_model
+    )
+    stage0_result = _pm(config)
 
-    # ── Stage 1: run each layer slice sequentially ─────────────────
-    slice_results = {}
-    for i in range(num_slices):
-        print(f"[local] Stage 1: run_layer_slice [{i+1}/{num_slices}]")
+    # -- Stages 1...N: sequential TFLite partition inference ----------------
+    _rtp = (
+        run_tflite_partition.__crowdio_original__
+        if hasattr(run_tflite_partition, "__crowdio_original__")
+        else run_tflite_partition
+    )
+    prev_result = stage0_result
+    for i in range(num_partitions):
+        print(f"[local] Stage {i + 1}: run_tflite_partition (partition_idx={i})")
+        if i == 0:
+            # First partition: stage-0 result has tflite_models + input_tensor
+            upstream = {"stage0": stage0_result}
+        else:
+            # Subsequent partitions: previous result carries tflite_models
+            # pass-through + output_tensor
+            upstream = {f"partition_{i - 1}": prev_result}
         task_input = {
-            "original_args": {"layer_index": i},
-            "upstream_results": {f"local_stage0_task0": stage0_result},
+            "original_args": {"partition_idx": i},
+            "upstream_results": upstream,
         }
-        fn = run_layer_slice.__crowdio_original__ if hasattr(run_layer_slice, "__crowdio_original__") else run_layer_slice
-        result = fn(task_input)
-        slice_results[f"local_stage1_task{i}"] = result
+        prev_result = _rtp(task_input)
+        backend = prev_result.get("backend_used", "?")
+        shape = prev_result.get("output_shape", "?")
+        print(f"           -> backend={backend}  output_shape={shape}")
 
-    # ── Stage 2: fuse branches ─────────────────────────────────────
-    print(f"[local] Stage 2: fuse_branches ({len(slice_results)} inputs)")
-    fuse_input = {
-        "original_args": None,
-        "upstream_results": slice_results,
-    }
-    fn = fuse_branches.__crowdio_original__ if hasattr(fuse_branches, "__crowdio_original__") else fuse_branches
-    fuse_result = fn(fuse_input)
-
-    # ── Stage 3: classify ──────────────────────────────────────────
-    print("[local] Stage 3: classify")
+    # -- Final stage: classification head ---------------------------------
+    print(f"[local] Stage {num_partitions + 1}: classify")
+    _cls = (
+        classify.__crowdio_original__
+        if hasattr(classify, "__crowdio_original__")
+        else classify
+    )
     classify_input = {
         "original_args": None,
-        "upstream_results": {"local_stage2_task0": fuse_result},
+        "upstream_results": {f"partition_{num_partitions - 1}": prev_result},
     }
-    fn = classify.__crowdio_original__ if hasattr(classify, "__crowdio_original__") else classify
-    final = fn(classify_input)
+    final = _cls(classify_input)
 
     elapsed = time.time() - start
-
-    # ── Parse results ───────────────────────────────────────────────
     print(f"\nPipeline (local) completed in {elapsed:.2f}s")
     if final:
         if "error" in final:
@@ -947,7 +1197,7 @@ async def main():
                 json.dump(summary, f, indent=2, default=str)
             print(f"\n  Result saved -> {out_path}")
 
-        # ── Summary ─────────────────────────────────────────────────
+        # -- Summary -------------------------------------------------
         print(f"\n{'='*65}")
         print("DNN PARTITIONING TEST SUMMARY")
         print(f"{'='*65}")
