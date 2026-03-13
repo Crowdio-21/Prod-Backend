@@ -36,7 +36,9 @@ async def lifespan(app: FastAPI):
             # ping_interval: How often to send pings to keep connection alive (None = disabled, let our custom ping handle it)
             # ping_timeout: How long to wait for pong response before closing
             # close_timeout: How long to wait for close handshake
-            # max_size: Maximum message size (10MB to handle large task results)
+            # max_size: Message size limit. None disables the cap so large
+            # model payloads (e.g., partitioned VGG16 TFLite blobs) don't
+            # get disconnected during submit/dispatch.
             websocket_server = await websockets.serve(
                 ws_manager.handle_connection,
                 "0.0.0.0",
@@ -44,7 +46,7 @@ async def lifespan(app: FastAPI):
                 ping_interval=None,  # Disable built-in ping, we handle it ourselves
                 ping_timeout=None,  # Disable ping timeout
                 close_timeout=30,  # Wait up to 30s for close handshake
-                max_size=10 * 1024 * 1024,  # 10MB max message size
+                max_size=None,
             )
             print("WebSocket server started on ws://localhost:9000")
             await websocket_server.wait_closed()
