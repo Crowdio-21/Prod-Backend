@@ -227,3 +227,6 @@ pipeline_output/
 # Outputs
 *.csv
 .png
+
+#dnn outputs
+*.json
