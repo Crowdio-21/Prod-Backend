@@ -533,6 +533,7 @@ def run_tflite_partition(task_input):
     import base64
     import io
     import numpy as np
+    import requests
 
     # -- Inline helpers ----------------------------------------------------
     # Defined inside the function so the serialised source is self-contained
@@ -549,8 +550,17 @@ def run_tflite_partition(task_input):
                 blob = _a.literal_eval(blob)
         fmt = blob.get("format", "json")
         if fmt == "npy":
-            raw = base64.b64decode(blob["data_b64"])
-            return np.load(io.BytesIO(raw))
+            data_b64 = blob.get("data_b64")
+            if data_b64:
+                raw = base64.b64decode(data_b64)
+            else:
+                file_url = blob.get("file_url")
+                if not file_url:
+                    raise ValueError("No tensor data_b64 or file_url in output_tensor")
+                response = requests.get(file_url, timeout=30)
+                response.raise_for_status()
+                raw = response.content
+            return np.load(io.BytesIO(raw), allow_pickle=False)
         data = blob.get("data", [])
         shape = blob.get("shape")
         arr = np.array(data, dtype=blob.get("dtype", "float32"))
@@ -668,6 +678,13 @@ def run_tflite_partition(task_input):
         if partition_idx > 0 and result.get("output_tensor") is not None:
             if result.get("partition_idx") == partition_idx - 1:
                 input_tensor_blob = result["output_tensor"]
+                dtype = result.get("dtype", dtype)
+        elif partition_idx > 0 and result.get("result_file_url"):
+            if result.get("partition_idx") in (None, partition_idx - 1):
+                input_tensor_blob = {
+                    "format": "npy",
+                    "file_url": result["result_file_url"],
+                }
                 dtype = result.get("dtype", dtype)
 
     # Fallback: accept any output_tensor when the partition_idx tag is absent
