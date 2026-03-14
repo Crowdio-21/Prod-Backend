@@ -23,11 +23,13 @@ Notes:
 import argparse
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
 import sys
 import time
+import uuid
 from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -67,8 +69,19 @@ def _serialize_tensor(arr):
 def _deserialize_tensor(blob):
     np = _require_numpy()
     if blob.get("format", "json") == "npy":
-        raw = base64.b64decode(blob["data_b64"])
-        return np.load(io.BytesIO(raw))
+        data_b64 = blob.get("data_b64")
+        if data_b64:
+            raw = base64.b64decode(data_b64)
+        else:
+            file_url = blob.get("file_url")
+            if not file_url:
+                raise ValueError("No tensor data_b64 or file_url in output_tensor")
+            import requests
+
+            response = requests.get(file_url, timeout=30)
+            response.raise_for_status()
+            raw = response.content
+        return np.load(io.BytesIO(raw), allow_pickle=False)
     arr = np.array(blob.get("data", []), dtype=blob.get("dtype", "float32"))
     if blob.get("shape"):
         arr = arr.reshape(blob["shape"])
@@ -80,6 +93,21 @@ def _run_tflite_local(tflite_b64_str, input_array):
     import tensorflow as tf
 
     tflite_bytes = base64.b64decode(tflite_b64_str)
+    interp = tf.lite.Interpreter(model_content=tflite_bytes)
+    interp.allocate_tensors()
+    inp = interp.get_input_details()[0]
+    out = interp.get_output_details()[0]
+
+    arr = np.array(input_array, dtype=inp["dtype"]).reshape(inp["shape"])
+    interp.set_tensor(inp["index"], arr)
+    interp.invoke()
+    return interp.get_tensor(out["index"])
+
+
+def _run_tflite_local_bytes(tflite_bytes, input_array):
+    np = _require_numpy()
+    import tensorflow as tf
+
     interp = tf.lite.Interpreter(model_content=tflite_bytes)
     interp.allocate_tensors()
     inp = interp.get_input_details()[0]
@@ -145,10 +173,50 @@ def _build_vgg16_tflite_partitions(num_devices: int, weights: str):
     return partitions
 
 
-def _build_stage0_payload(num_devices: int, dtype: str, weights: str):
+def _persist_tflite_models_to_store(tflite_models, model_store_dir, model_id=None):
+    model_id = model_id or f"vgg16_partitions_{uuid.uuid4().hex[:8]}"
+    model_dir = os.path.join(model_store_dir, model_id)
+    os.makedirs(model_dir, exist_ok=True)
+
+    manifest = {"model_id": model_id, "parts": {}}
+    for idx, info in tflite_models.items():
+        filename = f"partition_{idx}.tflite"
+        path = os.path.join(model_dir, filename)
+        model_bytes = base64.b64decode(info["tflite_b64"])
+        with open(path, "wb") as fh:
+            fh.write(model_bytes)
+        digest = hashlib.sha256(model_bytes).hexdigest()
+
+        manifest["parts"][str(idx)] = {
+            "file": filename,
+            "input_shape": info.get("input_shape", []),
+            "output_shape": info.get("output_shape", []),
+            "layer_start": info.get("layer_start"),
+            "layer_end": info.get("layer_end"),
+            "sha256": digest,
+        }
+
+    with open(os.path.join(model_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    return model_id, manifest
+
+
+def _build_stage0_payload(
+    num_devices: int,
+    dtype: str,
+    weights: str,
+    model_store_dir: str,
+    model_base_url: str = None,
+    worker_model_cache_dir: str = ".worker_model_cache",
+):
     np = _require_numpy()
 
     tflite_models = _build_vgg16_tflite_partitions(num_devices, weights)
+    model_store_dir = os.path.abspath(model_store_dir)
+    model_id, model_manifest = _persist_tflite_models_to_store(
+        tflite_models, model_store_dir=model_store_dir, model_id="vgg16_partitioned"
+    )
 
     rng = np.random.RandomState(42)
     # Typical image input in [0, 255] for VGG preprocessing style
@@ -172,7 +240,11 @@ def _build_stage0_payload(num_devices: int, dtype: str, weights: str):
         "edges": [(f"partition_{i - 1}", f"partition_{i}") for i in range(1, num_devices)],
         "input_tensor": _serialize_tensor(input_array),
         "plan": {f"partition_{i}": i for i in range(num_devices)},
-        "tflite_models": {str(k): v for k, v in tflite_models.items()},
+        "model_id": model_id,
+        "model_store_dir": model_store_dir,
+        "model_manifest": model_manifest,
+        "model_base_url": model_base_url,
+        "worker_model_cache_dir": worker_model_cache_dir,
     }
 
 
@@ -188,11 +260,16 @@ def emit_payload(payload):
 )
 def run_tflite_partition(task_input):
     import base64
+    import hashlib
     import io
     import json as _json
+    import os
     import time as _time
+    import urllib.request
+    from pathlib import Path
 
     import numpy as np
+    import requests
 
     def _decode(blob):
         if isinstance(blob, str):
@@ -203,8 +280,17 @@ def run_tflite_partition(task_input):
 
                 blob = _ast.literal_eval(blob)
         if blob.get("format", "json") == "npy":
-            raw = base64.b64decode(blob["data_b64"])
-            return np.load(io.BytesIO(raw))
+            data_b64 = blob.get("data_b64")
+            if data_b64:
+                raw = base64.b64decode(data_b64)
+            else:
+                file_url = blob.get("file_url")
+                if not file_url:
+                    raise ValueError("No tensor data_b64 or file_url in output_tensor")
+                response = requests.get(file_url, timeout=30)
+                response.raise_for_status()
+                raw = response.content
+            return np.load(io.BytesIO(raw), allow_pickle=False)
         arr = np.array(blob.get("data", []), dtype=blob.get("dtype", "float32"))
         if blob.get("shape"):
             arr = arr.reshape(blob["shape"])
@@ -220,6 +306,68 @@ def run_tflite_partition(task_input):
             "shape": list(arr.shape),
             "data_b64": base64.b64encode(buf.getvalue()).decode("utf-8"),
         }
+
+    def _load_tensor_ref(tensor_ref):
+        import base64 as _base64
+
+        # Supports http(s) URLs and local filesystem paths.
+        if isinstance(tensor_ref, dict):
+            if tensor_ref.get("file_url"):
+                tensor_ref = tensor_ref["file_url"]
+            elif tensor_ref.get("path"):
+                tensor_ref = tensor_ref["path"]
+            else:
+                raise ValueError("tensor_ref dict must include 'file_url' or 'path'")
+
+        if not isinstance(tensor_ref, str) or not tensor_ref.strip():
+            raise ValueError("tensor_ref must be a non-empty string or dict")
+
+        ref = tensor_ref.strip()
+        if ref.startswith("http://") or ref.startswith("https://"):
+            response = requests.get(ref, timeout=30)
+            response.raise_for_status()
+            raw = response.content
+        else:
+            path = Path(ref.replace("file://", "")).expanduser().resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"tensor_ref path not found: {path}")
+            raw = path.read_bytes()
+
+        # Normal path: raw .npy payload.
+        try:
+            return np.load(io.BytesIO(raw), allow_pickle=False)
+        except Exception:
+            # Offloaded payload may be a JSON task_result envelope.
+            text = raw.decode("utf-8")
+            envelope = _json.loads(text)
+            result_obj = (envelope.get("data") or {}).get("result")
+            if isinstance(result_obj, str):
+                try:
+                    result_obj = _json.loads(result_obj)
+                except Exception:
+                    import ast as _ast
+
+                    result_obj = _ast.literal_eval(result_obj)
+
+            if not isinstance(result_obj, dict):
+                raise ValueError("tensor_ref payload did not contain a dict result")
+
+            output_tensor = result_obj.get("output_tensor")
+            if not isinstance(output_tensor, dict):
+                raise ValueError("tensor_ref payload did not contain output_tensor")
+
+            data_b64 = output_tensor.get("data_b64")
+            if data_b64:
+                raw_tensor = _base64.b64decode(data_b64)
+                return np.load(io.BytesIO(raw_tensor), allow_pickle=False)
+
+            nested_file_url = output_tensor.get("file_url")
+            if nested_file_url:
+                response = requests.get(nested_file_url, timeout=30)
+                response.raise_for_status()
+                return np.load(io.BytesIO(response.content), allow_pickle=False)
+
+            raise ValueError("output_tensor missing both data_b64 and file_url")
 
     def _run_tflite(tflite_b64_str, input_array):
         tflite_bytes = base64.b64decode(tflite_b64_str)
@@ -264,6 +412,53 @@ def run_tflite_partition(task_input):
         interp.invoke()
         return interp.get_tensor(out["index"]), backend
 
+    def _read_model_bytes_with_cache(
+        model_id,
+        file_name,
+        expected_sha256,
+        model_store_dir,
+        model_base_url,
+        cache_root,
+    ):
+        cache_root = cache_root or ".worker_model_cache"
+        model_cache_dir = os.path.join(cache_root, model_id)
+        os.makedirs(model_cache_dir, exist_ok=True)
+        cache_path = os.path.join(model_cache_dir, file_name)
+
+        def _valid(data):
+            if not expected_sha256:
+                return True
+            return hashlib.sha256(data).hexdigest() == expected_sha256
+
+        if os.path.exists(cache_path):
+            with open(cache_path, "rb") as fh:
+                data = fh.read()
+            if _valid(data):
+                return data, "cache"
+
+        if model_store_dir:
+            shared = os.path.join(model_store_dir, model_id, file_name)
+            if os.path.exists(shared):
+                with open(shared, "rb") as fh:
+                    data = fh.read()
+                if _valid(data):
+                    with open(cache_path, "wb") as out:
+                        out.write(data)
+                    return data, "shared"
+
+        if model_base_url:
+            url = f"{model_base_url.rstrip('/')}/{model_id}/{file_name}"
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                data = resp.read()
+            if _valid(data):
+                with open(cache_path, "wb") as out:
+                    out.write(data)
+                return data, "download"
+
+        raise FileNotFoundError(
+            f"Unable to load model file '{file_name}' for model_id='{model_id}'"
+        )
+
     start = _time.time()
     progress_percent = 0.0
 
@@ -273,7 +468,11 @@ def run_tflite_partition(task_input):
     partition_idx = original_args.get("partition_idx", 0)
     stream_id = original_args.get("stream_id", 0)
 
-    tflite_models = {}
+    model_id = None
+    model_store_dir = None
+    model_manifest = {}
+    model_base_url = None
+    worker_model_cache_dir = ".worker_model_cache"
     input_blob = None
     dtype = "float32"
     trace = []
@@ -296,8 +495,16 @@ def run_tflite_partition(task_input):
         if result.get("trace") and isinstance(result.get("trace"), list):
             trace = list(result["trace"])
 
-        if result.get("tflite_models"):
-            tflite_models = result["tflite_models"]
+        if result.get("model_id"):
+            model_id = result["model_id"]
+        if result.get("model_store_dir"):
+            model_store_dir = result["model_store_dir"]
+        if result.get("model_manifest"):
+            model_manifest = result["model_manifest"]
+        if result.get("model_base_url"):
+            model_base_url = result["model_base_url"]
+        if result.get("worker_model_cache_dir"):
+            worker_model_cache_dir = result["worker_model_cache_dir"]
 
         if partition_idx == 0 and result.get("input_tensor") and input_blob is None:
             input_blob = result["input_tensor"]
@@ -307,11 +514,24 @@ def run_tflite_partition(task_input):
             if result.get("partition_idx") == partition_idx - 1:
                 input_blob = result["output_tensor"]
                 dtype = result.get("dtype", dtype)
+        elif partition_idx > 0 and result.get("result_file_url"):
+            if result.get("partition_idx") in (None, partition_idx - 1):
+                input_blob = {
+                    "format": "npy",
+                    "file_url": result["result_file_url"],
+                }
+                dtype = result.get("dtype", dtype)
 
     if input_blob is None and partition_idx > 0:
         for _, result in upstream.items():
             if isinstance(result, dict) and result.get("output_tensor") is not None:
                 input_blob = result["output_tensor"]
+                break
+            if isinstance(result, dict) and result.get("result_file_url"):
+                input_blob = {
+                    "format": "npy",
+                    "file_url": result["result_file_url"],
+                }
                 break
 
     if input_blob is None:
@@ -325,16 +545,61 @@ def run_tflite_partition(task_input):
     progress_percent = 20.0
     x = _decode(input_blob)
     output = None
-    backend = "simulation"
+    backend = "none"
 
-    info = tflite_models.get(str(partition_idx))
-    if info and info.get("tflite_b64"):
-        output, backend = _run_tflite(info["tflite_b64"], x)
+    tensor_ref = task_input.get("tensor_ref")
+    if tensor_ref is None and isinstance(original_args, dict):
+        tensor_ref = original_args.get("tensor_ref")
+    if tensor_ref is not None:
+        try:
+            output = _load_tensor_ref(tensor_ref)
+            backend = "tensor_ref"
+        except Exception as exc:
+            return {
+                "error": f"Failed to load tensor_ref: {exc}",
+                "stream_id": stream_id,
+                "partition_idx": partition_idx,
+                "backend_used": "tensor_ref_error",
+                "trace": trace,
+            }
+
+    info = (model_manifest.get("parts") or {}).get(str(partition_idx), {})
+    if output is None and model_id and model_store_dir and info.get("file"):
+        try:
+            model_bytes, model_source = _read_model_bytes_with_cache(
+                model_id=model_id,
+                file_name=info["file"],
+                expected_sha256=info.get("sha256"),
+                model_store_dir=model_store_dir,
+                model_base_url=model_base_url,
+                cache_root=worker_model_cache_dir,
+            )
+            output, backend = _run_tflite(base64.b64encode(model_bytes).decode("utf-8"), x)
+            trace.append(
+                {
+                    "stream_id": stream_id,
+                    "partition_idx": partition_idx,
+                    "model_source": model_source,
+                }
+            )
+        except Exception:
+            output = None
 
     progress_percent = 80.0
     if output is None:
-        out_shape = (1,) + tuple(info.get("output_shape", [1000]))
-        output = np.random.default_rng(partition_idx).standard_normal(out_shape).astype(dtype)
+        error_message = "No real backend output. Refusing simulation fallback."
+        if not info.get("file"):
+            error_message += f" Missing model manifest entry for partition {partition_idx}."
+        else:
+            error_message += " Model load or TFLite backend failed."
+        return {
+            "error": error_message,
+            "stream_id": stream_id,
+            "partition_idx": partition_idx,
+            "backend_used": backend,
+            "model_id": model_id,
+            "trace": trace,
+        }
 
     output_blob = _encode(output)
     out_shape = list(getattr(output, "shape", []))
@@ -359,7 +624,11 @@ def run_tflite_partition(task_input):
         "exec_time": elapsed,
         "backend_used": backend,
         "dtype": dtype,
-        "tflite_models": tflite_models,
+        "model_id": model_id,
+        "model_store_dir": model_store_dir,
+        "model_manifest": model_manifest,
+        "model_base_url": model_base_url,
+        "worker_model_cache_dir": worker_model_cache_dir,
         "trace": trace,
     }
 
@@ -372,6 +641,7 @@ def classify_with_trace(task_input):
     import time as _time
 
     import numpy as np
+    import requests
 
     def _decode(blob):
         if isinstance(blob, str):
@@ -382,8 +652,17 @@ def classify_with_trace(task_input):
 
                 blob = _ast.literal_eval(blob)
         if blob.get("format", "json") == "npy":
-            raw = base64.b64decode(blob["data_b64"])
-            return np.load(io.BytesIO(raw))
+            data_b64 = blob.get("data_b64")
+            if data_b64:
+                raw = base64.b64decode(data_b64)
+            else:
+                file_url = blob.get("file_url")
+                if not file_url:
+                    raise ValueError("No tensor data_b64 or file_url in output_tensor")
+                response = requests.get(file_url, timeout=30)
+                response.raise_for_status()
+                raw = response.content
+            return np.load(io.BytesIO(raw), allow_pickle=False)
         arr = np.array(blob.get("data", []), dtype=blob.get("dtype", "float32"))
         if blob.get("shape"):
             arr = arr.reshape(blob["shape"])
@@ -418,6 +697,9 @@ def classify_with_trace(task_input):
         if result.get("output_tensor"):
             x = _decode(result["output_tensor"])
             x_shape = result.get("output_shape", [])
+        elif result.get("result_file_url"):
+            x = _decode({"format": "npy", "file_url": result["result_file_url"]})
+            x_shape = result.get("output_shape", x_shape or [])
 
     if x is None:
         return {
@@ -449,9 +731,12 @@ def classify_with_trace(task_input):
 
 def _compute_reference(stage0_payload, num_devices):
     x = _deserialize_tensor(stage0_payload["input_tensor"])
-    models = stage0_payload["tflite_models"]
+    model_dir = os.path.join(stage0_payload["model_store_dir"], stage0_payload["model_id"])
+    manifest = stage0_payload["model_manifest"]
     for i in range(num_devices):
-        x = _run_tflite_local(models[str(i)]["tflite_b64"], x)
+        part_info = manifest["parts"][str(i)]
+        with open(os.path.join(model_dir, part_info["file"]), "rb") as fh:
+            x = _run_tflite_local_bytes(fh.read(), x)
 
     import numpy as np
 
@@ -470,7 +755,14 @@ def _compute_reference(stage0_payload, num_devices):
 
 
 async def run_single_job(args):
-    payload = _build_stage0_payload(args.num_devices, args.dtype, args.weights)
+    payload = _build_stage0_payload(
+        args.num_devices,
+        args.dtype,
+        args.weights,
+        args.model_store_dir,
+        args.model_base_url,
+        args.worker_model_cache_dir,
+    )
 
     stages = [
         {"func": emit_payload, "args_list": [payload], "name": "emit_payload"}
@@ -530,6 +822,21 @@ def parse_args():
     p.add_argument("--tasks-per-stage", type=int, default=4)
     p.add_argument("--dtype", default="float32")
     p.add_argument("--weights", choices=["none", "imagenet"], default="none")
+    p.add_argument(
+        "--model-store-dir",
+        default=os.path.join(".", ".model_store"),
+        help="Shared directory containing partitioned model files",
+    )
+    p.add_argument(
+        "--model-base-url",
+        default=None,
+        help="Optional base URL for workers to download model files: <base>/<model_id>/<partition>.tflite",
+    )
+    p.add_argument(
+        "--worker-model-cache-dir",
+        default=os.path.join(".", ".worker_model_cache"),
+        help="Worker-local cache directory for downloaded/copied model files",
+    )
     p.add_argument(
         "--output-json",
         default=os.path.join(
