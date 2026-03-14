@@ -5,7 +5,7 @@ Provides declarative checkpointing support for distributed task execution.
 
 Usage:
     import developer_sdk as crowdio
-    
+
     @crowdio.task(
         checkpoint=True,
         checkpoint_interval=5,
@@ -18,7 +18,7 @@ Usage:
             state["result"] = process(data[i])
             state["progress_percent"] = (i + 1) / len(data) * 100
         return state["result"]
-    
+
     async def main():
         await crowdio.connect("localhost", 9000)
         results = await crowdio.map(my_task, data_list)
@@ -26,10 +26,10 @@ Usage:
 """
 
 from .api import (
-    connect, 
-    map, 
-    run, 
-    get, 
+    connect,
+    map,
+    run,
+    get,
     disconnect,
     submit,
     pipeline,
@@ -40,17 +40,18 @@ from .api import (
     get_task_config,
     is_checkpoint_task,
     create_state_dict,
-    crowdio
+    Constant,
+    crowdio,
 )
 
 __version__ = "0.2.0"
 __all__ = [
     # Connection API
-    "connect", 
+    "connect",
     "disconnect",
     # Execution API
-    "map", 
-    "run", 
+    "map",
+    "run",
     "get",
     "submit",
     "pipeline",
@@ -62,5 +63,6 @@ __all__ = [
     "get_task_config",
     "is_checkpoint_task",
     "create_state_dict",
-    "crowdio"
+    "Constant",
+    "crowdio",
 ]

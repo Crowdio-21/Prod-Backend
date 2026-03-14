@@ -17,16 +17,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 from functools import wraps
 import inspect
+from .constants import Constant
 
 
 @dataclass
 class TaskMetadata:
     """
     Metadata for a task's checkpointing configuration
-    
+
     Stored alongside task submission and used by workers
     to manage checkpoint capture and recovery.
-    
+
     Attributes:
         checkpoint_enabled: Whether checkpointing is active for this task
         checkpoint_interval: Seconds between checkpoint captures
@@ -36,6 +37,7 @@ class TaskMetadata:
         max_retries: Maximum number of retry attempts
         timeout: Task timeout in seconds (None = no timeout)
     """
+
     checkpoint_enabled: bool = False
     checkpoint_interval: float = 10.0
     checkpoint_state: List[str] = field(default_factory=list)
@@ -43,11 +45,11 @@ class TaskMetadata:
     retry_on_failure: bool = True
     max_retries: int = 3
     timeout: Optional[float] = None
-    
+
     # Internal tracking
     _func_name: str = ""
     _validated: bool = False
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize metadata to dictionary for transmission"""
         return {
@@ -59,11 +61,11 @@ class TaskMetadata:
             "max_retries": self.max_retries,
             "timeout": self.timeout,
             "_func_name": self._func_name,
-            "_validated": self._validated
+            "_validated": self._validated,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TaskMetadata':
+    def from_dict(cls, data: Dict[str, Any]) -> "TaskMetadata":
         """Deserialize metadata from dictionary"""
         return cls(
             checkpoint_enabled=data.get("checkpoint_enabled", False),
@@ -74,25 +76,25 @@ class TaskMetadata:
             max_retries=data.get("max_retries", 3),
             timeout=data.get("timeout"),
             _func_name=data.get("_func_name", ""),
-            _validated=data.get("_validated", False)
+            _validated=data.get("_validated", False),
         )
-    
+
     def validate_state_variables(self, state: Dict[str, Any]) -> bool:
         """
         Validate that all declared checkpoint variables exist in state
-        
+
         Args:
             state: Current state dictionary
-            
+
         Returns:
             True if all declared variables are present
-            
+
         Raises:
             ValueError: If any declared variable is missing from state
         """
         if not self.checkpoint_enabled:
             return True
-            
+
         missing = set(self.checkpoint_state) - set(state.keys())
         if missing:
             raise ValueError(
@@ -100,47 +102,43 @@ class TaskMetadata:
                 f"Declared checkpoint variables not found in state: {missing}. "
                 f"Available state variables: {set(state.keys())}"
             )
-        
+
         self._validated = True
         return True
-    
+
     def filter_checkpoint_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Filter state to only include declared checkpoint variables
-        
+
         Args:
             state: Full state dictionary
-            
+
         Returns:
             Filtered state with only declared checkpoint variables
         """
         if not self.checkpoint_enabled or not self.checkpoint_state:
             # If no specific variables declared, checkpoint all
             return dict(state)
-        
-        return {
-            key: state[key] 
-            for key in self.checkpoint_state 
-            if key in state
-        }
+
+        return {key: state[key] for key in self.checkpoint_state if key in state}
 
 
 class TaskConfig:
     """
     Configuration wrapper for task functions
-    
+
     Attached to decorated functions via __crowdio_config__ attribute.
     """
-    
+
     def __init__(self, metadata: TaskMetadata, original_func: Callable):
         self.metadata = metadata
         self.original_func = original_func
         self._wrapper_func: Optional[Callable] = None
-    
+
     def get_metadata(self) -> TaskMetadata:
         """Get task metadata"""
         return self.metadata
-    
+
     def is_checkpoint_enabled(self) -> bool:
         """Check if checkpointing is enabled"""
         return self.metadata.checkpoint_enabled
@@ -153,11 +151,11 @@ def task(
     checkpoint_state: Optional[List[str]] = None,
     retry_on_failure: bool = True,
     max_retries: int = 3,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
 ) -> Callable:
     """
     Decorator for declaring a CrowdCompute task with checkpoint support
-    
+
     Usage:
         @crowdio.task(
             parallel=True,
@@ -172,7 +170,7 @@ def task(
                 state["partial_result"] = process(data[i])
                 state["progress_percent"] = (i + 1) / len(data) * 100
             return state["partial_result"]
-    
+
     Args:
         parallel: Whether task supports parallel execution across workers
         checkpoint: Enable automatic checkpointing
@@ -182,11 +180,11 @@ def task(
         retry_on_failure: Automatically retry failed tasks
         max_retries: Maximum retry attempts
         timeout: Task timeout in seconds (None = no timeout)
-    
+
     Returns:
         Decorated function with TaskConfig attached
     """
-    
+
     def decorator(func: Callable) -> Callable:
         # Create metadata for this task
         metadata = TaskMetadata(
@@ -197,47 +195,47 @@ def task(
             retry_on_failure=retry_on_failure,
             max_retries=max_retries,
             timeout=timeout,
-            _func_name=func.__name__
+            _func_name=func.__name__,
         )
-        
+
         # Create task config
         config = TaskConfig(metadata, func)
-        
+
         @wraps(func)
         def wrapper(*args, **kwargs):
             """
             Task wrapper that handles state injection and checkpoint support
-            
+
             When executed on a worker:
             1. If resuming: state is pre-loaded from checkpoint
             2. State is automatically tracked for checkpointing
             3. Only declared variables are captured
             """
             return func(*args, **kwargs)
-        
+
         # Attach config to wrapper for SDK access
         wrapper.__crowdio_config__ = config
         wrapper.__crowdio_metadata__ = metadata
-        
+
         # Store original function for serialization
         wrapper.__crowdio_original__ = func
-        
+
         return wrapper
-    
+
     return decorator
 
 
 def get_task_metadata(func: Callable) -> Optional[TaskMetadata]:
     """
     Extract TaskMetadata from a decorated function
-    
+
     Args:
         func: Potentially decorated function
-        
+
     Returns:
         TaskMetadata if function was decorated with @task, else None
     """
-    if hasattr(func, '__crowdio_metadata__'):
+    if hasattr(func, "__crowdio_metadata__"):
         return func.__crowdio_metadata__
     return None
 
@@ -245,14 +243,14 @@ def get_task_metadata(func: Callable) -> Optional[TaskMetadata]:
 def get_task_config(func: Callable) -> Optional[TaskConfig]:
     """
     Extract TaskConfig from a decorated function
-    
+
     Args:
         func: Potentially decorated function
-        
+
     Returns:
         TaskConfig if function was decorated with @task, else None
     """
-    if hasattr(func, '__crowdio_config__'):
+    if hasattr(func, "__crowdio_config__"):
         return func.__crowdio_config__
     return None
 
@@ -260,10 +258,10 @@ def get_task_config(func: Callable) -> Optional[TaskConfig]:
 def is_checkpoint_task(func: Callable) -> bool:
     """
     Check if a function has checkpointing enabled
-    
+
     Args:
         func: Function to check
-        
+
     Returns:
         True if function has checkpoint=True decorator
     """
@@ -274,10 +272,10 @@ def is_checkpoint_task(func: Callable) -> bool:
 def create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
     """
     Create an initial state dictionary with declared checkpoint variables
-    
+
     Args:
         checkpoint_state: List of variable names to track
-        
+
     Returns:
         Dictionary with all variables initialized to None
     """
@@ -287,6 +285,9 @@ def create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
 # Convenience export for import style: from developer_sdk.decorators import crowdio
 class CrowdioNamespace:
     """Namespace class for @crowdio.task decorator style"""
+
     task = staticmethod(task)
-    
+    Constant = Constant
+
+
 crowdio = CrowdioNamespace()
