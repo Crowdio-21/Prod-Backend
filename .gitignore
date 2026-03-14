@@ -230,3 +230,15 @@ pipeline_output/
 
 #dnn outputs
 *.json
+
+#payload store
+.payload_store/
+
+#model store
+.model_store/
+
+#worker-side model cache
+.worker_model_cache/
+
+#tensor store
+tensor_store/
