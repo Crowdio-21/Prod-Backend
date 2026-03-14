@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from foreman.db.base import db_session
 from foreman.db.models import TaskModel, JobModel
+from foreman.core.payload_store import store_text_if_large, resolve_text_ref
 from foreman.db.crud import (
     create_pipeline_job,
     create_task_with_dependencies,
@@ -206,7 +207,9 @@ class DependencyManager:
                     task = TaskModel(
                         id=task_id,
                         job_id=job_id,
-                        args=json.dumps(args),
+                        args=store_text_if_large(
+                            json.dumps(args), "task_args", task_id
+                        ),
                         status=initial_status,
                         stage=stage_idx,
                         dependency_count=dependency_count,
@@ -304,6 +307,86 @@ class DependencyManager:
     #  Upstream result injection
     # ------------------------------------------------------------------ #
 
+    def _normalize_upstream_result_for_pipeline(self, upstream_result: Any) -> Any:
+        """Normalize special transport payloads for downstream pipeline tasks.
+
+        Supports results offloaded to HTTP storage in this shape:
+        {
+            "transport": "http_url",
+            "result_file_url": "http://.../file.npy",
+            ...
+        }
+
+        Downstream DNN stages expect ``output_tensor`` blobs, so we attach
+        a compatible ``output_tensor`` with ``file_url`` and a ``tensor_ref``.
+        """
+        parsed = upstream_result
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except Exception:
+                try:
+                    import ast as _ast
+
+                    parsed = _ast.literal_eval(parsed)
+                except Exception:
+                    return upstream_result
+
+        if not isinstance(parsed, dict):
+            return parsed
+
+        result_file_url = parsed.get("result_file_url")
+        if result_file_url and parsed.get("transport") in {"http_url", "http", "url"}:
+            extracted_result = None
+            local_tensor_path = None
+
+            # Map URL like http://host:8001/files/<name>.npy to local tensor_store path.
+            try:
+                from pathlib import Path
+                from urllib.parse import urlparse
+
+                url_path = urlparse(result_file_url).path
+                file_name = Path(url_path).name
+                candidate = Path.cwd() / "tensor_store" / file_name
+                if candidate.exists():
+                    local_tensor_path = str(candidate)
+                    # Offloaded file may contain a JSON task_result envelope.
+                    try:
+                        envelope = json.loads(candidate.read_text(encoding="utf-8"))
+                        extracted_result = (envelope.get("data") or {}).get("result")
+                        if isinstance(extracted_result, str):
+                            try:
+                                extracted_result = json.loads(extracted_result)
+                            except Exception:
+                                import ast as _ast
+
+                                extracted_result = _ast.literal_eval(extracted_result)
+                    except Exception:
+                        extracted_result = None
+            except Exception:
+                extracted_result = None
+
+            if isinstance(extracted_result, dict):
+                merged = dict(parsed)
+                merged.update(extracted_result)
+                return merged
+
+            normalized = dict(parsed)
+            normalized.setdefault(
+                "output_tensor",
+                {
+                    "format": "npy",
+                    "file_url": result_file_url,
+                },
+            )
+            normalized.setdefault(
+                "tensor_ref",
+                ({"path": local_tensor_path} if local_tensor_path else {"file_url": result_file_url}),
+            )
+            return normalized
+
+        return parsed
+
     async def _maybe_inject_upstream_result(
         self,
         session,
@@ -340,21 +423,27 @@ class DependencyManager:
 
         # Read current args and augment with upstream result
         try:
-            current_args = json.loads(task.args) if task.args else {}
+            resolved_args = resolve_text_ref(task.args)
+            current_args = json.loads(resolved_args) if resolved_args else {}
         except (json.JSONDecodeError, TypeError):
             current_args = {}
+
+        normalized_result = self._normalize_upstream_result_for_pipeline(upstream_result)
 
         # Build augmented args structure
         if isinstance(current_args, dict) and "upstream_results" in current_args:
             # Already has upstream_results — append
-            current_args["upstream_results"][upstream_task_id] = upstream_result
+            current_args["upstream_results"][upstream_task_id] = normalized_result
         else:
             current_args = {
                 "original_args": current_args,
-                "upstream_results": {upstream_task_id: upstream_result},
+                "upstream_results": {upstream_task_id: normalized_result},
             }
 
-        await update_task_args(session, downstream_task_id, json.dumps(current_args))
+        updated_args = store_text_if_large(
+            json.dumps(current_args), "task_args", downstream_task_id
+        )
+        await update_task_args(session, downstream_task_id, updated_args)
         print(
             f"DependencyManager: Injected result from {upstream_task_id} "
             f"into {downstream_task_id}"

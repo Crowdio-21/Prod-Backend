@@ -2,6 +2,8 @@
 Message handling logic separated by client type
 """
 
+import json
+
 from websockets.server import WebSocketServerProtocol
 
 from .utils import (
@@ -454,8 +456,35 @@ class WorkerMessageHandler:
                 f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
             )
 
-            # Result should already be a string from worker, but ensure it
-            result_str = str(result) if result is not None else ""
+            # Normalize result payload so pipeline traces carry execution worker_id.
+            normalized_result = result
+            if isinstance(normalized_result, str):
+                try:
+                    normalized_result = json.loads(normalized_result)
+                except Exception:
+                    try:
+                        import ast as _ast
+
+                        normalized_result = _ast.literal_eval(normalized_result)
+                    except Exception:
+                        normalized_result = result
+
+            if isinstance(normalized_result, dict):
+                normalized_result.setdefault("worker_id", worker_id)
+
+                trace = normalized_result.get("trace")
+                if isinstance(trace, list) and trace:
+                    if isinstance(trace[-1], dict):
+                        trace[-1].setdefault("worker_id", worker_id)
+                        trace[-1].setdefault("task_id", task_id)
+
+                try:
+                    result_str = json.dumps(normalized_result)
+                except Exception:
+                    result_str = str(result) if result is not None else ""
+            else:
+                # Result should already be a string from worker, but ensure it.
+                result_str = str(result) if result is not None else ""
             
             print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
 
@@ -493,7 +522,7 @@ class WorkerMessageHandler:
             if self.job_manager.is_pipeline_job(job_id):
                 dep_mgr = self.job_manager.dependency_manager
                 newly_unblocked = await dep_mgr.on_task_completed(
-                    task_id, job_id, result
+                    task_id, job_id, normalized_result
                 )
                 if newly_unblocked:
                     print(

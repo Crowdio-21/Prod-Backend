@@ -4,6 +4,7 @@ Job lifecycle management and state tracking
 
 import json
 from typing import List, Optional, Dict, Any, Tuple
+from .payload_store import resolve_text_ref
 
 
 from .utils import (
@@ -389,10 +390,11 @@ class JobManager:
             results = []
             for task in final_tasks:
                 if task.status == "completed":
+                    raw_result = resolve_text_ref(task.result)
                     try:
-                        results.append(json.loads(task.result))
+                        results.append(json.loads(raw_result))
                     except (json.JSONDecodeError, TypeError):
-                        results.append(task.result)
+                        results.append(raw_result)
                 else:
                     results.append(None)
             return results
@@ -407,10 +409,11 @@ class JobManager:
                     break
 
             if task and task.status == "completed":
+                raw_result = resolve_text_ref(task.result)
                 try:
-                    results.append(json.loads(task.result))
+                    results.append(json.loads(raw_result))
                 except (json.JSONDecodeError, TypeError):
-                    results.append(task.result)
+                    results.append(raw_result)
             else:
                 results.append(None)
 
