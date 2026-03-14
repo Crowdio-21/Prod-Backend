@@ -11,6 +11,7 @@ import json
 from typing import List, Optional, Any, Dict
 
 from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
+from .payload_store import resolve_text_ref
 from .utils import (
     _get_pending_tasks,
     _get_assigned_tasks,
@@ -234,7 +235,8 @@ class TaskDispatcher:
 
         tasks_assigned = 0
         for scheduler_task, worker_id in assignments:
-            task_args = json.loads(scheduler_task.args) if scheduler_task.args else []
+            args_text = resolve_text_ref(scheduler_task.args)
+            task_args = json.loads(args_text) if args_text else []
             
             # For pipeline tasks, use per-stage func_code stored on SchedulerTask
             task_func_code = getattr(scheduler_task, "stage_func_code", None) or func_code
@@ -315,7 +317,8 @@ class TaskDispatcher:
                 print(f"TaskDispatcher: No func_code found for job {job_id}, skipping")
                 return False
 
-            task_args = json.loads(task.args) if task.args else []
+            args_text = resolve_text_ref(task.args)
+            task_args = json.loads(args_text) if args_text else []
             success = await self._assign_task_to_worker(job_id, task.id, func_code, task_args, worker_id)
             return success
 
