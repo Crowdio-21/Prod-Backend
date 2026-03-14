@@ -220,6 +220,7 @@ def run_tflite_partition_traced(task_input):
     import time as _time
 
     import numpy as np
+    import requests
 
     def _decode_tensor(blob):
         if isinstance(blob, str):
@@ -229,8 +230,17 @@ def run_tflite_partition_traced(task_input):
                 import ast as _ast
                 blob = _ast.literal_eval(blob)
         if blob.get("format", "json") == "npy":
-            raw = base64.b64decode(blob["data_b64"])
-            return np.load(io.BytesIO(raw))
+            data_b64 = blob.get("data_b64")
+            if data_b64:
+                raw = base64.b64decode(data_b64)
+            else:
+                file_url = blob.get("file_url")
+                if not file_url:
+                    raise ValueError("No tensor data_b64 or file_url in output_tensor")
+                response = requests.get(file_url, timeout=30)
+                response.raise_for_status()
+                raw = response.content
+            return np.load(io.BytesIO(raw), allow_pickle=False)
         arr = np.array(blob.get("data", []), dtype=blob.get("dtype", "float32"))
         if blob.get("shape"):
             arr = arr.reshape(blob["shape"])
@@ -343,6 +353,13 @@ def run_tflite_partition_traced(task_input):
             if result.get("partition_idx") == partition_idx - 1:
                 input_tensor_blob = result["output_tensor"]
                 dtype = result.get("dtype", dtype)
+        elif partition_idx > 0 and result.get("result_file_url"):
+            if result.get("partition_idx") in (None, partition_idx - 1):
+                input_tensor_blob = {
+                    "format": "npy",
+                    "file_url": result["result_file_url"],
+                }
+                dtype = result.get("dtype", dtype)
 
     if input_tensor_blob is None and partition_idx > 0:
         for _, result in upstream.items():
@@ -414,6 +431,7 @@ def classify_with_trace(task_input):
     import time as _time
 
     import numpy as np
+    import requests
 
     def _decode_tensor(blob):
         if isinstance(blob, str):
@@ -424,8 +442,17 @@ def classify_with_trace(task_input):
 
                 blob = _ast.literal_eval(blob)
         if blob.get("format", "json") == "npy":
-            raw = base64.b64decode(blob["data_b64"])
-            return np.load(io.BytesIO(raw))
+            data_b64 = blob.get("data_b64")
+            if data_b64:
+                raw = base64.b64decode(data_b64)
+            else:
+                file_url = blob.get("file_url")
+                if not file_url:
+                    raise ValueError("No tensor data_b64 or file_url in output_tensor")
+                response = requests.get(file_url, timeout=30)
+                response.raise_for_status()
+                raw = response.content
+            return np.load(io.BytesIO(raw), allow_pickle=False)
         arr = np.array(blob.get("data", []), dtype=blob.get("dtype", "float32"))
         if blob.get("shape"):
             arr = arr.reshape(blob["shape"])
