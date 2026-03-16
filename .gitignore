@@ -218,6 +218,7 @@ customer_sentiment_results.json
 customer_sentiment_report.txt
 
 
+
 #inputs
 archive/
 
@@ -249,3 +250,19 @@ tests/image_processing/child/
 # dnn test generated artifacts
 tests/dnn_crowdnet/models/
 tests/dnn_crowdnet/partitions/
+.png
+
+#dnn outputs
+*.json
+
+#payload store
+.payload_store/
+
+#model store
+.model_store/
+
+#worker-side model cache
+.worker_model_cache/
+
+#tensor store
+tensor_store/
