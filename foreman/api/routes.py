@@ -381,3 +381,138 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
         "workers": workers_data,
         "jobs": jobs_data,
     }
+
+
+# ==================== Pipeline Visualization API ====================
+
+@router.get("/api/pipeline/jobs")
+async def get_pipeline_jobs(db: AsyncSession = Depends(get_db)):
+    """
+    Get all pipeline jobs with per-stage task breakdown.
+    Returns stage-level progress, task counts, and dependency info.
+    """
+    import json
+    from sqlalchemy.orm import selectinload
+
+    # Get pipeline jobs
+    result = await db.execute(
+        select(JobModel)
+        .options(selectinload(JobModel.tasks))
+        .where(JobModel.is_pipeline == True)
+        .order_by(JobModel.created_at.desc())
+        .limit(20)
+    )
+    jobs = result.scalars().all()
+
+    pipelines = []
+    for job in jobs:
+        # Group tasks by stage
+        stages = {}
+        for task in job.tasks:
+            s = task.stage or 0
+            if s not in stages:
+                stages[s] = {"stage": s, "total": 0, "completed": 0, "assigned": 0, "pending": 0, "failed": 0, "blocked": 0}
+            stages[s]["total"] += 1
+            if task.status == "completed":
+                stages[s]["completed"] += 1
+            elif task.status == "assigned":
+                stages[s]["assigned"] += 1
+            elif task.status == "failed":
+                stages[s]["failed"] += 1
+            elif task.dependency_count and task.dependency_count > 0:
+                stages[s]["blocked"] += 1
+            else:
+                stages[s]["pending"] += 1
+
+        # Sort stages by stage number
+        stage_list = [stages[k] for k in sorted(stages.keys())]
+
+        # Compute overall pipeline progress
+        total_tasks = len(job.tasks)
+        completed_tasks = sum(1 for t in job.tasks if t.status == "completed")
+        progress = round((completed_tasks / total_tasks) * 100) if total_tasks > 0 else 0
+
+        # Duration
+        duration = None
+        if job.completed_at and job.created_at:
+            duration = round((job.completed_at - job.created_at).total_seconds(), 1)
+
+        pipelines.append({
+            "job_id": job.id,
+            "status": job.status,
+            "total_stages": job.total_stages or len(stage_list),
+            "total_tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "progress": progress,
+            "stages": stage_list,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "duration": duration,
+        })
+
+    return pipelines
+
+
+@router.get("/api/pipeline/job/{job_id}")
+async def get_pipeline_job_detail(job_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Get detailed pipeline view for a single job.
+    Returns per-stage tasks with dependency edges and timing.
+    """
+    import json
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(JobModel)
+        .options(selectinload(JobModel.tasks))
+        .where(JobModel.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Group tasks by stage with full detail
+    stages = {}
+    for task in job.tasks:
+        s = task.stage or 0
+        if s not in stages:
+            stages[s] = {"stage": s, "tasks": []}
+
+        depends_on = []
+        if task.depends_on:
+            try:
+                depends_on = json.loads(task.depends_on)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        dependents = []
+        if task.dependents:
+            try:
+                dependents = json.loads(task.dependents)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        stages[s]["tasks"].append({
+            "task_id": task.id,
+            "status": task.status,
+            "worker_id": task.worker_id,
+            "dependency_count": task.dependency_count or 0,
+            "depends_on": depends_on,
+            "dependents": dependents,
+            "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        })
+
+    stage_list = [stages[k] for k in sorted(stages.keys())]
+
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "is_pipeline": job.is_pipeline,
+        "total_stages": job.total_stages or len(stage_list),
+        "total_tasks": len(job.tasks),
+        "completed_tasks": sum(1 for t in job.tasks if t.status == "completed"),
+        "stages": stage_list,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }

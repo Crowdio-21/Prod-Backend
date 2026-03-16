@@ -145,12 +145,158 @@ class CheckpointInstrumenter(ast.NodeTransformer):
     
     def visit_While(self, node: ast.While) -> ast.While:
         """Inject checkpoint call at end of while loop body"""
+        # Skip 'while paused:' loops injected by task control instrumentation
+        if isinstance(node.test, ast.Name) and node.test.id == 'paused':
+            return node
+        
         # First, visit children
         self.generic_visit(node)
         
         # Add checkpoint call at end of loop body
         ckpt_call = self._create_ckpt_update_call()
         node.body.append(ckpt_call)
+        self.loops_instrumented += 1
+        
+        return node
+
+
+class TaskControlInstrumenter(ast.NodeTransformer):
+    """
+    AST transformer that injects pause/kill control checks into task code
+    
+    For Android workers where the UI needs to suspend, kill, or resume a task,
+    this transformer injects:
+    - `global paused, killed` at the top of function bodies
+    - Kill check (`if killed: return "killed"`) and pause wait
+      (`while paused: time.sleep(0.1)`) at the start of loop bodies
+    - Kill check and pause wait at the end of function bodies
+    
+    Example transformation:
+    
+    Before:
+        def example_task(n):
+            result = 0
+            for i in range(n):
+                result += i * i
+            return result
+    
+    After:
+        def example_task(n):
+            global paused, killed
+            result = 0
+            for i in range(n):
+                if killed:
+                    return 'killed'
+                while paused:
+                    time.sleep(0.1)
+                result += i * i
+            return result
+    """
+    
+    def __init__(self, checkpoint_state_vars: Optional[List[str]] = None):
+        super().__init__()
+        self.checkpoint_state_vars = checkpoint_state_vars or []
+        self.functions_instrumented = 0
+        self.loops_instrumented = 0
+    
+    def _create_ckpt_try_call(self) -> ast.Try:
+        """Create AST for: try: _ckpt_update({var: var, ...}); except NameError: pass"""
+        keys = [ast.Constant(value=var) for var in self.checkpoint_state_vars]
+        values = [ast.Name(id=var, ctx=ast.Load()) for var in self.checkpoint_state_vars]
+        state_dict = ast.Dict(keys=keys, values=values)
+        
+        call = ast.Call(
+            func=ast.Name(id='_ckpt_update', ctx=ast.Load()),
+            args=[state_dict],
+            keywords=[]
+        )
+        
+        return ast.Try(
+            body=[ast.Expr(value=call)],
+            handlers=[ast.ExceptHandler(
+                type=ast.Name(id='NameError', ctx=ast.Load()),
+                name=None,
+                body=[ast.Pass()]
+            )],
+            orelse=[],
+            finalbody=[]
+        )
+    
+    def _create_kill_check(self) -> ast.If:
+        """Create AST for: if killed: [checkpoint update]; return 'killed'"""
+        body = []
+        if self.checkpoint_state_vars:
+            body.append(self._create_ckpt_try_call())
+        body.append(ast.Return(value=ast.Constant(value='killed')))
+        return ast.If(
+            test=ast.Name(id='killed', ctx=ast.Load()),
+            body=body,
+            orelse=[]
+        )
+    
+    def _create_pause_wait(self) -> ast.While:
+        """Create AST for: while paused: time.sleep(0.1)"""
+        return ast.While(
+            test=ast.Name(id='paused', ctx=ast.Load()),
+            body=[
+                ast.Expr(value=ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id='time', ctx=ast.Load()),
+                        attr='sleep',
+                        ctx=ast.Load()
+                    ),
+                    args=[ast.Constant(value=0.1)],
+                    keywords=[]
+                ))
+            ],
+            orelse=[]
+        )
+    
+    def _create_global_statement(self) -> ast.Global:
+        """Create AST for: global paused, killed"""
+        return ast.Global(names=['paused', 'killed'])
+    
+    def _create_control_checks(self) -> List[ast.stmt]:
+        """Create the kill check + pause wait pair"""
+        return [self._create_kill_check(), self._create_pause_wait()]
+    
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        """Inject global declaration at top of function body"""
+        # First, visit children (to instrument nested loops)
+        self.generic_visit(node)
+        
+        # Insert `global paused, killed` at the top of the function body
+        node.body.insert(0, self._create_global_statement())
+        self.functions_instrumented += 1
+        
+        return node
+    
+    def visit_For(self, node: ast.For) -> ast.For:
+        """Inject kill check and pause wait at start of for loop body"""
+        # First, visit children
+        self.generic_visit(node)
+        
+        # Insert control checks at the start of the loop body
+        control_stmts = self._create_control_checks()
+        for i, stmt in enumerate(control_stmts):
+            node.body.insert(i, stmt)
+        self.loops_instrumented += 1
+        
+        return node
+    
+    def visit_While(self, node: ast.While) -> ast.While:
+        """Inject kill check and pause wait at start of while loop body"""
+        # Skip the `while paused:` loops we ourselves inject
+        if (isinstance(node.test, ast.Name) and node.test.id == 'paused'):
+            return node
+        
+        # First, visit children
+        self.generic_visit(node)
+        
+        # Insert control checks at the start of the loop body
+        control_stmts = self._create_control_checks()
+        for i, stmt in enumerate(control_stmts):
+            node.body.insert(i, stmt)
         self.loops_instrumented += 1
         
         return node
@@ -424,3 +570,105 @@ def _ckpt_get_state():
     """Called by checkpoint handler to read current state"""
     return _MobileCheckpointState.get()
 '''
+
+
+def generate_task_control_wrapper() -> str:
+    """
+    Generate the task control wrapper code that must be prepended to instrumented functions
+    
+    This provides:
+    - paused / killed global flags
+    - pause(), resume(), kill() control functions with checkpoint updates
+    
+    These flags are checked by the control checks injected by TaskControlInstrumenter.
+    The pause() and kill() functions attempt to save a checkpoint before changing state,
+    using _MobileCheckpointState if available (mobile workers with checkpointing enabled).
+    
+    Returns:
+        Python code string to prepend to instrumented functions
+    """
+    return '''import time
+
+paused = False
+killed = False
+
+def pause():
+    global paused
+    paused = True
+    try:
+        _ckpt_update(_MobileCheckpointState.get())
+    except NameError:
+        pass
+
+def resume():
+    global paused
+    paused = False
+
+def kill():
+    global killed
+    killed = True
+    try:
+        _ckpt_update(_MobileCheckpointState.get())
+    except NameError:
+        pass
+'''
+
+
+def instrument_for_task_control(
+    func_code: str,
+    checkpoint_state_vars: Optional[List[str]] = None
+) -> Tuple[str, int, int]:
+    """
+    Instrument function code with pause/kill control checks
+    
+    Injects:
+    - `global paused, killed` at top of each function
+    - `if killed: return 'killed'` and `while paused: time.sleep(0.1)` in loops
+    - Optional checkpoint update calls before kill return (if checkpoint_state_vars provided)
+    
+    Args:
+        func_code: Original function source code
+        checkpoint_state_vars: Optional list of checkpoint variable names for
+            saving state on kill/pause
+        
+    Returns:
+        Tuple of (instrumented_code, num_functions_instrumented, num_loops_instrumented)
+    """
+    try:
+        tree = ast.parse(func_code)
+        
+        instrumenter = TaskControlInstrumenter(checkpoint_state_vars=checkpoint_state_vars)
+        tree = instrumenter.visit(tree)
+        
+        ast.fix_missing_locations(tree)
+        
+        instrumented_code = ast.unparse(tree)
+        
+        return instrumented_code, instrumenter.functions_instrumented, instrumenter.loops_instrumented
+        
+    except Exception as e:
+        print(f"[CodeInstrumenter] Task control instrumentation failed: {e}")
+        return func_code, 0, 0
+
+
+def prepare_code_with_task_control(
+    func_code: str,
+    checkpoint_state_vars: Optional[List[str]] = None
+) -> str:
+    """
+    Full pipeline: instrument code with task control checks and prepend wrapper
+    
+    Args:
+        func_code: Original function source code
+        checkpoint_state_vars: Optional list of checkpoint variable names
+        
+    Returns:
+        Code with control wrapper prepended and control checks injected
+    """
+    instrumented, num_funcs, num_loops = instrument_for_task_control(
+        func_code, checkpoint_state_vars=checkpoint_state_vars
+    )
+    print(f"[CodeInstrumenter] Task control: instrumented {num_funcs} functions, {num_loops} loops")
+    
+    wrapper = generate_task_control_wrapper()
+    return wrapper + "\n" + instrumented

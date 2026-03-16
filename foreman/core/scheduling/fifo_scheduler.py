@@ -5,7 +5,7 @@ from .scheduler_interface import *
 
 # Configure FIFO-specific logger
 logger = logging.getLogger("fifo_scheduler")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.CRITICAL)
 
 # Create logs directory if it doesn't exist
 log_dir = Path("logs")
@@ -13,11 +13,11 @@ log_dir.mkdir(exist_ok=True)
 
 # File handler for FIFO decisions
 file_handler = logging.FileHandler(log_dir / "fifo_decisions.log")
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.CRITICAL)
 
 # Console handler for important info
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.CRITICAL)
 
 # Detailed formatter
 formatter = logging.Formatter(

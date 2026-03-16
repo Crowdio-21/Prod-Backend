@@ -217,8 +217,28 @@ dataset_cache.json
 customer_sentiment_results.json
 customer_sentiment_report.txt
 
+
 #inputs
 archive/
 
+#pipeline outputs
+pipeline_output/
+
 # Outputs
 *.csv
+.png
+
+#dnn outputs
+*.json
+
+#payload store
+.payload_store/
+
+#model store
+.model_store/
+
+#worker-side model cache
+.worker_model_cache/
+
+#tensor store
+tensor_store/

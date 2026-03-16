@@ -3,6 +3,7 @@ import base64
 import gzip
 import pickle
 from typing import Optional
+from ..payload_store import store_text_if_large
 from ...db.base import db_session
 from ...db.crud import (
     get_pending_tasks,
@@ -223,10 +224,12 @@ async def _create_tasks_for_job(job_id: str, args_list: list):
         tasks = []
         for i, args in enumerate(args_list):
             task_id = f"{job_id}_task_{i}"
+            serialized_args = json.dumps(args)
+            stored_args = store_text_if_large(serialized_args, "task_args", task_id)
             task = TaskModel(
                 id=task_id,
                 job_id=job_id,
-                args=json.dumps(args),  # Serialize args to JSON string
+                args=stored_args,
                 status="pending",
             )
             tasks.append(task)
@@ -254,8 +257,10 @@ async def _update_task_status(
 ):
     """Update task status with new session"""
 
+    stored_result = store_text_if_large(result, "task_results", task_id) if result is not None else None
+
     async with db_session() as session:
-        await update_task_status(session, task_id, status, worker_id, result, error)
+        await update_task_status(session, task_id, status, worker_id, stored_result, error)
 
 
 async def _claim_task_for_worker(task_id: str, worker_id: str):
@@ -291,8 +296,10 @@ async def _increment_job_completed_tasks(job_id: str):
 async def _complete_task_if_assigned(task_id: str, worker_id: str, result: str):
     """Complete a task only if it is currently assigned to this worker"""
 
+    stored_result = store_text_if_large(result, "task_results", task_id)
+
     async with db_session() as session:
-        return await complete_task_if_assigned(session, task_id, worker_id, result)
+        return await complete_task_if_assigned(session, task_id, worker_id, stored_result)
 
 
 async def _get_worker_stats(worker_id: str):

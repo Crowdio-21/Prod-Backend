@@ -11,6 +11,7 @@ import json
 from typing import List, Optional, Any, Dict
 
 from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
+from .payload_store import resolve_text_ref
 from .utils import (
     _get_pending_tasks,
     _get_assigned_tasks,
@@ -121,9 +122,9 @@ class TaskDispatcher:
                 print(f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker")
             
             # Prepend the mobile checkpoint wrapper
+            # Note: Task control (pause/kill) is already instrumented by the SDK
             wrapper = generate_mobile_checkpoint_wrapper()
-            prepared_code = wrapper + "\n\n" + prepared_code
-            
+            prepared_code = wrapper + "\n" + prepared_code
             return prepared_code
             
         except Exception as e:
@@ -218,6 +219,7 @@ class TaskDispatcher:
                 job_id=task.job_id,
                 args=task.args,
                 priority=getattr(task, "priority", 0),
+                stage_func_code=getattr(task, "stage_func_code", None),
             )
             for task in pending_tasks
         ]
@@ -233,9 +235,14 @@ class TaskDispatcher:
 
         tasks_assigned = 0
         for scheduler_task, worker_id in assignments:
-            task_args = json.loads(scheduler_task.args) if scheduler_task.args else []
+            args_text = resolve_text_ref(scheduler_task.args)
+            task_args = json.loads(args_text) if args_text else []
+            
+            # For pipeline tasks, use per-stage func_code stored on SchedulerTask
+            task_func_code = getattr(scheduler_task, "stage_func_code", None) or func_code
+            
             success = await self._assign_task_to_worker(
-                job_id, scheduler_task.id, func_code, task_args, worker_id
+                job_id, scheduler_task.id, task_func_code, task_args, worker_id
             )
             if success:
                 tasks_assigned += 1
@@ -302,13 +309,16 @@ class TaskDispatcher:
             # Pick the first pending task
             task = pending_tasks[0]
             job_id = task.job_id
-            func_code = self.job_manager.get_func_code(job_id)
+
+            # For pipeline tasks, use per-stage func_code if available
+            func_code = self._get_func_code_for_task(task)
 
             if not func_code:
                 print(f"TaskDispatcher: No func_code found for job {job_id}, skipping")
                 return False
 
-            task_args = json.loads(task.args) if task.args else []
+            args_text = resolve_text_ref(task.args)
+            task_args = json.loads(args_text) if args_text else []
             success = await self._assign_task_to_worker(job_id, task.id, func_code, task_args, worker_id)
             return success
 
@@ -580,6 +590,28 @@ class TaskDispatcher:
         return workers
 
     # ==================== Statistics ====================
+
+    def _get_func_code_for_task(self, task) -> Optional[str]:
+        """
+        Get the correct function code for a task.
+
+        For pipeline tasks, each task may have its own stage_func_code
+        (stored on the DB row).  Falls back to the job-level func_code.
+
+        Args:
+            task: TaskModel instance (DB row)
+
+        Returns:
+            Function code string or None
+        """
+        # Try per-task stage func_code first (pipeline tasks)
+        stage_func = getattr(task, "stage_func_code", None)
+        if stage_func:
+            return stage_func
+
+        # Fall back to job-level func_code
+        job_id = task.job_id
+        return self.job_manager.get_func_code(job_id)
 
     def get_scheduler_name(self) -> str:
         """Get the name of the current scheduler"""

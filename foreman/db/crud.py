@@ -513,3 +513,178 @@ async def get_assigned_tasks(
 async def get_job_by_id(session: AsyncSession, job_id: str) -> Optional[JobModel]:
     """Get job by ID (alias for get_job)"""
     return await get_job(session, job_id)
+
+
+# ==================== Pipeline / Dependency Operations ====================
+
+async def create_pipeline_job(
+    session: AsyncSession,
+    job_id: str,
+    total_tasks: int,
+    total_stages: int,
+    supports_checkpointing: bool = False,
+) -> JobModel:
+    """Create a pipeline job with multiple stages
+
+    Args:
+        session: Database session
+        job_id: Unique job identifier
+        total_tasks: Total number of tasks across all stages
+        total_stages: Number of pipeline stages
+        supports_checkpointing: Whether tasks support checkpointing
+    """
+    job = JobModel(
+        id=job_id,
+        total_tasks=total_tasks,
+        is_pipeline=True,
+        total_stages=total_stages,
+        supports_checkpointing=supports_checkpointing,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+async def create_task_with_dependencies(
+    session: AsyncSession,
+    task_id: str,
+    job_id: str,
+    args: str = None,
+    stage: int = 0,
+    depends_on: list = None,
+    dependents: list = None,
+    stage_func_code: str = None,
+) -> TaskModel:
+    """Create a task with dependency information
+
+    Args:
+        session: Database session
+        task_id: Task identifier
+        job_id: Job identifier
+        args: Serialized task arguments (JSON)
+        stage: Pipeline stage number (0-based)
+        depends_on: List of task IDs this task depends on
+        dependents: List of task IDs that depend on this task
+        stage_func_code: Function code specific to this stage
+    """
+    import json as _json
+
+    dependency_count = len(depends_on) if depends_on else 0
+    initial_status = "blocked" if dependency_count > 0 else "pending"
+
+    task = TaskModel(
+        id=task_id,
+        job_id=job_id,
+        args=args,
+        status=initial_status,
+        stage=stage,
+        dependency_count=dependency_count,
+        depends_on=_json.dumps(depends_on) if depends_on else None,
+        dependents=_json.dumps(dependents) if dependents else None,
+        stage_func_code=stage_func_code,
+    )
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def decrement_dependency_count(
+    session: AsyncSession, task_id: str
+) -> Tuple[int, str]:
+    """
+    Atomically decrement a task's dependency counter.
+
+    Returns:
+        Tuple of (new_dependency_count, new_status)
+        When count reaches 0, status is changed from 'blocked' to 'pending'
+    """
+    task = await session.get(TaskModel, task_id)
+    if not task:
+        return -1, "not_found"
+
+    new_count = max(0, (task.dependency_count or 0) - 1)
+    task.dependency_count = new_count
+
+    new_status = task.status
+    if new_count == 0 and task.status == "blocked":
+        task.status = "pending"
+        new_status = "pending"
+
+    await session.commit()
+    return new_count, new_status
+
+
+async def get_task_dependents(session: AsyncSession, task_id: str) -> list:
+    """Get the list of task IDs that depend on the given task
+
+    Args:
+        session: Database session
+        task_id: Task identifier
+
+    Returns:
+        List of dependent task IDs
+    """
+    import json as _json
+
+    task = await session.get(TaskModel, task_id)
+    if not task or not task.dependents:
+        return []
+
+    try:
+        return _json.loads(task.dependents)
+    except Exception:
+        return []
+
+
+async def get_task_by_id(session: AsyncSession, task_id: str) -> Optional[TaskModel]:
+    """Get a task by its ID
+
+    Args:
+        session: Database session
+        task_id: Task identifier
+
+    Returns:
+        TaskModel or None
+    """
+    return await session.get(TaskModel, task_id)
+
+
+async def get_blocked_tasks(
+    session: AsyncSession, job_id: str = None
+) -> List[TaskModel]:
+    """Get tasks with 'blocked' status (waiting for dependencies)
+
+    Args:
+        session: Database session
+        job_id: Optional job filter
+
+    Returns:
+        List of blocked tasks
+    """
+    query = select(TaskModel).where(TaskModel.status == "blocked")
+    if job_id:
+        query = query.where(TaskModel.job_id == job_id)
+    query = query.order_by(TaskModel.id)
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
+async def update_task_args(
+    session: AsyncSession, task_id: str, args: str
+) -> bool:
+    """Update task arguments (used to inject upstream results into downstream tasks)
+
+    Args:
+        session: Database session
+        task_id: Task identifier
+        args: New serialized arguments (JSON)
+
+    Returns:
+        True if updated successfully
+    """
+    stmt = update(TaskModel).where(TaskModel.id == task_id).values(args=args)
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount > 0

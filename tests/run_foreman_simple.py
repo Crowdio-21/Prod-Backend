@@ -10,6 +10,11 @@ import uvicorn
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# Fix Windows console encoding for Unicode characters (arrows, emojis, etc.)
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 if __name__ == "__main__":
     print("🚀 Starting CrowdCompute FastAPI Foreman...")
