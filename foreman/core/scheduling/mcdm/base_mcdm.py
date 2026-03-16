@@ -17,7 +17,7 @@ from .base_strategy import AllocationStrategy
 
 # Configure MCDM-specific logger
 logger = logging.getLogger("mcdm_scheduler")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.CRITICAL)
 
 # Create logs directory if it doesn't exist
 log_dir = Path("logs")
@@ -25,11 +25,11 @@ log_dir.mkdir(exist_ok=True)
 
 # File handler for MCDM decisions
 file_handler = logging.FileHandler(log_dir / "mcdm_decisions.log")
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.CRITICAL)
 
 # Console handler for important info
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.CRITICAL)
 
 # Detailed formatter
 formatter = logging.Formatter(

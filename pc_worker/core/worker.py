@@ -107,13 +107,14 @@ class FastAPIWorker:
             # ping_interval: Disable built-in ping, we handle heartbeats ourselves
             # ping_timeout: Disable ping timeout
             # close_timeout: Wait up to 30s for close handshake
-            # max_size: 10MB max message size for large task results
+            # max_size: None disables message size cap so workers can receive
+            # large task assignments (e.g., TFLite model blobs).
             self.websocket = await websockets.connect(
                 f"{self.config.foreman_url}/worker/ws",
                 ping_interval=None,  # Disable built-in ping, we handle heartbeats ourselves
                 ping_timeout=None,  # Disable ping timeout
                 close_timeout=30,  # Wait up to 30s for close handshake
-                max_size=10 * 1024 * 1024,  # 10MB max message size
+                max_size=None,
             )
             self.is_connected = True
 

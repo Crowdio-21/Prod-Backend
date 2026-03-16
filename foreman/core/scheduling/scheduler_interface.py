@@ -16,6 +16,7 @@ class Task:
     args: str
     priority: int = 0
     retry_count: int = 0
+    stage_func_code: Optional[str] = None  # Per-stage function code for pipeline tasks
 
 
 @dataclass

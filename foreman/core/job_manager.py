@@ -4,6 +4,7 @@ Job lifecycle management and state tracking
 
 import json
 from typing import List, Optional, Dict, Any, Tuple
+from .payload_store import resolve_text_ref
 
 
 from .utils import (
@@ -16,6 +17,7 @@ from .utils import (
     _record_worker_failure,
     _complete_task_if_assigned,
 )
+from .dependency_manager import DependencyManager, PipelineStage
 
 
 class JobManager:
@@ -39,6 +41,9 @@ class JobManager:
         
         # Track task metadata for checkpointing: job_id -> task_metadata dict
         self._task_metadata_cache: Dict[str, Dict[str, Any]] = {}
+
+        # Dependency manager for pipeline jobs
+        self.dependency_manager = DependencyManager()
 
     # ==================== Job Creation ====================
 
@@ -108,6 +113,108 @@ class JobManager:
         await _update_job_status(job_id, "running")
 
         print(f"JobManager: Job {job_id} created successfully")
+
+    # ==================== Pipeline Job Creation ====================
+
+    async def create_pipeline_job(
+        self,
+        job_id: str,
+        stages: List[Dict[str, Any]],
+        dependency_map: Optional[Dict[str, List[str]]] = None,
+        task_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """
+        Create a pipeline job with dependent stages.
+
+        Works like create_job() but creates multiple stages where later
+        stages are automatically blocked until their upstream dependencies
+        complete.  Uses a dependency counter per task — when all upstream
+        tasks finish, the counter reaches zero and the task becomes pending.
+
+        The first stage's tasks start as "pending" (dispatchable immediately).
+        All later stages start as "blocked".
+
+        Args:
+            job_id: Unique job identifier
+            stages: List of stage dicts from the protocol message, each with:
+                - func_code: Serialised function code
+                - args_list: List of arguments (one per task)
+                - pass_upstream_results: bool
+                - task_metadata: Optional per-stage checkpoint config
+                - name: Optional human label
+            dependency_map: Optional explicit task→[deps] for arbitrary DAGs
+            task_metadata: Optional global checkpoint config
+
+        Returns:
+            Total number of tasks created
+        """
+        # Build PipelineStage objects
+        pipeline_stages = [PipelineStage.from_dict(s) for s in stages]
+
+        total_tasks = sum(len(s.args_list) for s in pipeline_stages)
+        total_stages = len(pipeline_stages)
+
+        print(
+            f"JobManager: Creating pipeline job {job_id} with "
+            f"{total_stages} stages, {total_tasks} tasks"
+        )
+
+        # Cache the first stage's func_code as the "job-level" code
+        # (for backward-compatible dispatch; per-stage codes are in DependencyManager)
+        self._job_cache[job_id] = pipeline_stages[0].func_code
+
+        # Store metadata
+        checkpoint_enabled = False
+        if task_metadata:
+            checkpoint_enabled = task_metadata.get("checkpoint_enabled", False)
+            self._task_metadata_cache[job_id] = task_metadata
+
+        self._job_metadata[job_id] = {
+            "total_tasks": total_tasks,
+            "completed_tasks": 0,
+            "failed_tasks": 0,
+            "is_pipeline": True,
+            "total_stages": total_stages,
+            "checkpoint_enabled": checkpoint_enabled,
+        }
+
+        # Create the job record in DB
+        from foreman.db.base import db_session
+        from foreman.db.crud import create_pipeline_job as db_create_pipeline_job
+
+        async with db_session() as session:
+            await db_create_pipeline_job(
+                session, job_id, total_tasks, total_stages,
+                supports_checkpointing=checkpoint_enabled,
+            )
+
+        # Create all tasks with dependency wiring via DependencyManager
+        created = await self.dependency_manager.create_pipeline_tasks(
+            job_id, pipeline_stages, dependency_map
+        )
+
+        # Set job to running
+        await _update_job_status(job_id, "running")
+
+        print(f"JobManager: Pipeline job {job_id} created successfully ({created} tasks)")
+        return created
+
+    def get_stage_func_code(self, job_id: str, stage: int) -> Optional[str]:
+        """Get function code for a specific pipeline stage.
+        
+        Args:
+            job_id: Job identifier
+            stage: Stage index (0-based)
+        
+        Returns:
+            Function code string or None
+        """
+        return self.dependency_manager.get_stage_func_code(job_id, stage)
+
+    def is_pipeline_job(self, job_id: str) -> bool:
+        """Check if a job is a pipeline job."""
+        meta = self._job_metadata.get(job_id, {})
+        return meta.get("is_pipeline", False)
 
     def get_func_code(self, job_id: str) -> Optional[str]:
         """
@@ -254,7 +361,10 @@ class JobManager:
 
     async def get_job_results(self, job_id: str) -> Optional[List[Any]]:
         """
-        Get ordered results for a completed job
+        Get ordered results for a completed job.
+
+        For pipeline jobs, returns results from the FINAL stage only
+        (matching the semantics: the pipeline produces the final stage output).
 
         Args:
             job_id: Job identifier
@@ -270,24 +380,41 @@ class JobManager:
         if not tasks:
             return []
 
-        # Collect results in correct order
+        # For pipeline jobs, only return results from the last stage
+        if self.is_pipeline_job(job_id):
+            max_stage = max((getattr(t, "stage", 0) or 0) for t in tasks)
+            final_tasks = sorted(
+                [t for t in tasks if (getattr(t, "stage", 0) or 0) == max_stage],
+                key=lambda t: t.id,
+            )
+            results = []
+            for task in final_tasks:
+                if task.status == "completed":
+                    raw_result = resolve_text_ref(task.result)
+                    try:
+                        results.append(json.loads(raw_result))
+                    except (json.JSONDecodeError, TypeError):
+                        results.append(raw_result)
+                else:
+                    results.append(None)
+            return results
+
+        # Regular (non-pipeline) job — original logic
         results = []
         for i in range(len(tasks)):
             task = None
-            # Find task by sequential ID
             for t in tasks:
                 if t.id == f"{job_id}_task_{i}":
                     task = t
                     break
 
             if task and task.status == "completed":
-                # Try to parse result if it's JSON
+                raw_result = resolve_text_ref(task.result)
                 try:
-                    results.append(json.loads(task.result))
+                    results.append(json.loads(raw_result))
                 except (json.JSONDecodeError, TypeError):
-                    results.append(task.result)
+                    results.append(raw_result)
             else:
-                # Task failed or missing
                 results.append(None)
 
         return results
@@ -312,6 +439,9 @@ class JobManager:
         # Clean up metadata
         if job_id in self._job_metadata:
             del self._job_metadata[job_id]
+
+        # Clean up pipeline data
+        self.dependency_manager.cleanup_job(job_id)
 
         print(f"JobManager: Job {job_id} finalized")
 

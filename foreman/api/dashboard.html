@@ -424,6 +424,163 @@
             height: 200px;
             color: #7f8c8d;
         }
+
+        /* ==================== Pipeline Styles ==================== */
+        .pipeline-card {
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            cursor: pointer;
+            transition: box-shadow 0.2s, border-color 0.2s;
+        }
+        .pipeline-card:hover {
+            box-shadow: 0 4px 16px rgba(52,152,219,0.15);
+            border-color: #3498db;
+        }
+        .pipeline-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .pipeline-card-header h3 {
+            margin: 0;
+            font-size: 1em;
+            color: #2c3e50;
+        }
+        .pipeline-card-meta {
+            display: flex;
+            gap: 16px;
+            font-size: 0.85em;
+            color: #7f8c8d;
+            margin-bottom: 14px;
+        }
+        .pipeline-stages-bar {
+            display: flex;
+            gap: 0;
+            width: 100%;
+            height: 32px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #ecf0f1;
+        }
+        .pipeline-stages-bar .stage-segment {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75em;
+            font-weight: 600;
+            color: #fff;
+            position: relative;
+            min-width: 24px;
+            transition: flex 0.4s;
+        }
+        .stage-segment.completed { background: #27ae60; }
+        .stage-segment.running   { background: #3498db; }
+        .stage-segment.blocked   { background: #95a5a6; }
+        .stage-segment.pending   { background: #bdc3c7; color: #7f8c8d; }
+        .stage-segment.failed    { background: #e74c3c; }
+
+        /* Pipeline Flow Visualization */
+        .pipeline-flow {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            padding: 24px 12px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+        }
+        .pipeline-stage-node {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 140px;
+            flex-shrink: 0;
+        }
+        .stage-box {
+            border: 2px solid #bdc3c7;
+            border-radius: 12px;
+            padding: 14px 18px;
+            text-align: center;
+            background: #fff;
+            min-width: 120px;
+            transition: border-color 0.3s, background 0.3s;
+        }
+        .stage-box.completed {
+            border-color: #27ae60;
+            background: #eafaf1;
+        }
+        .stage-box.running {
+            border-color: #3498db;
+            background: #ebf5fb;
+            animation: stagePulse 1.5s infinite;
+        }
+        .stage-box.blocked {
+            border-color: #95a5a6;
+            background: #f4f6f6;
+        }
+        .stage-box.failed {
+            border-color: #e74c3c;
+            background: #fdedec;
+        }
+        @keyframes stagePulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(52,152,219,0.25); }
+            50% { box-shadow: 0 0 0 8px rgba(52,152,219,0); }
+        }
+        .stage-box .stage-label {
+            font-weight: 700;
+            font-size: 0.95em;
+            color: #2c3e50;
+            margin-bottom: 4px;
+        }
+        .stage-box .stage-count {
+            font-size: 0.8em;
+            color: #7f8c8d;
+        }
+        .stage-arrow {
+            font-size: 1.6em;
+            color: #bdc3c7;
+            margin: 0 6px;
+            flex-shrink: 0;
+        }
+        .stage-arrow.active {
+            color: #27ae60;
+        }
+
+        /* Stage task table inside detail view */
+        .stage-detail-block {
+            margin-bottom: 18px;
+        }
+        .stage-detail-block h3 {
+            margin: 0 0 8px 0;
+            font-size: 0.95em;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .stage-detail-block h3 .stage-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            color: #fff;
+            font-weight: 600;
+        }
+        .stage-badge.completed { background: #27ae60; }
+        .stage-badge.running   { background: #3498db; }
+        .stage-badge.blocked   { background: #95a5a6; }
+        .stage-badge.pending   { background: #bdc3c7; color: #7f8c8d; }
+        .stage-badge.failed    { background: #e74c3c; }
+
+        .pipeline-empty {
+            text-align: center;
+            padding: 40px;
+            color: #95a5a6;
+            font-size: 1.05em;
+        }
     </style>
 </head>
 <body>
@@ -438,6 +595,7 @@
             <button class="tab" onclick="showTab('jobs')">Jobs</button>
             <button class="tab" onclick="showTab('workers')">Workers</button>
             <button class="tab" onclick="showTab('scheduling')">Scheduling</button>
+            <button class="tab" onclick="showTab('pipeline')">Pipeline</button>
         </div>
         
         <!-- Overview Tab -->
@@ -790,6 +948,48 @@
                 <div id="gantt-container"></div>
             </div>
         </div>
+
+        <!-- Pipeline Tab -->
+        <div id="pipeline-tab" class="tab-content">
+            <!-- Pipeline Summary Stats -->
+            <div class="stats" id="pipeline-stats">
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="pipeline-total">0</div>
+                    <div class="stat-label">Pipeline Jobs</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number" id="pipeline-completed">0</div>
+                    <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-number" id="pipeline-running">0</div>
+                    <div class="stat-label">Running</div>
+                </div>
+                <div class="stat-card highlight">
+                    <div class="stat-number" id="pipeline-total-stages">0</div>
+                    <div class="stat-label">Total Stages</div>
+                </div>
+            </div>
+
+            <!-- Pipeline List -->
+            <div class="section" id="pipeline-list-section">
+                <h2>Pipeline Jobs</h2>
+                <div id="pipeline-cards"></div>
+            </div>
+
+            <!-- Pipeline Detail (shown when a pipeline is selected) -->
+            <div class="section" id="pipeline-detail-section" style="display:none;">
+                <h2>
+                    <span id="pipeline-detail-title">Pipeline Detail</span>
+                    <button onclick="closePipelineDetail()" style="float:right;background:#e74c3c;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.85em;">✕ Close</button>
+                </h2>
+                <!-- Stage Flow Visualization -->
+                <div id="pipeline-stage-flow" class="pipeline-flow"></div>
+
+                <!-- Per-Stage Task Table -->
+                <div id="pipeline-stage-tables"></div>
+            </div>
+        </div>
     </div>
     
     <div class="refresh-indicator" id="refresh-indicator">Refreshing...</div>
@@ -898,6 +1098,8 @@
                 loadRecoveryEvents();
             } else if (tabName === 'scheduling') {
                 loadSchedulingInfo();
+            } else if (tabName === 'pipeline') {
+                loadPipelineData();
             }
         }
         
@@ -1789,6 +1991,203 @@
             await loadRecoveryEvents();
         }
         
+        // ==================== Pipeline Visualization ====================
+        let pipelineDetailJobId = null;
+
+        async function loadPipelineData() {
+            try {
+                const response = await fetch('/api/pipeline/jobs');
+                const pipelines = await response.json();
+
+                // Update summary stats
+                document.getElementById('pipeline-total').textContent = pipelines.length;
+                document.getElementById('pipeline-completed').textContent = pipelines.filter(p => p.status === 'completed').length;
+                document.getElementById('pipeline-running').textContent = pipelines.filter(p => p.status === 'running').length;
+                const totalStages = pipelines.reduce((sum, p) => sum + (p.total_stages || 0), 0);
+                document.getElementById('pipeline-total-stages').textContent = totalStages;
+
+                // Render pipeline cards
+                const container = document.getElementById('pipeline-cards');
+                if (pipelines.length === 0) {
+                    container.innerHTML = '<div class="pipeline-empty">No pipeline jobs yet. Submit a pipeline job to see progress here.</div>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                pipelines.forEach(pipeline => {
+                    const card = document.createElement('div');
+                    card.className = 'pipeline-card';
+                    card.onclick = () => openPipelineDetail(pipeline.job_id);
+
+                    // Determine stage statuses for the bar
+                    let stagesBarHTML = '';
+                    const stages = pipeline.stages || [];
+                    const numStages = stages.length || 1;
+                    stages.forEach((stage, i) => {
+                        let cls = 'pending';
+                        let label = `S${i}`;
+                        if (stage.completed === stage.total && stage.total > 0) {
+                            cls = 'completed';
+                            label = `S${i} ✓`;
+                        } else if (stage.assigned > 0) {
+                            cls = 'running';
+                            label = `S${i} ${stage.completed}/${stage.total}`;
+                        } else if (stage.failed > 0) {
+                            cls = 'failed';
+                            label = `S${i} ✕`;
+                        } else if (stage.blocked > 0) {
+                            cls = 'blocked';
+                            label = `S${i}`;
+                        }
+                        stagesBarHTML += `<div class="stage-segment ${cls}" style="flex:${stage.total || 1};" title="Stage ${i}: ${stage.completed}/${stage.total} tasks">${label}</div>`;
+                    });
+
+                    const duration = pipeline.duration ? pipeline.duration + 's' : (pipeline.status === 'running' ? 'in progress' : '-');
+                    card.innerHTML = `
+                        <div class="pipeline-card-header">
+                            <h3>Pipeline ${pipeline.job_id.substring(0, 16)}...</h3>
+                            <span class="status status-${pipeline.status}">${pipeline.status}</span>
+                        </div>
+                        <div class="pipeline-card-meta">
+                            <span>Stages: <b>${pipeline.total_stages}</b></span>
+                            <span>Tasks: <b>${pipeline.completed_tasks}/${pipeline.total_tasks}</b></span>
+                            <span>Progress: <b>${pipeline.progress}%</b></span>
+                            <span>Duration: <b>${duration}</b></span>
+                        </div>
+                        <div class="pipeline-stages-bar">${stagesBarHTML}</div>
+                    `;
+                    container.appendChild(card);
+                });
+
+                // If detail panel is open, refresh it
+                if (pipelineDetailJobId) {
+                    await loadPipelineDetail(pipelineDetailJobId);
+                }
+            } catch (error) {
+                console.error('Error loading pipeline data:', error);
+            }
+        }
+
+        async function openPipelineDetail(jobId) {
+            pipelineDetailJobId = jobId;
+            document.getElementById('pipeline-list-section').style.display = 'none';
+            document.getElementById('pipeline-detail-section').style.display = '';
+            document.getElementById('pipeline-detail-title').textContent = `Pipeline ${jobId.substring(0, 20)}...`;
+            await loadPipelineDetail(jobId);
+        }
+
+        function closePipelineDetail() {
+            pipelineDetailJobId = null;
+            document.getElementById('pipeline-detail-section').style.display = 'none';
+            document.getElementById('pipeline-list-section').style.display = '';
+        }
+
+        async function loadPipelineDetail(jobId) {
+            try {
+                const response = await fetch(`/api/pipeline/job/${jobId}`);
+                if (!response.ok) {
+                    document.getElementById('pipeline-stage-flow').innerHTML = '<p style="color:#e74c3c;">Failed to load pipeline detail.</p>';
+                    return;
+                }
+                const data = await response.json();
+
+                // Render stage flow
+                const flowContainer = document.getElementById('pipeline-stage-flow');
+                let flowHTML = '';
+                const stages = data.stages || [];
+                stages.forEach((stage, i) => {
+                    const tasks = stage.tasks || [];
+                    const total = tasks.length;
+                    const completed = tasks.filter(t => t.status === 'completed').length;
+                    const assigned = tasks.filter(t => t.status === 'assigned').length;
+                    const failed = tasks.filter(t => t.status === 'failed').length;
+
+                    let boxCls = 'blocked';
+                    if (completed === total && total > 0) boxCls = 'completed';
+                    else if (assigned > 0) boxCls = 'running';
+                    else if (failed > 0) boxCls = 'failed';
+                    else if (completed === 0 && assigned === 0) boxCls = 'blocked';
+
+                    flowHTML += `
+                        <div class="pipeline-stage-node">
+                            <div class="stage-box ${boxCls}">
+                                <div class="stage-label">Stage ${stage.stage}</div>
+                                <div class="stage-count">${completed}/${total} tasks</div>
+                                ${assigned > 0 ? `<div class="stage-count" style="color:#3498db;">${assigned} running</div>` : ''}
+                                ${failed > 0 ? `<div class="stage-count" style="color:#e74c3c;">${failed} failed</div>` : ''}
+                            </div>
+                        </div>
+                    `;
+
+                    if (i < stages.length - 1) {
+                        const arrowCls = boxCls === 'completed' ? 'active' : '';
+                        flowHTML += `<div class="stage-arrow ${arrowCls}">→</div>`;
+                    }
+                });
+                flowContainer.innerHTML = flowHTML;
+
+                // Render per-stage task tables
+                const tablesContainer = document.getElementById('pipeline-stage-tables');
+                let tablesHTML = '';
+                stages.forEach((stage, i) => {
+                    const tasks = stage.tasks || [];
+                    const completed = tasks.filter(t => t.status === 'completed').length;
+                    const total = tasks.length;
+                    let badgeCls = 'blocked';
+                    if (completed === total && total > 0) badgeCls = 'completed';
+                    else if (tasks.some(t => t.status === 'assigned')) badgeCls = 'running';
+                    else if (tasks.some(t => t.status === 'failed')) badgeCls = 'failed';
+
+                    tablesHTML += `
+                        <div class="stage-detail-block">
+                            <h3>
+                                <span class="stage-badge ${badgeCls}">Stage ${stage.stage}</span>
+                                ${completed}/${total} tasks completed
+                            </h3>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Task ID</th>
+                                        <th>Status</th>
+                                        <th>Worker</th>
+                                        <th>Deps Remaining</th>
+                                        <th>Depends On</th>
+                                        <th>Assigned At</th>
+                                        <th>Completed At</th>
+                                    </tr>
+                                </thead>
+                                <tbody>`;
+
+                    if (tasks.length === 0) {
+                        tablesHTML += `<tr><td colspan="7" style="text-align:center;color:#95a5a6;padding:12px;">No tasks</td></tr>`;
+                    } else {
+                        tasks.forEach(task => {
+                            const depsList = (task.depends_on || []).map(d => d.substring(0, 8) + '...').join(', ') || '-';
+                            const worker = task.worker_id ? task.worker_id.substring(0, 12) + '...' : '<span style="color:#95a5a6;">—</span>';
+                            const assignedAt = task.assigned_at ? new Date(task.assigned_at).toLocaleString() : '-';
+                            const completedAt = task.completed_at ? new Date(task.completed_at).toLocaleString() : '-';
+                            tablesHTML += `
+                                <tr>
+                                    <td>${task.task_id.substring(0, 12)}...</td>
+                                    <td><span class="status status-${task.status}">${task.status}</span></td>
+                                    <td>${worker}</td>
+                                    <td>${task.dependency_count}</td>
+                                    <td style="font-size:0.8em;">${depsList}</td>
+                                    <td>${assignedAt}</td>
+                                    <td>${completedAt}</td>
+                                </tr>`;
+                        });
+                    }
+
+                    tablesHTML += `</tbody></table></div>`;
+                });
+                tablesContainer.innerHTML = tablesHTML;
+
+            } catch (error) {
+                console.error('Error loading pipeline detail:', error);
+            }
+        }
+
         // Refresh all data
         async function refreshAll() {
             showRefreshing();
@@ -1811,6 +2210,14 @@
             
             // Refresh checkpointing tab every 3 seconds for more responsive updates
             setInterval(refreshCheckpointingTab, 3000);
+
+            // Refresh pipeline tab every 2 seconds when active
+            setInterval(() => {
+                const pipelineTab = document.getElementById('pipeline-tab');
+                if (pipelineTab && pipelineTab.classList.contains('active')) {
+                    loadPipelineData();
+                }
+            }, 2000);
         });
     </script>
 </body>
