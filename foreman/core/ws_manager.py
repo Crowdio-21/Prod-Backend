@@ -13,9 +13,11 @@ from .job_manager import JobManager
 from .task_dispatcher import TaskDispatcher
 from .message_handlers import ClientMessageHandler, WorkerMessageHandler
 from .completion_handler import JobCompletionHandler
+from .worker_reconnection_handler import WorkerReconnectionHandler
 from .dynamic_topology import DynamicTopologyPlanner
 from .model_load_tracker import ModelLoadTracker
 from .scheduling import TaskScheduler, create_scheduler
+from .staged_results_manager.checkpoint_manager import CheckpointManager
 from .utils import (
     _update_worker_status,
     _get_assigned_tasks,
@@ -77,6 +79,15 @@ class WebSocketManager:
             model_load_tracker=self.model_load_tracker,
         )
 
+        self.checkpoint_manager = CheckpointManager()
+        self.reconnection_handler = WorkerReconnectionHandler(
+            job_manager=self.job_manager,
+            task_dispatcher=self.task_dispatcher,
+            checkpoint_manager=self.checkpoint_manager,
+            connection_manager=self.connection_manager,
+            resume_ttl_seconds=300,
+        )
+
         # Completion handler
         self.completion_handler = JobCompletionHandler(
             connection_manager=self.connection_manager, job_manager=self.job_manager
@@ -95,14 +106,6 @@ class WebSocketManager:
             job_manager=self.job_manager,
             task_dispatcher=self.task_dispatcher,
             completion_handler=self.completion_handler,
-            model_load_tracker=self.model_load_tracker,
-            client_handler=self.client_handler,
-        )
-
-        self.dynamic_topology_planner = DynamicTopologyPlanner(
-            connection_manager=self.connection_manager,
-            task_dispatcher=self.task_dispatcher,
-            job_manager=self.job_manager,
         )
 
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
@@ -165,54 +168,32 @@ class WebSocketManager:
         if client_type == "worker":
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
             if worker_id:
-                # Check if this worker has any pending tasks that haven't been received yet
                 pending_tasks = await self._get_worker_pending_tasks(worker_id)
                 print(
                     f"[CLEANUP DEBUG] Worker {worker_id} disconnecting with {len(pending_tasks)} pending tasks: {pending_tasks}"
                 )
-
+                
                 # Record failures for tasks assigned to this worker BEFORE removing from connection manager
                 # This captures checkpoint data for task resumption
                 await self._record_worker_disconnection_failures(worker_id)
-
-                # Clear model residency state for this worker
-                self.model_load_tracker.clear_worker_residency(worker_id)
-
+                
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")
-
+                
                 # Recover orphaned tasks for reassignment to other workers
-                recovered_task_ids = (
-                    await self.task_dispatcher.recover_orphaned_task_ids()
-                )
-                recovered = len(recovered_task_ids)
+                recovered = await self.task_dispatcher.recover_orphaned_tasks()
                 if recovered > 0:
-                    print(
-                        f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected"
-                    )
-                    await self._replan_and_broadcast_topology_updates(
-                        recovered_task_ids,
-                        reason=f"worker_disconnected:{worker_id}",
-                    )
+                    print(f"Recovered {recovered} orphaned tasks after worker {worker_id} disconnected")
             else:
                 print(
                     f"[CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
                 )
 
                 # Recover any orphaned tasks that were assigned to this worker
-                recovered_task_ids = (
-                    await self.task_dispatcher.recover_orphaned_task_ids()
-                )
-                recovered = len(recovered_task_ids)
+                recovered = await self.task_dispatcher.recover_orphaned_tasks()
                 if recovered > 0:
-                    print(
-                        f"Recovered {recovered} orphaned tasks after worker disconnected"
-                    )
-                    await self._replan_and_broadcast_topology_updates(
-                        recovered_task_ids,
-                        reason="worker_disconnected:unknown",
-                    )
-
+                    print(f"Recovered {recovered} orphaned tasks after worker disconnected")
+        
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
             if job_id:

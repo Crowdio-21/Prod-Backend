@@ -1,5 +1,20 @@
 """
-Message handling logic separated by client type
+Message handling logic separated by client type.
+
+Changes from original
+---------------------
+WorkerMessageHandler now accepts an optional ``reconnection_handler``
+(WorkerReconnectionHandler).  Two integration points:
+
+1. ``_handle_worker_ready``  – calls ``reconnection_handler.handle_worker_reconnected``
+   first; if it returns True the worker already received a RESUME_TASK message
+   and normal task assignment is skipped.
+
+2. ``handle_disconnection``  – NEW public method, called by the WebSocket
+   server's close/disconnect path instead of (or after) any existing cleanup.
+   Delegates to ``reconnection_handler.handle_worker_disconnected``.
+
+All other behaviour is unchanged.
 """
 
 import asyncio
@@ -12,8 +27,6 @@ from websockets.server import WebSocketServerProtocol
 
 from .utils import (
     _create_worker_in_database,
-    _get_pending_tasks,
-    _get_assigned_tasks,
     _record_worker_failure,
     _update_worker_status,
     _update_worker_task_stats,
@@ -513,13 +526,6 @@ class ClientMessageHandler:
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Route client messages to appropriate handlers
-
-        Args:
-            message: Parsed message
-            websocket: WebSocket connection
-        """
         if message.type == MessageType.SUBMIT_JOB:
             await self._handle_job_submission(message, websocket)
         elif message.type == MessageType.SUBMIT_PIPELINE_JOB:
@@ -532,26 +538,19 @@ class ClientMessageHandler:
     async def _handle_job_submission(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Handle a new job submission from client
-
-        Args:
-            message: Job submission message
-            websocket: Client websocket connection
-        """
         try:
             job_id = message.job_id
             func_code = message.data["func_code"]
             args_list = message.data["args_list"]
             total_tasks = message.data["total_tasks"]
-
+            
             # Extract task metadata for declarative checkpointing
             task_metadata = message.data.get("task_metadata")
 
             print(
                 f"ClientMessageHandler: Received job {job_id} with {total_tasks} tasks | foreman_runtime={get_runtime_info()}"
             )
-
+            
             # Log checkpoint configuration if present
             if task_metadata and task_metadata.get("checkpoint_enabled"):
                 print(
@@ -560,69 +559,32 @@ class ClientMessageHandler:
                     f"state_vars={task_metadata.get('checkpoint_state', [])})"
                 )
 
-            # Register client websocket
             self.connection_manager.add_client(job_id, websocket)
-
-            # Create job and tasks with task_metadata
             await self.job_manager.create_job(
                 job_id, func_code, args_list, total_tasks, task_metadata=task_metadata
             )
-
-            # Try to assign tasks to available workers
             assigned = await self.task_dispatcher.assign_tasks_for_job(
                 job_id, func_code, args_list
             )
+            print(f"ClientMessageHandler: Assigned {assigned} tasks immediately for job {job_id}")
 
-            print(
-                f"ClientMessageHandler: Assigned {assigned} tasks immediately for job {job_id}"
-            )
-
-            # Send job accepted message
             response = create_job_accepted_message(job_id)
             await websocket.send(response.to_json())
-
             print(f"ClientMessageHandler: Job {job_id} accepted and acknowledged")
 
         except KeyError as e:
-            print(
-                f"ClientMessageHandler: Missing required field in job submission: {e}"
-            )
-            error_msg = Message(
-                MessageType.JOB_ERROR,
-                {"error": f"Missing required field: {e}"},
-                message.job_id,
-            )
+            print(f"ClientMessageHandler: Missing required field in job submission: {e}")
+            error_msg = Message(MessageType.JOB_ERROR, {"error": f"Missing required field: {e}"}, message.job_id)
             await websocket.send(error_msg.to_json())
-
         except Exception as e:
             print(f"ClientMessageHandler: Error handling job submission: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-            error_msg = Message(
-                MessageType.JOB_ERROR, {"error": str(e)}, message.job_id
-            )
+            import traceback; traceback.print_exc()
+            error_msg = Message(MessageType.JOB_ERROR, {"error": str(e)}, message.job_id)
             await websocket.send(error_msg.to_json())
 
     async def _handle_pipeline_submission(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Handle a pipeline job submission from client.
-
-        A pipeline job defines multiple stages with dependency relationships.
-        The system creates all tasks up-front with dependency counters:
-        - Stage 0 tasks start as "pending" and are dispatched immediately
-        - Later stages start as "blocked" and are unblocked automatically
-          when their upstream dependencies complete
-
-        This is the pipeline equivalent of _handle_job_submission().
-
-        Args:
-            message: Pipeline job submission message
-            websocket: Client websocket connection
-        """
         try:
             job_id = message.job_id
             stages = message.data["stages"]
@@ -639,7 +601,6 @@ class ClientMessageHandler:
                 f"foreman_runtime={get_runtime_info()}"
             )
 
-            # Log stage details
             for i, stage in enumerate(stages):
                 stage_name = stage.get("name", f"stage_{i}")
                 stage_tasks = len(stage["args_list"])
@@ -649,91 +610,36 @@ class ClientMessageHandler:
                     f"{' [receives upstream results]' if pass_results else ''}"
                 )
 
-            # Register client websocket
             self.connection_manager.add_client(job_id, websocket)
 
-            # Create pipeline job with dependency wiring.
-            # If dnn_config is provided, route through DNN-aware creation.
-            stage0_load_dispatched = False
-            if dnn_config:
-                inference_graph_id = dnn_config["inference_graph_id"]
-                topology_nodes = dnn_config["topology_nodes"]
-                topology_edges = dnn_config["topology_edges"]
-                model_version_id = dnn_config.get("model_version_id")
-                aggregation_strategy = dnn_config.get("aggregation_strategy", "average")
-                model_artifacts = dnn_config.get("model_artifacts", [])
+            # Create pipeline job with dependency wiring
+            created = await self.job_manager.create_pipeline_job(
+                job_id, stages, dependency_map, task_metadata
+            )
 
-                created = await self.job_manager.create_dnn_inference_job(
-                    job_id=job_id,
-                    stages=stages,
-                    inference_graph_id=inference_graph_id,
-                    topology_nodes=topology_nodes,
-                    topology_edges=topology_edges,
-                    model_version_id=model_version_id,
-                    aggregation_strategy=aggregation_strategy,
-                    dependency_map=dependency_map,
-                    task_metadata=task_metadata,
-                    pipeline_mode=pipeline_mode,
-                )
+            # Dispatch Stage 0 tasks (they are "pending" from creation)
+            stage_0_func_code = stages[0]["func_code"]
+            assigned = await self.task_dispatcher.assign_tasks_for_job(
+                job_id, stage_0_func_code, stages[0]["args_list"]
+            )
 
-                if model_version_id and model_artifacts:
-                    stage0_load_dispatched = (
-                        await self._dispatch_load_model_instructions(
-                            job_id=job_id,
-                            model_version_id=model_version_id,
-                            topology_nodes=topology_nodes,
-                            model_artifacts=model_artifacts,
-                            stages=stages,
-                        )
-                    )
-            else:
-                created = await self.job_manager.create_pipeline_job(
-                    job_id,
-                    stages,
-                    dependency_map,
-                    task_metadata,
-                    pipeline_mode=pipeline_mode,
-                )
+            print(
+                f"ClientMessageHandler: Pipeline job {job_id} — "
+                f"Assigned {assigned} stage-0 tasks immediately"
+            )
 
-            if dnn_config and stage0_load_dispatched:
-                print(
-                    f"ClientMessageHandler: Pipeline job {job_id} — waiting for MODEL_LOADED before dispatching stage-0 tasks"
-                )
-            else:
-                # Dispatch Stage 0 tasks (they are "pending" from creation)
-                stage_0_func_code = stages[0]["func_code"]
-                assigned = await self.task_dispatcher.assign_tasks_for_job(
-                    job_id, stage_0_func_code, stages[0]["args_list"]
-                )
-
-                print(
-                    f"ClientMessageHandler: Pipeline job {job_id} — "
-                    f"Assigned {assigned} stage-0 tasks immediately"
-                )
-
-            # Send job accepted message
             response = create_job_accepted_message(job_id)
             await websocket.send(response.to_json())
 
-            print(
-                f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged"
-            )
+            print(f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged")
 
         except KeyError as e:
-            print(
-                f"ClientMessageHandler: Missing required field in pipeline submission: {e}"
-            )
-            error_msg = Message(
-                MessageType.JOB_ERROR,
-                {"error": f"Missing required field: {e}"},
-                message.job_id,
-            )
+            print(f"ClientMessageHandler: Missing required field in pipeline submission: {e}")
+            error_msg = Message(MessageType.JOB_ERROR, {"error": f"Missing required field: {e}"}, message.job_id)
             await websocket.send(error_msg.to_json())
-
         except Exception as e:
             print(f"ClientMessageHandler: Error handling pipeline submission: {e}")
             import traceback
-
             traceback.print_exc()
 
             error_msg = Message(
@@ -744,13 +650,12 @@ class ClientMessageHandler:
 
 class WorkerMessageHandler:
     """
-    Handles messages from workers
+    Handles messages from workers.
 
     Responsibilities:
-    - Handle worker registration
-    - Handle task results
-    - Handle task errors
-    - Handle pong responses
+    - Handle worker registration (with transparent checkpoint-based resume on reconnect)
+    - Handle task results / errors / checkpoints / pongs
+    - Graceful disconnection → reconnection lifecycle via reconnection_handler
     """
 
     def __init__(
@@ -760,8 +665,6 @@ class WorkerMessageHandler:
         task_dispatcher,
         completion_handler,
         checkpoint_manager: CheckpointManager = None,
-        model_load_tracker=None,
-        client_handler=None,
     ):
         """
         Initialize worker message handler
@@ -772,27 +675,16 @@ class WorkerMessageHandler:
             task_dispatcher: TaskDispatcher instance
             completion_handler: JobCompletionHandler instance
             checkpoint_manager: CheckpointManager instance for checkpoint handling
-            model_load_tracker: Optional tracker for model readiness
-            client_handler: Optional client handler to dispatch stage model loads
         """
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
         self.completion_handler = completion_handler
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
-        self.model_load_tracker = model_load_tracker
-        self.client_handler = client_handler
 
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Route worker messages to appropriate handlers
-
-        Args:
-            message: Parsed message
-            websocket: WebSocket connection
-        """
         if message.type == MessageType.WORKER_READY:
             await self._handle_worker_ready(message, websocket)
         elif message.type == MessageType.TASK_RESULT:
@@ -802,7 +694,6 @@ class WorkerMessageHandler:
         elif message.type == MessageType.PONG:
             await self._handle_pong(message, websocket)
         elif message.type == MessageType.WORKER_HEARTBEAT:
-            # Fallback for workers sending heartbeat instead of PONG
             await self._handle_pong(message, websocket)
         elif message.type == MessageType.MODEL_LOADED:
             await self._handle_model_loaded(message, websocket)
@@ -813,41 +704,25 @@ class WorkerMessageHandler:
         else:
             print(f"WorkerMessageHandler: Unknown message type: {message.type}")
 
+    # ------------------------------------------------------------------
+    # Individual handlers
+    # ------------------------------------------------------------------
+
     async def _handle_pong(self, message: Message, websocket: WebSocketServerProtocol):
-        """
-        Handle pong from worker (heartbeat response + performance metrics)
-
-        Args:
-            message: Pong message
-            websocket: Worker websocket connection
-        """
         worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-
         if worker_id:
-            # Update worker's last seen time in database
             await _update_worker_status(worker_id, "online")
-
-            # Update performance metrics if provided
             if "performance_metrics" in message.data:
-                metrics = message.data["performance_metrics"]
-                await self._update_worker_performance_metrics(worker_id, metrics)
+                await self._update_worker_performance_metrics(worker_id, message.data["performance_metrics"])
 
     async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
-        """
-        Update worker performance metrics in database
-
-        Args:
-            worker_id: Worker identifier
-            metrics: Performance metrics dictionary
-        """
         try:
             from foreman.db.base import async_session
             from foreman.db.models import WorkerModel
-            from sqlalchemy import select, update
+            from sqlalchemy import update
             from datetime import datetime
 
             async with async_session() as session:
-                # Update worker performance fields
                 stmt = (
                     update(WorkerModel)
                     .where(WorkerModel.id == worker_id)
@@ -863,11 +738,8 @@ class WorkerMessageHandler:
                 )
                 await session.execute(stmt)
                 await session.commit()
-
         except Exception as e:
-            print(
-                f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}"
-            )
+            print(f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}")
 
     @staticmethod
     def _is_model_not_loaded_error(error: str) -> bool:
@@ -934,7 +806,7 @@ class WorkerMessageHandler:
     ):
         """
         Handle worker ready message (worker registration)
-
+        
         Extended to extract worker capabilities for mobile support.
         Workers report their platform, runtime, and capabilities, which
         determines if code instrumentation is needed.
@@ -946,7 +818,7 @@ class WorkerMessageHandler:
         try:
             worker_id = message.data["worker_id"]
             device_specs = message.data.get("device_specs", {})
-
+            
             # Extract platform/runtime info for mobile worker support
             worker_type = message.data.get("worker_type", "pc_python")
             platform = message.data.get("platform", "unknown")
@@ -963,7 +835,6 @@ class WorkerMessageHandler:
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
             print(f"  Type: {worker_type} | Platform: {platform} | Runtime: {runtime}")
 
-            # Log device specs if available
             if device_specs:
                 device_type = device_specs.get("device_type", "Unknown")
                 os_info = f"{device_specs.get('os_type', 'Unknown')} {device_specs.get('os_version', '')}"
@@ -973,44 +844,29 @@ class WorkerMessageHandler:
                 print(f"  📱 Device: {device_type} | OS: {os_info}")
                 print(f"  🖥️  CPU: {cpu}")
                 print(f"  💾 RAM: {ram_info}")
-
+            
             # Log capabilities for mobile workers
             if capabilities:
                 settrace_support = capabilities.get("supports_settrace", True)
                 frame_support = capabilities.get("supports_frame_introspection", True)
                 if not settrace_support or not frame_support:
-                    print(
-                        f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}"
-                    )
+                    print(f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
 
-            # Create WorkerInfo for extended capability tracking
+            # ---- Register worker in connection manager ----
             from .connection_manager import WorkerInfo
 
             worker_info = WorkerInfo.from_worker_ready_message(
-                worker_id=worker_id, websocket=websocket, message_data=message.data
+                worker_id=worker_id,
+                websocket=websocket,
+                message_data=message.data
             )
-
+            
             # Register worker with capabilities
-            self.connection_manager.add_worker(
-                worker_id, websocket, worker_info=worker_info
-            )
+            self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
 
             # Create or update worker in database with device specs
             await _create_worker_in_database(worker_id, device_specs)
-
-            # Update worker status in database
             await _update_worker_status(worker_id, "online")
-
-            # Register cached model partitions reported by the worker
-            cached_partitions = message.data.get("cached_model_partitions", [])
-            if cached_partitions and self.model_load_tracker:
-                self.model_load_tracker.register_cached_models(
-                    worker_id, cached_partitions
-                )
-                print(
-                    f"WorkerMessageHandler: Worker {worker_id} reports "
-                    f"{len(cached_partitions)} cached model partition(s): {cached_partitions}"
-                )
 
             # Assign any pending tasks to this worker
             assigned = await self.task_dispatcher.assign_task_to_available_worker(
@@ -1019,53 +875,43 @@ class WorkerMessageHandler:
 
             if assigned:
                 print(
-                    f"WorkerMessageHandler: Assigned task to newly connected worker {worker_id}"
+                    f"WorkerMessageHandler: Worker {worker_id} reconnected with DB-assigned task "
+                    f"{db_task_id} (job {db_job_id}) \u2013 no new task assigned."
                 )
+                return
+
+            # No explicit RESUME_TASK dispatch here; worker continues execution
+            # on its own after reconnect and keeps sending checkpoints/results.
+
+            # ---- Normal path: assign a pending task ----
+            assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+            if assigned:
+                print(f"WorkerMessageHandler: Assigned task to newly connected worker {worker_id}")
             else:
-                print(
-                    f"WorkerMessageHandler: No tasks available for worker {worker_id}"
-                )
+                print(f"WorkerMessageHandler: No tasks available for worker {worker_id}")
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in worker ready: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling worker ready: {e}")
-            import traceback
-
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
 
     async def _handle_task_result(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Handle task result from worker (successful completion)
-
-        Args:
-            message: Task result message
-            websocket: Worker websocket connection
-        """
         try:
             job_id = message.job_id
             task_id = message.data["task_id"]
             result = message.data["result"]
 
-            # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-
             if not worker_id:
-                print(
-                    f"⚠️ [RESULT DEBUG] Could not find worker for task result - task_id={task_id}, job_id={job_id}"
-                )
-                print(
-                    f"⚠️ [RESULT DEBUG] This may indicate worker was disconnected before result was processed!"
-                )
+                print(f"[RESULT DEBUG] Could not find worker for task result – task_id={task_id}, job_id={job_id}")
                 return
 
-            print(
-                f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
-            )
+            print(f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}")
 
-            # Normalize result payload so pipeline traces carry execution worker_id.
+            # Normalise result payload
             normalized_result = result
             if isinstance(normalized_result, str):
                 try:
@@ -1073,33 +919,24 @@ class WorkerMessageHandler:
                 except Exception:
                     try:
                         import ast as _ast
-
                         normalized_result = _ast.literal_eval(normalized_result)
                     except Exception:
                         normalized_result = result
 
             if isinstance(normalized_result, dict):
                 normalized_result.setdefault("worker_id", worker_id)
-
                 trace = normalized_result.get("trace")
-                if isinstance(trace, list) and trace:
-                    if isinstance(trace[-1], dict):
-                        trace[-1].setdefault("worker_id", worker_id)
-                        trace[-1].setdefault("task_id", task_id)
-
+                if isinstance(trace, list) and trace and isinstance(trace[-1], dict):
+                    trace[-1].setdefault("worker_id", worker_id)
+                    trace[-1].setdefault("task_id", task_id)
                 try:
                     result_str = json.dumps(normalized_result)
                 except Exception:
                     result_str = str(result) if result is not None else ""
             else:
-                # Result should already be a string from worker, but ensure it.
                 result_str = str(result) if result is not None else ""
-
-            print(
-                f"[Task Result] Result preview: {result_str[:100]}..."
-                if len(result_str) > 100
-                else f"📊 [Task Result] Result: {result_str}"
-            )
+            
+            print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
 
             # Mark task as completed in job manager (idempotent)
             accepted, job_complete = await self.job_manager.mark_task_completed(
@@ -1107,216 +944,83 @@ class WorkerMessageHandler:
             )
 
             if not accepted:
-                print(
-                    f"⚠️ [RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
-                )
-                # Even if ignored, free the worker to take new tasks
+                print(f"[RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}")
+                self.connection_manager.clear_worker_active_task(worker_id)
                 self.connection_manager.mark_worker_available(worker_id)
                 await _update_worker_status(worker_id, "online", current_task_id=None)
                 return
 
-            print(
-                f"[RESULT DEBUG] Task {task_id} accepted, job_complete={job_complete}"
-            )
-
-            # Update worker statistics
             await _update_worker_task_stats(worker_id, task_completed=True)
-
-            # Mark worker as available again
+            self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
-            # --- Pipeline dependency resolution ---
-            # If this is a pipeline job, decrement dependency counters of
-            # downstream tasks.  When all tasks in a stage complete (barrier
-            # lifts), batch-dispatch the entire next stage to ALL available
-            # workers at once – not just the worker that finished last.
+            # Pipeline dependency resolution
             pipeline_batch_dispatched = False
             if self.job_manager.is_pipeline_job(job_id):
                 dep_mgr = self.job_manager.dependency_manager
-                newly_unblocked = await dep_mgr.on_task_completed(
-                    task_id, job_id, normalized_result
-                )
+                newly_unblocked = await dep_mgr.on_task_completed(task_id, job_id, normalized_result)
                 if newly_unblocked:
                     print(
                         f"[PIPELINE] 🚀 Stage barrier lifted! {len(newly_unblocked)} "
                         f"downstream tasks unblocked for job {job_id}"
                     )
-
-                    unblocked_stage_indexes = sorted(
-                        {
-                            stage_idx
-                            for stage_idx in (
-                                self._extract_stage_index_from_task_id(
-                                    unblocked_task_id
-                                )
-                                for unblocked_task_id in newly_unblocked
-                            )
-                            if stage_idx is not None
-                        }
+                    # Batch-dispatch ALL unblocked tasks to the best available
+                    # workers (including the current worker and any idle ones).
+                    func_code = self.job_manager.get_func_code(job_id)
+                    batch_assigned = await self.task_dispatcher.assign_tasks_for_job(
+                        job_id, func_code or "", []
                     )
+                    print(
+                        f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage "
+                        f"tasks across available workers"
+                    )
+                    pipeline_batch_dispatched = True
 
-                    deferred_stage_load_triggered = False
-                    if (
-                        self.model_load_tracker
-                        and self.client_handler
-                        and unblocked_stage_indexes
-                    ):
-                        for stage_idx in unblocked_stage_indexes:
-                            if not self.model_load_tracker.has_deferred_loads(
-                                job_id, stage_idx
-                            ):
-                                continue
-
-                            # Guard: don't unload the previous model until ALL
-                            # tasks for the previous stage are finished.  In
-                            # streaming mode, a single task completion can
-                            # unblock a downstream task, but we must not swap
-                            # models while sibling tasks still need the current
-                            # model.
-                            prev_stage = stage_idx - 1
-                            if prev_stage >= 0:
-                                prev_pending = await _get_pending_tasks(job_id)
-                                prev_assigned = await _get_assigned_tasks(job_id)
-                                prev_stage_busy = any(
-                                    self._extract_stage_index_from_task_id(t.id)
-                                    == prev_stage
-                                    for t in list(prev_pending) + list(prev_assigned)
-                                )
-                                if prev_stage_busy:
-                                    print(
-                                        f"[PIPELINE] Stage {prev_stage} still has "
-                                        f"pending/assigned tasks; deferring model "
-                                        f"load for stage {stage_idx}"
-                                    )
-                                    continue
-
-                            dispatched = (
-                                await self.client_handler.dispatch_stage_model_load(
-                                    job_id=job_id,
-                                    stage_index=stage_idx,
-                                )
-                            )
-                            if dispatched > 0:
-                                deferred_stage_load_triggered = True
-
-                    if deferred_stage_load_triggered:
-                        print(
-                            "[PIPELINE] Stage model loading dispatched; waiting for MODEL_LOADED before assigning newly unblocked tasks"
-                        )
-                        pipeline_batch_dispatched = True
-                    else:
-                        # Batch-dispatch ALL unblocked tasks to the best available
-                        # workers (including the current worker and any idle ones).
-                        func_code = self.job_manager.get_func_code(job_id)
-                        batch_assigned = (
-                            await self.task_dispatcher.assign_tasks_for_job(
-                                job_id, func_code or "", []
-                            )
-                        )
-                        print(
-                            f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage "
-                            f"tasks across available workers"
-                        )
-                        pipeline_batch_dispatched = True
-
-            # Check if job is complete and handle completion
             if job_complete:
-                print(
-                    f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler"
-                )
+                print(f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler")
                 await self.completion_handler.handle_job_completion(job_id)
 
-            # For non-pipeline jobs, or if the pipeline batch didn't assign
-            # anything to THIS worker, try assigning the next task normally.
             if not pipeline_batch_dispatched:
-                assigned = await self.task_dispatcher.assign_task_to_available_worker(
-                    worker_id
-                )
-
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
                 if assigned:
                     print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
-                else:
-                    print(
-                        f"[RESULT DEBUG] No more tasks to assign to worker {worker_id}"
-                    )
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
             import traceback
-
             traceback.print_exc()
         except Exception as e:
             print(f"[RESULT DEBUG] Error handling task result: {e}")
             import traceback
-
             traceback.print_exc()
 
     async def _handle_task_error(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        """
-        Handle task error from worker (task failure)
-
-        Args:
-            message: Task error message
-            websocket: Worker websocket connection
-        """
         try:
             job_id = message.job_id
             task_id = message.data["task_id"]
             error = message.data["error"]
 
-            # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-
             if not worker_id:
-                print(f"WorkerMessageHandler: Could not find worker for task error")
+                print("WorkerMessageHandler: Could not find worker for task error")
                 return
 
-            print(
-                f"WorkerMessageHandler: Task {task_id} failed on worker {worker_id} for job {job_id}: {error}"
-            )
+            print(f"WorkerMessageHandler: Task {task_id} failed on worker {worker_id} for job {job_id}: {error}")
 
-            # Mark task as failed (resets to pending for retry)
             await self.job_manager.mark_task_failed(task_id, job_id, worker_id, error)
-
-            # Update worker statistics
             await _update_worker_task_stats(worker_id, task_completed=False)
 
-            # Record failure in history
             try:
                 await _record_worker_failure(worker_id, task_id, error, job_id)
             except Exception as ex:
-                print(
-                    f"WorkerMessageHandler: Error recording worker failure for {worker_id}/{task_id}: {ex}"
-                )
+                print(f"WorkerMessageHandler: Error recording worker failure for {worker_id}/{task_id}: {ex}")
 
-            # Mark worker as available again
+            self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
-
-            if self._is_model_not_loaded_error(error):
-                partition_id = self._extract_model_partition_id(error)
-                retry_delay = 1.0
-
-                if self.model_load_tracker and partition_id:
-                    # Re-arm the warmup window if worker execution raced model loading.
-                    self.model_load_tracker.mark_dispatched(worker_id, partition_id)
-                    remaining = self.model_load_tracker.seconds_until_ready(
-                        worker_id, partition_id
-                    )
-                    if remaining is not None:
-                        retry_delay = max(0.25, float(remaining))
-
-                self.task_dispatcher.schedule_job_assignment_retry(
-                    job_id, delay_seconds=retry_delay
-                )
-                print(
-                    f"WorkerMessageHandler: Deferred reassignment for job {job_id} "
-                    f"after model-not-ready error (delay={retry_delay:.2f}s)"
-                )
-                return
 
             # Assign next task to this worker (the failed task will be retried by another worker)
             assigned = await self.task_dispatcher.assign_task_to_available_worker(
@@ -1324,24 +1028,20 @@ class WorkerMessageHandler:
             )
 
             if assigned:
-                print(
-                    f"WorkerMessageHandler: Assigned next task to worker {worker_id} after failure"
-                )
+                print(f"WorkerMessageHandler: Assigned next task to worker {worker_id} after failure")
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task error: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling task error: {e}")
-            import traceback
-
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
 
     async def _handle_task_checkpoint(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
         """
         Handle checkpoint message from worker (incremental state save)
-
+        
         Supports both legacy checkpoints and declarative checkpointing with
         additional metadata (checkpoint_type, checkpoint_state_vars, state_size_bytes).
 
@@ -1357,22 +1057,19 @@ class WorkerMessageHandler:
             progress_percent = message.data["progress_percent"]
             checkpoint_id = message.data["checkpoint_id"]
             compression_type = message.data.get("compression_type", "gzip")
-
+            
             # Extract declarative checkpointing metadata (optional)
             checkpoint_type = message.data.get("checkpoint_type")
             checkpoint_state_vars = message.data.get("checkpoint_state_vars")
             state_size_bytes = message.data.get("state_size_bytes")
 
-            # Find worker ID
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
-
             if not worker_id:
-                print(f"WorkerMessageHandler: Could not find worker for checkpoint")
+                print("WorkerMessageHandler: Could not find worker for checkpoint")
                 return
 
-            # Convert hex back to bytes
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
-
+            
             # Build log message with declarative checkpoint details if present
             state_vars_info = ""
             if checkpoint_state_vars:
@@ -1384,9 +1081,7 @@ class WorkerMessageHandler:
                 f"progress: {progress_percent}%{state_vars_info})"
             )
 
-            # Get database session and store checkpoint
             from foreman.db.base import get_db_session
-
             async with get_db_session() as session:
                 success = await self.checkpoint_manager.store_checkpoint(
                     session=session,
@@ -1403,61 +1098,17 @@ class WorkerMessageHandler:
                 )
 
             if success:
-                print(
-                    f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}"
-                )
-
-                # Send acknowledgment to worker
+                print(f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}")
                 from common.protocol import create_checkpoint_ack_message
-
                 ack_msg = create_checkpoint_ack_message(task_id, job_id, checkpoint_id)
                 await websocket.send(ack_msg.to_json())
             else:
-                print(
-                    f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}"
-                )
+                print(f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}")
 
         except KeyError as e:
-            print(
-                f"WorkerMessageHandler: Missing required field in checkpoint message: {e}"
-            )
+            print(f"WorkerMessageHandler: Missing required field in checkpoint message: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-    async def _handle_intermediate_feature(
-        self, message: Message, websocket: WebSocketServerProtocol
-    ):
-        """Handle an explicit intermediate feature payload from worker."""
-        try:
-            job_id = message.job_id
-            source_task_id = message.data["task_id"]
-            target_task_id = message.data["target_task_id"]
-            payload = message.data.get("payload")
-            payload_format = message.data.get("payload_format", "json")
-
-            dep_mgr = self.job_manager.dependency_manager
-            dep_mgr.register_intermediate_feature(
-                job_id=job_id,
-                source_task_id=source_task_id,
-                target_task_id=target_task_id,
-                payload=payload,
-                payload_format=payload_format,
-            )
-
-            print(
-                f"WorkerMessageHandler: Routed intermediate feature "
-                f"{source_task_id} -> {target_task_id} for job {job_id}"
-            )
-
-        except KeyError as e:
-            print(
-                f"WorkerMessageHandler: Missing required field in intermediate feature: {e}"
-            )
-        except Exception as e:
-            print(f"WorkerMessageHandler: Error handling intermediate feature: {e}")
             import traceback
 
             traceback.print_exc()

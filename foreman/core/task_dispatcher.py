@@ -800,6 +800,7 @@ class TaskDispatcher:
             await websocket.send(message.to_json())
 
             # Mark worker as busy
+            self.connection_manager.set_worker_active_task(worker_id, task_id, job_id)
             self.connection_manager.mark_worker_busy(worker_id)
             await _update_worker_status(worker_id, "busy", current_task_id=task_id)
 
@@ -816,6 +817,7 @@ class TaskDispatcher:
             )
 
             # Put worker back in available pool on error
+            self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
 
             # If we had claimed the task, put it back to pending

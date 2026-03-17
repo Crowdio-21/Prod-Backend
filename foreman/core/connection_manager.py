@@ -37,6 +37,8 @@ class WorkerInfo:
     
     # Additional info
     device_specs: Dict[str, Any] = field(default_factory=dict)
+    current_task_id: Optional[str] = None
+    current_job_id: Optional[str] = None
     
     @classmethod
     def from_worker_ready_message(
@@ -209,6 +211,27 @@ class ConnectionManager:
         """
         if worker_id in self._workers:
             self._available_workers.add(worker_id)
+
+    def set_worker_active_task(
+        self, worker_id: str, task_id: Optional[str], job_id: Optional[str]
+    ) -> None:
+        """Track the task/job currently assigned to a worker."""
+        info = self._worker_info.get(worker_id)
+        if info is None:
+            return
+        info.current_task_id = task_id
+        info.current_job_id = job_id
+
+    def clear_worker_active_task(self, worker_id: str) -> None:
+        """Clear active task/job tracking for a worker."""
+        self.set_worker_active_task(worker_id, None, None)
+
+    def get_worker_active_task(self, worker_id: str) -> tuple[Optional[str], Optional[str]]:
+        """Return (task_id, job_id) the worker is currently executing."""
+        info = self._worker_info.get(worker_id)
+        if info is None:
+            return None, None
+        return info.current_task_id, info.current_job_id
     
     def mark_worker_busy(self, worker_id: str) -> None:
         """
@@ -373,6 +396,7 @@ class ConnectionManager:
     def clear_all(self) -> None:
         """Clear all connections (useful for testing or shutdown)"""
         self._workers.clear()
+        self._worker_info.clear()
         self._clients.clear()
         self._job_websockets.clear()
         self._available_workers.clear()
