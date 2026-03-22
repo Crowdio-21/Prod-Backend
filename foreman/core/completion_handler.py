@@ -1,4 +1,5 @@
 from common.protocol import create_job_results_message
+from .aggregation_handler import AggregationHandler
 
 
 class JobCompletionHandler:
@@ -7,6 +8,7 @@ class JobCompletionHandler:
     def __init__(self, connection_manager, job_manager):
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+        self.aggregation_handler = AggregationHandler()
 
     async def handle_job_completion(self, job_id: str):
         """Handle completion of a job and send results to client"""
@@ -43,6 +45,17 @@ class JobCompletionHandler:
             f"🏁 [COMPLETION DEBUG] Results for job {job_id}: {len(results)} total, {none_count} are None"
         )
 
+        # Aggregate DNN outputs when strategy is configured.
+        payload_results = results
+        if getattr(job, "is_dnn_inference", False):
+            strategy = getattr(job, "aggregation_strategy", None) or "average"
+            aggregated = self.aggregation_handler.aggregate(results, strategy=strategy)
+            payload_results = {
+                "raw_results": results,
+                "aggregated": aggregated,
+                "aggregation_strategy": strategy,
+            }
+
         # Send results to client
         client_websocket = self.connection_manager.get_client_websocket(job_id)
 
@@ -51,7 +64,7 @@ class JobCompletionHandler:
             return
 
         # Create and send results message
-        message = create_job_results_message(results, job_id)
+        message = create_job_results_message(payload_results, job_id)
         await client_websocket.send(message.to_json())
 
         # Finalize job (completed_tasks already tracked via increment_job_completed_tasks)

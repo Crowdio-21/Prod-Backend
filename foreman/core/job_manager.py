@@ -18,6 +18,7 @@ from .utils import (
     _complete_task_if_assigned,
 )
 from .dependency_manager import DependencyManager, PipelineStage
+from .topology_manager import TopologyManager
 
 
 class JobManager:
@@ -38,22 +39,25 @@ class JobManager:
 
         # Track job metadata: job_id -> metadata dict
         self._job_metadata: Dict[str, Dict[str, Any]] = {}
-        
+
         # Track task metadata for checkpointing: job_id -> task_metadata dict
         self._task_metadata_cache: Dict[str, Dict[str, Any]] = {}
 
         # Dependency manager for pipeline jobs
         self.dependency_manager = DependencyManager()
 
+        # DNN topology manager for topology-aware jobs
+        self.topology_manager = TopologyManager()
+
     # ==================== Job Creation ====================
 
     async def create_job(
-        self, 
-        job_id: str, 
-        func_code: str, 
-        args_list: List[Any], 
+        self,
+        job_id: str,
+        func_code: str,
+        args_list: List[Any],
         total_tasks: int,
-        task_metadata: Optional[Dict[str, Any]] = None
+        task_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Create a new job with tasks
@@ -72,22 +76,26 @@ class JobManager:
         checkpoint_enabled = False
         checkpoint_interval = 10.0
         checkpoint_state_vars = []
-        
+
         if task_metadata:
             checkpoint_enabled = task_metadata.get("checkpoint_enabled", False)
             checkpoint_interval = task_metadata.get("checkpoint_interval", 10.0)
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
-        
+
         checkpoint_info = ""
         if checkpoint_enabled:
-            vars_str = ", ".join(checkpoint_state_vars) if checkpoint_state_vars else "all"
+            vars_str = (
+                ", ".join(checkpoint_state_vars) if checkpoint_state_vars else "all"
+            )
             checkpoint_info = f" | Checkpoint: enabled (interval={checkpoint_interval}s, vars={vars_str})"
-        
-        print(f"JobManager: Creating job {job_id} with {total_tasks} tasks{checkpoint_info}")
+
+        print(
+            f"JobManager: Creating job {job_id} with {total_tasks} tasks{checkpoint_info}"
+        )
 
         # Store func_code in cache for quick access
         self._job_cache[job_id] = func_code
-        
+
         # Store task metadata for checkpoint-aware dispatching
         if task_metadata:
             self._task_metadata_cache[job_id] = task_metadata
@@ -100,11 +108,13 @@ class JobManager:
             "created_at": None,  # Will be set by database
             "checkpoint_enabled": checkpoint_enabled,
             "checkpoint_interval": checkpoint_interval,
-            "checkpoint_state": checkpoint_state_vars
+            "checkpoint_state": checkpoint_state_vars,
         }
 
         # Create job in database (with checkpoint support flag)
-        await _create_job_in_database(job_id, total_tasks, supports_checkpointing=checkpoint_enabled)
+        await _create_job_in_database(
+            job_id, total_tasks, supports_checkpointing=checkpoint_enabled
+        )
 
         # Create tasks in database
         await _create_tasks_for_job(job_id, args_list)
@@ -122,6 +132,11 @@ class JobManager:
         stages: List[Dict[str, Any]],
         dependency_map: Optional[Dict[str, List[str]]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
+        is_dnn_inference: bool = False,
+        model_version_id: Optional[str] = None,
+        inference_graph_id: Optional[str] = None,
+        aggregation_strategy: Optional[str] = None,
+        dnn_config: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Create a pipeline job with dependent stages.
@@ -176,6 +191,10 @@ class JobManager:
             "is_pipeline": True,
             "total_stages": total_stages,
             "checkpoint_enabled": checkpoint_enabled,
+            "is_dnn_inference": is_dnn_inference,
+            "model_version_id": model_version_id,
+            "inference_graph_id": inference_graph_id,
+            "aggregation_strategy": aggregation_strategy,
         }
 
         # Create the job record in DB
@@ -184,28 +203,96 @@ class JobManager:
 
         async with db_session() as session:
             await db_create_pipeline_job(
-                session, job_id, total_tasks, total_stages,
+                session,
+                job_id,
+                total_tasks,
+                total_stages,
                 supports_checkpointing=checkpoint_enabled,
+                is_dnn_inference=is_dnn_inference,
+                model_version_id=model_version_id,
+                inference_graph_id=inference_graph_id,
+                aggregation_strategy=aggregation_strategy,
             )
 
         # Create all tasks with dependency wiring via DependencyManager
         created = await self.dependency_manager.create_pipeline_tasks(
-            job_id, pipeline_stages, dependency_map
+            job_id, pipeline_stages, dependency_map, dnn_config=dnn_config
         )
 
         # Set job to running
         await _update_job_status(job_id, "running")
 
-        print(f"JobManager: Pipeline job {job_id} created successfully ({created} tasks)")
+        print(
+            f"JobManager: Pipeline job {job_id} created successfully ({created} tasks)"
+        )
+        return created
+
+    async def create_dnn_inference_job(
+        self,
+        job_id: str,
+        stages: List[Dict[str, Any]],
+        inference_graph_id: str,
+        topology_nodes: List[Dict[str, Any]],
+        topology_edges: List[Dict[str, Any]],
+        model_version_id: Optional[str] = None,
+        aggregation_strategy: str = "average",
+        dependency_map: Optional[Dict[str, List[str]]] = None,
+        task_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """
+        Create a topology-aware DNN inference job.
+
+        This is a thin layer over create_pipeline_job that validates and caches
+        topology metadata early so later routing/scheduling phases can use it.
+        """
+        graph = self.topology_manager.register_graph(
+            inference_graph_id=inference_graph_id,
+            nodes=topology_nodes,
+            edges=topology_edges,
+            metadata={
+                "job_id": job_id,
+                "model_version_id": model_version_id,
+                "aggregation_strategy": aggregation_strategy,
+            },
+        )
+
+        created = await self.create_pipeline_job(
+            job_id=job_id,
+            stages=stages,
+            dependency_map=dependency_map,
+            task_metadata=task_metadata,
+            is_dnn_inference=True,
+            model_version_id=model_version_id,
+            inference_graph_id=inference_graph_id,
+            aggregation_strategy=aggregation_strategy,
+            dnn_config={
+                "topology_nodes": topology_nodes,
+                "topology_edges": topology_edges,
+            },
+        )
+
+        # Mark job metadata as DNN-enabled for downstream handlers.
+        self._job_metadata.setdefault(job_id, {})
+        self._job_metadata[job_id].update(
+            {
+                "is_dnn_inference": True,
+                "model_version_id": model_version_id,
+                "inference_graph_id": inference_graph_id,
+                "aggregation_strategy": aggregation_strategy,
+                "topology_nodes": graph["nodes"],
+                "topology_edges": graph["edges"],
+            }
+        )
+
         return created
 
     def get_stage_func_code(self, job_id: str, stage: int) -> Optional[str]:
         """Get function code for a specific pipeline stage.
-        
+
         Args:
             job_id: Job identifier
             stage: Stage index (0-based)
-        
+
         Returns:
             Function code string or None
         """
@@ -231,10 +318,10 @@ class JobManager:
     def get_task_metadata(self, job_id: str) -> Optional[Dict[str, Any]]:
         """
         Get cached task metadata for a job
-        
+
         Args:
             job_id: Job identifier
-            
+
         Returns:
             Task metadata dictionary or None if not found
         """

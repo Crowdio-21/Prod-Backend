@@ -21,7 +21,7 @@ from .utils import (
     _get_latest_task_failure_with_checkpoint,
 )
 from common.protocol import (
-    create_assign_task_message, 
+    create_assign_task_message,
     create_resume_task_message,
     create_assign_task_message_with_metadata,
     create_resume_task_message_with_metadata,
@@ -66,24 +66,24 @@ class TaskDispatcher:
         worker_id: str,
         task_metadata: Optional[Dict[str, Any]] = None,
         checkpoint_state: Optional[Dict[str, Any]] = None,
-        is_resume: bool = False
+        is_resume: bool = False,
     ) -> str:
         """
         Prepare function code based on worker capabilities.
-        
+
         For workers that don't support sys.settrace() (e.g., Chaquopy on Android),
         this method instruments the code with explicit checkpoint calls.
-        
+
         This is TRANSPARENT to developers - they write pure logic, and the framework
         automatically prepares the code for each worker type.
-        
+
         Args:
             func_code: Original function source code
             worker_id: Target worker identifier
             task_metadata: Checkpoint configuration from @task decorator
             checkpoint_state: Checkpoint state for resumed tasks
             is_resume: Whether this is a resumed task
-            
+
         Returns:
             Prepared code (possibly instrumented for mobile workers)
         """
@@ -91,45 +91,53 @@ class TaskDispatcher:
         if not self.connection_manager.needs_code_instrumentation(worker_id):
             # Worker supports sys.settrace() - no instrumentation needed
             return func_code
-        
+
         # Worker needs instrumentation (e.g., Chaquopy)
-        print(f"TaskDispatcher: Preparing instrumented code for mobile worker {worker_id}")
-        
+        print(
+            f"TaskDispatcher: Preparing instrumented code for mobile worker {worker_id}"
+        )
+
         # Get checkpoint state variables from metadata
         checkpoint_state_vars = []
         if task_metadata:
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
-        
+
         if not checkpoint_state_vars:
             # No checkpoint variables declared - can't instrument effectively
-            print(f"TaskDispatcher: No checkpoint_state vars declared, skipping instrumentation")
+            print(
+                f"TaskDispatcher: No checkpoint_state vars declared, skipping instrumentation"
+            )
             return func_code
-        
+
         try:
             if is_resume and checkpoint_state:
                 # Resumed task - apply both resume transformation and instrumentation
                 prepared_code = prepare_code_for_mobile_resume(
                     func_code=func_code,
                     checkpoint_state=checkpoint_state,
-                    checkpoint_state_vars=checkpoint_state_vars
+                    checkpoint_state_vars=checkpoint_state_vars,
                 )
             else:
                 # Fresh task - just instrument for checkpoint capture
                 prepared_code, num_loops = instrument_for_mobile(
-                    func_code=func_code,
-                    checkpoint_state_vars=checkpoint_state_vars
+                    func_code=func_code, checkpoint_state_vars=checkpoint_state_vars
                 )
-                print(f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker")
-            
+                print(
+                    f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker"
+                )
+
             # Prepend the mobile checkpoint wrapper
             # Note: Task control (pause/kill) is already instrumented by the SDK
             wrapper = generate_mobile_checkpoint_wrapper()
             prepared_code = wrapper + "\n" + prepared_code
             return prepared_code
-            
+
         except Exception as e:
-            print(f"TaskDispatcher: Code instrumentation failed: {e}, using original code")
+            print(
+                f"TaskDispatcher: Code instrumentation failed: {e}, using original code"
+            )
             import traceback
+
             traceback.print_exc()
             return func_code
 
@@ -138,39 +146,40 @@ class TaskDispatcher:
     async def recover_orphaned_tasks(self) -> int:
         """
         Find tasks assigned to disconnected workers and reset them to pending
-        
+
         An orphaned task is one where:
         - Status is "assigned"
         - The assigned worker_id is no longer connected via WebSocket
-        
+
         Returns:
             Number of tasks recovered
         """
-        # Get all connected worker IDs
+        return len(await self.recover_orphaned_task_ids())
+
+    async def recover_orphaned_task_ids(self) -> List[str]:
+        """Recover orphaned tasks and return the recovered task IDs."""
         connected_workers = self.connection_manager.get_all_worker_ids()
-        
-        # Get all tasks that are currently assigned
         assigned_tasks = await _get_assigned_tasks()
-        
+
         if not assigned_tasks:
-            return 0
-        
-        recovered = 0
+            return []
+
+        recovered_task_ids: List[str] = []
         for task in assigned_tasks:
-            # Check if the assigned worker is still connected
             if task.worker_id and task.worker_id not in connected_workers:
-                # Worker is disconnected - reset task to pending for reassignment
                 await _update_task_status(task.id, "pending", worker_id=None)
-                recovered += 1
+                recovered_task_ids.append(task.id)
                 print(
                     f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} "
                     f"from disconnected worker {task.worker_id}"
                 )
-        
-        if recovered > 0:
-            print(f"TaskDispatcher: Recovered {recovered} orphaned tasks for reassignment")
-        
-        return recovered
+
+        if recovered_task_ids:
+            print(
+                f"TaskDispatcher: Recovered {len(recovered_task_ids)} orphaned tasks for reassignment"
+            )
+
+        return recovered_task_ids
 
     # ==================== Task Assignment ====================
 
@@ -234,21 +243,109 @@ class TaskDispatcher:
         )
 
         tasks_assigned = 0
+        used_workers = set()
         for scheduler_task, worker_id in assignments:
+            task_db = next(
+                (t for t in pending_tasks if t.id == scheduler_task.id), None
+            )
+            requirements = self._parse_device_requirements(task_db)
+
+            if worker_id in used_workers or not self._worker_meets_requirements(
+                all_workers.get(worker_id), requirements
+            ):
+                worker_id = self._find_requirement_compatible_worker(
+                    all_workers=all_workers,
+                    available_workers=available_workers,
+                    used_workers=used_workers,
+                    requirements=requirements,
+                )
+                if not worker_id:
+                    print(
+                        f"TaskDispatcher: No requirement-compatible worker for task {scheduler_task.id}"
+                    )
+                    continue
+
             args_text = resolve_text_ref(scheduler_task.args)
             task_args = json.loads(args_text) if args_text else []
-            
+
             # For pipeline tasks, use per-stage func_code stored on SchedulerTask
-            task_func_code = getattr(scheduler_task, "stage_func_code", None) or func_code
-            
+            task_func_code = (
+                getattr(scheduler_task, "stage_func_code", None) or func_code
+            )
+
             success = await self._assign_task_to_worker(
                 job_id, scheduler_task.id, task_func_code, task_args, worker_id
             )
             if success:
                 tasks_assigned += 1
+                used_workers.add(worker_id)
 
         print(f"TaskDispatcher: Assigned {tasks_assigned} tasks for job {job_id}")
         return tasks_assigned
+
+    def _parse_device_requirements(self, task_obj) -> Dict[str, Any]:
+        if not task_obj:
+            return {}
+        req_text = getattr(task_obj, "device_requirements", None)
+        if not req_text:
+            return {}
+        try:
+            return json.loads(req_text)
+        except Exception:
+            return {}
+
+    def _worker_meets_requirements(
+        self, worker: Optional[Worker], requirements: Dict[str, Any]
+    ) -> bool:
+        if not worker or not requirements:
+            return True
+
+        min_ram_mb = requirements.get("min_ram_mb")
+        if min_ram_mb is not None and (worker.ram_available_mb or 0.0) < float(
+            min_ram_mb
+        ):
+            return False
+
+        min_battery = requirements.get("min_battery")
+        if min_battery is not None and (worker.battery_level or 0.0) < float(
+            min_battery
+        ):
+            return False
+
+        if requirements.get("require_gpu") and not worker.gpu_available:
+            return False
+
+        allowed_os_types = requirements.get("allowed_os_types")
+        if allowed_os_types and worker.os_type not in allowed_os_types:
+            return False
+
+        allowed_runtimes = requirements.get("allowed_runtimes")
+        if allowed_runtimes and worker.runtime not in allowed_runtimes:
+            return False
+
+        allowed_model_runtimes = requirements.get("allowed_model_runtimes")
+        if (
+            allowed_model_runtimes
+            and worker.model_runtime not in allowed_model_runtimes
+        ):
+            return False
+
+        return True
+
+    def _find_requirement_compatible_worker(
+        self,
+        all_workers: Dict[str, Worker],
+        available_workers,
+        used_workers,
+        requirements: Dict[str, Any],
+    ) -> Optional[str]:
+        for candidate_id in available_workers:
+            if candidate_id in used_workers:
+                continue
+            worker = all_workers.get(candidate_id)
+            if self._worker_meets_requirements(worker, requirements):
+                return candidate_id
+        return None
 
     async def assign_task_to_available_worker(
         self, worker_id: str, worker_threshold: int = 1
@@ -259,7 +356,7 @@ class TaskDispatcher:
         When the number of available workers exceeds the threshold,
         triggers batch assignment for all jobs (like initial start).
         Otherwise, skips assignment and waits for more workers.
-        
+
         Also recovers orphaned tasks (assigned to disconnected workers)
         before attempting new assignments.
 
@@ -273,8 +370,10 @@ class TaskDispatcher:
         # First, recover any orphaned tasks from disconnected workers
         recovered = await self.recover_orphaned_tasks()
         if recovered > 0:
-            print(f"TaskDispatcher: Recovered {recovered} orphaned tasks before assignment")
-        
+            print(
+                f"TaskDispatcher: Recovered {recovered} orphaned tasks before assignment"
+            )
+
         # Check how many workers are currently available
         available_workers = self.connection_manager.get_available_workers()
         num_available = len(available_workers)
@@ -303,7 +402,9 @@ class TaskDispatcher:
             # Get the earliest pending task
             pending_tasks = await _get_pending_tasks()
             if not pending_tasks:
-                print(f"TaskDispatcher: No pending tasks available for single-worker assignment")
+                print(
+                    f"TaskDispatcher: No pending tasks available for single-worker assignment"
+                )
                 return False
 
             # Pick the first pending task
@@ -319,7 +420,9 @@ class TaskDispatcher:
 
             args_text = resolve_text_ref(task.args)
             task_args = json.loads(args_text) if args_text else []
-            success = await self._assign_task_to_worker(job_id, task.id, func_code, task_args, worker_id)
+            success = await self._assign_task_to_worker(
+                job_id, task.id, func_code, task_args, worker_id
+            )
             return success
 
         # Enough workers available - trigger batch assignment for all jobs
@@ -361,11 +464,11 @@ class TaskDispatcher:
     ) -> bool:
         """
         Assign a specific task to a specific worker.
-        
+
         If the task has checkpoint data from a previous failure, sends a RESUME_TASK
         message so the worker can continue from where the last worker left off.
         Otherwise, sends a regular ASSIGN_TASK message to start fresh.
-        
+
         Includes task_metadata for declarative checkpointing if configured.
 
         Args:
@@ -381,27 +484,27 @@ class TaskDispatcher:
         try:
             # Get task_metadata from job_manager for declarative checkpointing
             task_metadata = self.job_manager.get_task_metadata(job_id)
-            
+
             # Check if we have checkpoint data for this task from a previous failure
             checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
-            
+
             # Prepare code for the target worker (handles mobile instrumentation)
             checkpoint_state = None
             is_resume = False
-            
+
             if checkpoint_data and checkpoint_data.get("state"):
                 is_resume = True
                 checkpoint_state = checkpoint_data.get("state", {})
-                
+
             # Prepare code based on worker capabilities
             prepared_code = self._prepare_code_for_worker(
                 func_code=func_code,
                 worker_id=worker_id,
                 task_metadata=task_metadata,
                 checkpoint_state=checkpoint_state,
-                is_resume=is_resume
+                is_resume=is_resume,
             )
-            
+
             if checkpoint_data and checkpoint_data.get("state"):
                 # We have checkpoint data - send RESUME_TASK message
                 if task_metadata:
@@ -411,11 +514,15 @@ class TaskDispatcher:
                         job_id=job_id,
                         func_code=prepared_code,  # Use prepared code
                         checkpoint_state=checkpoint_data.get("state", {}),
-                        task_args=[task_args] if not isinstance(task_args, list) else task_args,
+                        task_args=(
+                            [task_args]
+                            if not isinstance(task_args, list)
+                            else task_args
+                        ),
                         task_kwargs={},
                         progress_percent=checkpoint_data.get("progress_percent", 0),
                         checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
-                        task_metadata=task_metadata
+                        task_metadata=task_metadata,
                     )
                 else:
                     # Use standard message
@@ -424,10 +531,14 @@ class TaskDispatcher:
                         job_id=job_id,
                         func_code=prepared_code,  # Use prepared code
                         checkpoint_state=checkpoint_data.get("state", {}),
-                        task_args=[task_args] if not isinstance(task_args, list) else task_args,
+                        task_args=(
+                            [task_args]
+                            if not isinstance(task_args, list)
+                            else task_args
+                        ),
                         task_kwargs={},
                         progress_percent=checkpoint_data.get("progress_percent", 0),
-                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0)
+                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
                     )
                 print(
                     f"TaskDispatcher: 🔄 Resuming task {task_id} from checkpoint "
@@ -442,7 +553,7 @@ class TaskDispatcher:
                         task_args=[task_args],  # Wrap in list for single task
                         task_id=task_id,
                         job_id=job_id,
-                        task_metadata=task_metadata
+                        task_metadata=task_metadata,
                     )
                 else:
                     # Use standard message
@@ -561,6 +672,8 @@ class TaskDispatcher:
                         device_type=stats.get("device_type"),
                         os_type=stats.get("os_type"),
                         os_version=stats.get("os_version"),
+                        runtime=stats.get("runtime"),
+                        model_runtime=stats.get("model_runtime"),
                     )
                 else:
                     # Worker exists but no stats yet - use defaults

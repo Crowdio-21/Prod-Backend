@@ -62,6 +62,8 @@ class Worker:
     device_type: Optional[str] = None
     os_type: Optional[str] = None
     os_version: Optional[str] = None
+    runtime: Optional[str] = None
+    model_runtime: Optional[str] = None
 
     # Computed properties
     @property

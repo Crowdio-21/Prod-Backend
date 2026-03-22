@@ -30,34 +30,34 @@ from ...db.models import TaskModel
 def _decode_checkpoint_blob(blob_base64: str) -> Optional[dict]:
     """
     Decode a checkpoint blob from delta_checkpoint_blobs
-    
+
     The blob encoding chain is:
     - PC Worker: pickle(delta_dict) → gzip compress → gzip compress → base64 encode
     - Android Worker: JSON(delta_dict) → gzip compress → gzip compress → base64 encode
-    
+
     So to decode: base64 decode → gzip decompress → gzip decompress → (pickle or JSON)
-    
+
     Args:
         blob_base64: Base64 encoded double-compressed blob
-        
+
     Returns:
         Decoded dictionary or None if decoding fails
     """
     try:
         # Step 1: base64 decode
         compressed_data = base64.b64decode(blob_base64)
-        
+
         # Step 2: First gzip decompress (storage handler compression)
         first_decompress = gzip.decompress(compressed_data)
-        
+
         # Step 3: Second gzip decompress (worker compression)
         second_decompress = gzip.decompress(first_decompress)
-        
+
         # Step 4: Try to decode as JSON first (Android workers), then pickle (PC workers)
         # JSON is more common for cross-platform, so try it first
         try:
             # Try JSON decode (Android workers send JSON)
-            checkpoint_state = json.loads(second_decompress.decode('utf-8'))
+            checkpoint_state = json.loads(second_decompress.decode("utf-8"))
             print(f"_decode_checkpoint_blob: Decoded as JSON")
             return checkpoint_state
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -65,10 +65,11 @@ def _decode_checkpoint_blob(blob_base64: str) -> Optional[dict]:
             checkpoint_state = pickle.loads(second_decompress)
             print(f"_decode_checkpoint_blob: Decoded as pickle")
             return checkpoint_state
-            
+
     except Exception as e:
         print(f"_decode_checkpoint_blob: Error decoding checkpoint: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -81,7 +82,7 @@ def _make_json_serializable(obj):
         return [_make_json_serializable(item) for item in obj]
     elif isinstance(obj, bytes):
         return f"<bytes: {len(obj)} bytes>"
-    elif hasattr(obj, '__dict__'):
+    elif hasattr(obj, "__dict__"):
         return f"<{type(obj).__name__}: {str(obj)[:100]}>"
     elif isinstance(obj, (int, float, str, bool, type(None))):
         return obj
@@ -90,16 +91,16 @@ def _make_json_serializable(obj):
 
 
 async def _record_worker_failure(
-    worker_id, 
-    task_id, 
-    error, 
-    job_id, 
+    worker_id,
+    task_id,
+    error,
+    job_id,
     checkpoint_available: bool = False,
-    latest_checkpoint_data: Optional[str] = None
+    latest_checkpoint_data: Optional[str] = None,
 ):
     """
     Record a worker failure with optional checkpoint data
-    
+
     Args:
         worker_id: Worker identifier
         task_id: Task identifier
@@ -110,10 +111,10 @@ async def _record_worker_failure(
     """
     async with db_session() as session:
         await record_worker_failure(
-            session, 
-            worker_id, 
-            task_id, 
-            error_message=str(error), 
+            session,
+            worker_id,
+            task_id,
+            error_message=str(error),
             job_id=job_id,
             checkpoint_available=checkpoint_available,
             latest_checkpoint_data=latest_checkpoint_data,
@@ -123,13 +124,13 @@ async def _record_worker_failure(
 async def _get_latest_task_failure_with_checkpoint(task_id: str) -> Optional[dict]:
     """
     Get the latest failure record with checkpoint data for a task.
-    
+
     Used when reassigning orphaned tasks to check if we can resume
     from a checkpoint instead of starting from scratch.
-    
+
     Args:
         task_id: Task identifier
-        
+
     Returns:
         Dictionary with checkpoint data including 'state' field, or None if not found
     """
@@ -139,7 +140,9 @@ async def _get_latest_task_failure_with_checkpoint(task_id: str) -> Optional[dic
             try:
                 return json.loads(failure.latest_checkpoint_data)
             except json.JSONDecodeError:
-                print(f"_get_latest_task_failure_with_checkpoint: Invalid JSON for task {task_id}")
+                print(
+                    f"_get_latest_task_failure_with_checkpoint: Invalid JSON for task {task_id}"
+                )
                 return None
         return None
 
@@ -172,10 +175,12 @@ async def _get_job_by_id(job_id: str):
         return await get_job_by_id(session, job_id)
 
 
-async def _create_job_in_database(job_id: str, total_tasks: int, supports_checkpointing: bool = False):
+async def _create_job_in_database(
+    job_id: str, total_tasks: int, supports_checkpointing: bool = False
+):
     """
     Create job in database
-    
+
     Args:
         job_id: Job identifier
         total_tasks: Total number of tasks
@@ -184,8 +189,12 @@ async def _create_job_in_database(job_id: str, total_tasks: int, supports_checkp
 
     # Create a new session for this operation
     async with db_session() as session:
-        await create_job(session, job_id, total_tasks, supports_checkpointing=supports_checkpointing)
-    print(f"Created job {job_id} in database (checkpointing={'enabled' if supports_checkpointing else 'disabled'})")
+        await create_job(
+            session, job_id, total_tasks, supports_checkpointing=supports_checkpointing
+        )
+    print(
+        f"Created job {job_id} in database (checkpointing={'enabled' if supports_checkpointing else 'disabled'})"
+    )
 
 
 async def _create_worker_in_database(worker_id: str, device_specs: dict = None):
@@ -257,10 +266,16 @@ async def _update_task_status(
 ):
     """Update task status with new session"""
 
-    stored_result = store_text_if_large(result, "task_results", task_id) if result is not None else None
+    stored_result = (
+        store_text_if_large(result, "task_results", task_id)
+        if result is not None
+        else None
+    )
 
     async with db_session() as session:
-        await update_task_status(session, task_id, status, worker_id, stored_result, error)
+        await update_task_status(
+            session, task_id, status, worker_id, stored_result, error
+        )
 
 
 async def _claim_task_for_worker(task_id: str, worker_id: str):
@@ -299,7 +314,9 @@ async def _complete_task_if_assigned(task_id: str, worker_id: str, result: str):
     stored_result = store_text_if_large(result, "task_results", task_id)
 
     async with db_session() as session:
-        return await complete_task_if_assigned(session, task_id, worker_id, stored_result)
+        return await complete_task_if_assigned(
+            session, task_id, worker_id, stored_result
+        )
 
 
 async def _get_worker_stats(worker_id: str):
@@ -384,4 +401,6 @@ async def _get_worker_stats_extended(worker_id: str):
             "device_type": worker.device_type,
             "os_type": worker.os_type,
             "os_version": worker.os_version,
+            "runtime": worker.runtime,
+            "model_runtime": worker.model_runtime,
         }

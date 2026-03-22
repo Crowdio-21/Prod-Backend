@@ -12,9 +12,15 @@ from .utils import (
     _update_worker_status,
     _update_worker_task_stats,
 )
-from common.protocol import Message, MessageType, create_job_accepted_message
+from common.protocol import (
+    Message,
+    MessageType,
+    create_job_accepted_message,
+    create_load_model_message,
+)
 from common.serializer import get_runtime_info, bytes_to_hex, hex_to_bytes
 from .staged_results_manager.checkpoint_manager import CheckpointManager
+from .model_registry import build_model_artifact_url, store_partition_blob
 
 
 class ClientMessageHandler:
@@ -39,6 +45,66 @@ class ClientMessageHandler:
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
+
+    async def _dispatch_load_model_instructions(
+        self,
+        job_id: str,
+        model_version_id: str,
+        topology_nodes,
+        model_artifacts,
+    ):
+        """Persist model artifacts and send LOAD_MODEL messages to assigned workers."""
+        if not model_artifacts:
+            return
+
+        node_to_worker = {}
+        for node in topology_nodes or []:
+            partition_id = node.get("model_partition_id")
+            assigned_worker = node.get("assigned_device_id")
+            if partition_id and assigned_worker:
+                node_to_worker[partition_id] = assigned_worker
+
+        for artifact in model_artifacts:
+            partition_id = artifact.get("model_partition_id")
+            content_b64 = artifact.get("content_b64")
+            if not partition_id or not content_b64:
+                continue
+
+            stored = store_partition_blob(
+                model_version_id=model_version_id,
+                model_partition_id=partition_id,
+                content_b64=content_b64,
+                file_name=artifact.get("file_name"),
+            )
+
+            assigned_worker = artifact.get("assigned_device_id") or node_to_worker.get(
+                partition_id
+            )
+            if not assigned_worker:
+                print(
+                    f"ClientMessageHandler: No assigned worker found for partition {partition_id}; skipping LOAD_MODEL dispatch"
+                )
+                continue
+
+            worker_ws = self.connection_manager.get_worker_websocket(assigned_worker)
+            if not worker_ws:
+                print(
+                    f"ClientMessageHandler: Assigned worker {assigned_worker} is not connected for partition {partition_id}"
+                )
+                continue
+
+            model_url = build_model_artifact_url(model_version_id, stored["file_name"])
+            load_msg = create_load_model_message(
+                job_id=job_id,
+                model_version_id=model_version_id,
+                model_partition_id=partition_id,
+                model_uri=model_url,
+                checksum=stored["checksum"],
+            )
+            await worker_ws.send(load_msg.to_json())
+            print(
+                f"ClientMessageHandler: Sent LOAD_MODEL for partition {partition_id} to worker {assigned_worker}"
+            )
 
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -74,14 +140,14 @@ class ClientMessageHandler:
             func_code = message.data["func_code"]
             args_list = message.data["args_list"]
             total_tasks = message.data["total_tasks"]
-            
+
             # Extract task metadata for declarative checkpointing
             task_metadata = message.data.get("task_metadata")
 
             print(
                 f"ClientMessageHandler: Received job {job_id} with {total_tasks} tasks | foreman_runtime={get_runtime_info()}"
             )
-            
+
             # Log checkpoint configuration if present
             if task_metadata and task_metadata.get("checkpoint_enabled"):
                 print(
@@ -160,6 +226,7 @@ class ClientMessageHandler:
             total_stages = message.data["total_stages"]
             dependency_map = message.data.get("dependency_map")
             task_metadata = message.data.get("task_metadata")
+            dnn_config = message.data.get("dnn_config")
 
             print(
                 f"ClientMessageHandler: Received pipeline job {job_id} "
@@ -180,10 +247,39 @@ class ClientMessageHandler:
             # Register client websocket
             self.connection_manager.add_client(job_id, websocket)
 
-            # Create pipeline job with dependency wiring
-            created = await self.job_manager.create_pipeline_job(
-                job_id, stages, dependency_map, task_metadata
-            )
+            # Create pipeline job with dependency wiring.
+            # If dnn_config is provided, route through DNN-aware creation.
+            if dnn_config:
+                inference_graph_id = dnn_config["inference_graph_id"]
+                topology_nodes = dnn_config["topology_nodes"]
+                topology_edges = dnn_config["topology_edges"]
+                model_version_id = dnn_config.get("model_version_id")
+                aggregation_strategy = dnn_config.get("aggregation_strategy", "average")
+                model_artifacts = dnn_config.get("model_artifacts", [])
+
+                created = await self.job_manager.create_dnn_inference_job(
+                    job_id=job_id,
+                    stages=stages,
+                    inference_graph_id=inference_graph_id,
+                    topology_nodes=topology_nodes,
+                    topology_edges=topology_edges,
+                    model_version_id=model_version_id,
+                    aggregation_strategy=aggregation_strategy,
+                    dependency_map=dependency_map,
+                    task_metadata=task_metadata,
+                )
+
+                if model_version_id and model_artifacts:
+                    await self._dispatch_load_model_instructions(
+                        job_id=job_id,
+                        model_version_id=model_version_id,
+                        topology_nodes=topology_nodes,
+                        model_artifacts=model_artifacts,
+                    )
+            else:
+                created = await self.job_manager.create_pipeline_job(
+                    job_id, stages, dependency_map, task_metadata
+                )
 
             # Dispatch Stage 0 tasks (they are "pending" from creation)
             stage_0_func_code = stages[0]["func_code"]
@@ -200,7 +296,9 @@ class ClientMessageHandler:
             response = create_job_accepted_message(job_id)
             await websocket.send(response.to_json())
 
-            print(f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged")
+            print(
+                f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged"
+            )
 
         except KeyError as e:
             print(
@@ -216,6 +314,7 @@ class ClientMessageHandler:
         except Exception as e:
             print(f"ClientMessageHandler: Error handling pipeline submission: {e}")
             import traceback
+
             traceback.print_exc()
 
             error_msg = Message(
@@ -282,6 +381,8 @@ class WorkerMessageHandler:
             await self._handle_pong(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
+        elif message.type == MessageType.INTERMEDIATE_FEATURE:
+            await self._handle_intermediate_feature(message, websocket)
         else:
             print(f"WorkerMessageHandler: Unknown message type: {message.type}")
 
@@ -346,7 +447,7 @@ class WorkerMessageHandler:
     ):
         """
         Handle worker ready message (worker registration)
-        
+
         Extended to extract worker capabilities for mobile support.
         Workers report their platform, runtime, and capabilities, which
         determines if code instrumentation is needed.
@@ -358,12 +459,19 @@ class WorkerMessageHandler:
         try:
             worker_id = message.data["worker_id"]
             device_specs = message.data.get("device_specs", {})
-            
+
             # Extract platform/runtime info for mobile worker support
             worker_type = message.data.get("worker_type", "pc_python")
             platform = message.data.get("platform", "unknown")
             runtime = message.data.get("runtime", "cpython")
+            model_runtime = message.data.get("model_runtime")
             capabilities = message.data.get("capabilities", {})
+
+            # Keep runtime metadata in device specs for DB persistence.
+            if runtime and "runtime" not in device_specs:
+                device_specs["runtime"] = runtime
+            if model_runtime and "model_runtime" not in device_specs:
+                device_specs["model_runtime"] = model_runtime
 
             print(f"WorkerMessageHandler: Worker {worker_id} connected")
             print(f"  Type: {worker_type} | Platform: {platform} | Runtime: {runtime}")
@@ -378,24 +486,27 @@ class WorkerMessageHandler:
                 print(f"  📱 Device: {device_type} | OS: {os_info}")
                 print(f"  🖥️  CPU: {cpu}")
                 print(f"  💾 RAM: {ram_info}")
-            
+
             # Log capabilities for mobile workers
             if capabilities:
                 settrace_support = capabilities.get("supports_settrace", True)
                 frame_support = capabilities.get("supports_frame_introspection", True)
                 if not settrace_support or not frame_support:
-                    print(f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
+                    print(
+                        f"  ⚠️  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}"
+                    )
 
             # Create WorkerInfo for extended capability tracking
             from .connection_manager import WorkerInfo
+
             worker_info = WorkerInfo.from_worker_ready_message(
-                worker_id=worker_id,
-                websocket=websocket,
-                message_data=message.data
+                worker_id=worker_id, websocket=websocket, message_data=message.data
             )
-            
+
             # Register worker with capabilities
-            self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
+            self.connection_manager.add_worker(
+                worker_id, websocket, worker_info=worker_info
+            )
 
             # Create or update worker in database with device specs
             await _create_worker_in_database(worker_id, device_specs)
@@ -485,8 +596,12 @@ class WorkerMessageHandler:
             else:
                 # Result should already be a string from worker, but ensure it.
                 result_str = str(result) if result is not None else ""
-            
-            print(f"[Task Result] Result preview: {result_str[:100]}..." if len(result_str) > 100 else f"📊 [Task Result] Result: {result_str}")
+
+            print(
+                f"[Task Result] Result preview: {result_str[:100]}..."
+                if len(result_str) > 100
+                else f"📊 [Task Result] Result: {result_str}"
+            )
 
             # Mark task as completed in job manager (idempotent)
             accepted, job_complete = await self.job_manager.mark_task_completed(
@@ -565,10 +680,12 @@ class WorkerMessageHandler:
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
             import traceback
+
             traceback.print_exc()
         except Exception as e:
             print(f"[RESULT DEBUG] Error handling task result: {e}")
             import traceback
+
             traceback.print_exc()
 
     async def _handle_task_error(
@@ -638,7 +755,7 @@ class WorkerMessageHandler:
     ):
         """
         Handle checkpoint message from worker (incremental state save)
-        
+
         Supports both legacy checkpoints and declarative checkpointing with
         additional metadata (checkpoint_type, checkpoint_state_vars, state_size_bytes).
 
@@ -654,7 +771,7 @@ class WorkerMessageHandler:
             progress_percent = message.data["progress_percent"]
             checkpoint_id = message.data["checkpoint_id"]
             compression_type = message.data.get("compression_type", "gzip")
-            
+
             # Extract declarative checkpointing metadata (optional)
             checkpoint_type = message.data.get("checkpoint_type")
             checkpoint_state_vars = message.data.get("checkpoint_state_vars")
@@ -669,7 +786,7 @@ class WorkerMessageHandler:
 
             # Convert hex back to bytes
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
-            
+
             # Build log message with declarative checkpoint details if present
             state_vars_info = ""
             if checkpoint_state_vars:
@@ -720,6 +837,41 @@ class WorkerMessageHandler:
             )
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    async def _handle_intermediate_feature(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
+        """Handle an explicit intermediate feature payload from worker."""
+        try:
+            job_id = message.job_id
+            source_task_id = message.data["task_id"]
+            target_task_id = message.data["target_task_id"]
+            payload = message.data.get("payload")
+            payload_format = message.data.get("payload_format", "json")
+
+            dep_mgr = self.job_manager.dependency_manager
+            dep_mgr.register_intermediate_feature(
+                job_id=job_id,
+                source_task_id=source_task_id,
+                target_task_id=target_task_id,
+                payload=payload,
+                payload_format=payload_format,
+            )
+
+            print(
+                f"WorkerMessageHandler: Routed intermediate feature "
+                f"{source_task_id} -> {target_task_id} for job {job_id}"
+            )
+
+        except KeyError as e:
+            print(
+                f"WorkerMessageHandler: Missing required field in intermediate feature: {e}"
+            )
+        except Exception as e:
+            print(f"WorkerMessageHandler: Error handling intermediate feature: {e}")
             import traceback
 
             traceback.print_exc()

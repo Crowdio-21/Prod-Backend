@@ -30,6 +30,7 @@ from foreman.db.crud import (
     get_task_by_id,
     update_task_args,
 )
+from .feature_router import FeatureRouter
 
 
 class PipelineStage:
@@ -116,6 +117,7 @@ class DependencyManager:
         self._pipeline_func_codes: Dict[str, Dict[int, str]] = {}
         # In-memory cache: job_id → pipeline metadata
         self._pipeline_metadata: Dict[str, Dict[str, Any]] = {}
+        self.feature_router = FeatureRouter()
 
     # ------------------------------------------------------------------ #
     #  Pipeline Job Creation
@@ -126,6 +128,7 @@ class DependencyManager:
         job_id: str,
         stages: List[PipelineStage],
         dependency_map: Optional[Dict[str, List[str]]] = None,
+        dnn_config: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Create all tasks for a pipeline job and wire their dependencies.
@@ -155,8 +158,7 @@ class DependencyManager:
         stage_task_ids: List[List[str]] = []
         for stage_idx, stage in enumerate(stages):
             ids = [
-                f"{job_id}_task_{stage_idx}_{i}"
-                for i in range(len(stage.args_list))
+                f"{job_id}_task_{stage_idx}_{i}" for i in range(len(stage.args_list))
             ]
             stage_task_ids.append(ids)
             total_tasks += len(ids)
@@ -171,8 +173,49 @@ class DependencyManager:
         }
 
         # ----- create tasks with dependency wiring ----- #
+        node_by_stage: Dict[int, Dict[str, Any]] = {}
+        node_lookup: Dict[str, Dict[str, Any]] = {}
+        if dnn_config:
+            nodes = dnn_config.get("topology_nodes", [])
+            edges = dnn_config.get("topology_edges", [])
+            for node in nodes:
+                node_id = node.get("node_id")
+                if node_id:
+                    node_lookup[node_id] = node
+
+            for stage_idx, stage in enumerate(stages):
+                stage_name = stage.name
+                if not stage_name:
+                    continue
+                for node in nodes:
+                    if (
+                        node.get("model_partition_id") == stage_name
+                        or node.get("node_id") == stage_name
+                    ):
+                        node_by_stage[stage_idx] = node
+                        break
+
         async with db_session() as session:
             for stage_idx, stage in enumerate(stages):
+                stage_node = node_by_stage.get(stage_idx)
+                stage_node_id = stage_node.get("node_id") if stage_node else None
+                stage_role = stage_node.get("role") if stage_node else None
+                stage_partition = (
+                    stage_node.get("model_partition_id") if stage_node else None
+                )
+                stage_requirements = (
+                    stage_node.get("requirements", {}) if stage_node else {}
+                )
+
+                feature_sources = []
+                feature_targets = []
+                if dnn_config and stage_node_id:
+                    for edge in edges:
+                        if edge.get("target") == stage_node_id:
+                            feature_sources.append(edge.get("source"))
+                        if edge.get("source") == stage_node_id:
+                            feature_targets.append(edge.get("target"))
+
                 for task_local_idx, args in enumerate(stage.args_list):
                     task_id = stage_task_ids[stage_idx][task_local_idx]
 
@@ -216,6 +259,19 @@ class DependencyManager:
                         depends_on=json.dumps(depends_on) if depends_on else None,
                         dependents=json.dumps(dependents) if dependents else None,
                         stage_func_code=stage.func_code,
+                        topology_role=stage_role,
+                        feature_sources=(
+                            json.dumps(feature_sources) if feature_sources else None
+                        ),
+                        feature_targets=(
+                            json.dumps(feature_targets) if feature_targets else None
+                        ),
+                        device_requirements=(
+                            json.dumps(stage_requirements)
+                            if stage_requirements
+                            else None
+                        ),
+                        model_partition_id=stage_partition,
                     )
                     session.add(task)
 
@@ -269,12 +325,23 @@ class DependencyManager:
             if not dependents_json:
                 return newly_unblocked
 
+            routed_payloads = self.feature_router.route_completion_to_dependents(
+                job_id=job_id,
+                source_task_id=task_id,
+                dependent_task_ids=dependents_json,
+                result_payload=result,
+            )
+
             for dependent_id in dependents_json:
                 # Inject upstream result into downstream args BEFORE
                 # decrementing so that results from ALL upstream tasks
                 # accumulate (not just the one that triggers unblock).
                 await self._maybe_inject_upstream_result(
-                    session, job_id, dependent_id, task_id, result
+                    session,
+                    job_id,
+                    dependent_id,
+                    task_id,
+                    routed_payloads.get(dependent_id, {}).get("payload", result),
                 )
 
                 # Decrement counter
@@ -302,6 +369,23 @@ class DependencyManager:
             )
 
         return newly_unblocked
+
+    def register_intermediate_feature(
+        self,
+        job_id: str,
+        source_task_id: str,
+        target_task_id: str,
+        payload: Any,
+        payload_format: str = "json",
+    ) -> None:
+        """Store an explicit worker-provided intermediate feature for a target task."""
+        self.feature_router.store_feature(
+            job_id=job_id,
+            source_task_id=source_task_id,
+            target_task_id=target_task_id,
+            payload=payload,
+            payload_format=payload_format,
+        )
 
     # ------------------------------------------------------------------ #
     #  Upstream result injection
@@ -381,7 +465,11 @@ class DependencyManager:
             )
             normalized.setdefault(
                 "tensor_ref",
-                ({"path": local_tensor_path} if local_tensor_path else {"file_url": result_file_url}),
+                (
+                    {"path": local_tensor_path}
+                    if local_tensor_path
+                    else {"file_url": result_file_url}
+                ),
             )
             return normalized
 
@@ -428,7 +516,9 @@ class DependencyManager:
         except (json.JSONDecodeError, TypeError):
             current_args = {}
 
-        normalized_result = self._normalize_upstream_result_for_pipeline(upstream_result)
+        normalized_result = self._normalize_upstream_result_for_pipeline(
+            upstream_result
+        )
 
         # Build augmented args structure
         if isinstance(current_args, dict) and "upstream_results" in current_args:
@@ -470,6 +560,7 @@ class DependencyManager:
         """Clean up cached pipeline data for a completed job."""
         self._pipeline_func_codes.pop(job_id, None)
         self._pipeline_metadata.pop(job_id, None)
+        self.feature_router.clear_job(job_id)
 
     def __repr__(self) -> str:
         return f"DependencyManager(active_pipelines={len(self._pipeline_metadata)})"
