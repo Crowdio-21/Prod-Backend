@@ -1,80 +1,101 @@
-# Common Package
+# common package
 
-The `common` package contains shared modules used across all CrowdCompute components (developer SDK, foreman, and worker).
+Shared runtime primitives used by SDK, foreman, and workers.
 
-## Overview
+This folder is the protocol and execution glue for CrowdIO:
+- typed websocket message envelope + factories
+- function source serialization for remote execution
+- device capability and hardware introspection
+- AST-based instrumentation for mobile runtimes that do not support sys.settrace
 
-This package provides the foundational communication protocol and serialization utilities that enable distributed computing across the CrowdCompute network.
+## Files
 
-## Modules
+### protocol.py
+Defines network message types and factories.
 
-### `protocol.py`
-Defines the message types and communication protocol for WebSocket-based communication between CrowdCompute components.
+Main symbols:
+- MessageType: enum of all protocol message names
+- CheckpointType: checkpoint kind enum (base, delta, compacted)
+- RecoveryStatus: task recovery status enum
+- Message: envelope with to_dict/from_dict and to_json/from_json helpers
 
-**Key Classes:**
-- `MessageType` - Enumeration of all message types
-- `Message` - Base message class for all communications
+Representative factory helpers:
+- create_submit_job_message
+- create_submit_pipeline_job_message
+- create_assign_task_message
+- create_assign_task_message_with_metadata
+- create_resume_task_message
+- create_resume_task_message_with_metadata
+- create_task_checkpoint_message
+- create_task_checkpoint_message_extended
+- create_task_progress_message
+- create_job_progress_message
+- DNN orchestration helpers:
+    - create_load_model_message
+    - create_device_topology_message
+    - create_topology_update_message
+    - create_intermediate_feature_message
+    - create_aggregation_config_message
+    - create_fallback_decision_message
 
-**Message Types:**
-- `SUBMIT_JOB` - Client submits a job to foreman
-- `JOB_ACCEPTED` - Foreman acknowledges job submission
-- `JOB_RESULTS` - Foreman sends completed job results to client
-- `JOB_ERROR` - Error occurred during job processing
-- `WORKER_READY` - Worker announces availability
-- `ASSIGN_TASK` - Foreman assigns task to worker
-- `TASK_RESULT` - Worker sends task result to foreman
-- `TASK_ERROR` - Worker reports task execution error
-- `PING/PONG` - Heartbeat messages
-- `DISCONNECT` - Graceful disconnection
-- `WORKER_HEARTBEAT` - Worker status updates
+### serializer.py
+Function serialization helpers used for shipping executable logic to workers.
 
-**Helper Functions:**
-- `create_job_submission_message()` - Create job submission messages
-- `create_assign_task_message()` - Create task assignment messages
-- `create_task_result_message()` - Create task result messages
-- `create_worker_ready_message()` - Create worker ready messages
+Main functions:
+- serialize_function: gets source and strips decorators before transport
+- deserialize_function_for_PC: exec-based restoration of callable function code
+- get_runtime_info: lightweight runtime diagnostic string
+- hex_to_bytes / bytes_to_hex: utility conversion helpers
 
-### `serializer.py`
-Provides utilities for serializing and deserializing Python functions and data for network transmission.
+Note:
+- serialize_data and deserialize_data are placeholders in the current implementation.
 
-**Key Functions:**
-- `serialize_function(func)` - Serialize Python function to string *(Status: Stable)*
-- `deserialize_function_for_PC(string_func)` - Deserialize string back to function *(Status: Stable)*
-- `serialize_data(data)` - Serialize data to JSON string *(Status: Planning)*
-- `deserialize_data(json_data)` - Deserialize JSON string back to data *(Status: Planning)*
-- `hex_to_bytes(hex_data)` - Convert hex string to bytes  *(Status: Available, Unused)*
-- `bytes_to_hex(data)` - Convert bytes to hex string  *(Status: Available, Unused)*
+### device_info.py
+Collects runtime device specs and lightweight performance metadata.
 
-## Usage
+Main functions:
+- get_device_specs
+- get_lightweight_device_specs
+- format_device_specs_summary
+- get_performance_metrics
+
+### code_instrumenter.py
+AST transforms for mobile worker checkpointing and pause/kill control.
+
+Main symbols:
+- WorkerType
+- detect_worker_capabilities
+- CheckpointInstrumenter
+- TaskControlInstrumenter
+- ResumeInstrumenter
+- instrument_for_mobile
+- prepare_code_for_mobile_resume
+- generate_mobile_checkpoint_wrapper
+
+### __init__.py
+Exports selected protocol, serialization, and instrumentation APIs for package-level imports.
+
+## Quick usage
 
 ```python
-from common.protocol import Message, MessageType, create_job_submission_message
+from common.protocol import create_submit_job_message
 from common.serializer import serialize_function, deserialize_function_for_PC
 
-# Serialize a function
-def my_function(x):
-    return x * 2
 
-func_code = serialize_function(my_function)
+def double_value(x):
+        return x * 2
 
-# Create a message
-message = create_job_submission_message(func_code, [1, 2, 3], "job-123")
 
-# Send message as JSON
-json_data = message.to_json()
+func_code = serialize_function(double_value)
+msg = create_submit_job_message(func_code, [1, 2, 3], "job-123")
+wire_payload = msg.to_json()
 
-# Deserialize function
-restored_func = deserialize_function_for_PC(func_code)
+restored = deserialize_function_for_PC(func_code)
+assert restored(4) == 8
 ```
 
-## Dependencies
+## Design notes
 
-- `inspect` - For function serialization
-- `json` - For data serialization
-
-## Design Principles
-
-1. **JSON Compatibility** - All messages are JSON-serializable for WebSocket transmission
-2. **Function Serialization** - Uses inspect to convert function to string 
-3. **Type Safety** - Uses Python type hints for better code clarity
-4. **Extensibility** - Easy to add new message types and serialization methods
+- Messages are JSON-friendly for websocket transport.
+- Serialization is source-based to keep worker execution flexible.
+- Mobile workers use AST instrumentation where runtime tracing is unavailable.
