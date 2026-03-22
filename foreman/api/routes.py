@@ -1,28 +1,39 @@
-
-from fastapi import  Depends, HTTPException, APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, HTTPException, APIRouter
+from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from foreman.db.base import get_db
 from foreman.db.crud import (
-    get_jobs, get_job, get_workers, get_job_stats,
-    get_worker_failures, get_worker_failure_stats, delete_worker, clear_database
+    get_jobs,
+    get_job,
+    get_workers,
+    get_job_stats,
+    get_worker_failures,
+    get_worker_failure_stats,
+    delete_worker,
+    clear_database,
 )
 from foreman.db.models import JobModel, TaskModel, WorkerModel, WorkerFailureModel
-from foreman.schema.schema import ( 
-    JobResponse, WorkerResponse, JobStats, WorkerFailureResponse, WorkerFailureStats
+from foreman.schema.schema import (
+    JobResponse,
+    WorkerResponse,
+    JobStats,
+    WorkerFailureResponse,
+    WorkerFailureStats,
 )
+from foreman.core.aggregation_handler import AggregationHandler
+from foreman.core.model_registry import list_model_manifest, resolve_partition_path
 
 
 # Create an APIRouter instance
-router = APIRouter(
-    prefix=""
-)
+router = APIRouter(prefix="")
+
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard():
     """Dashboard page with evaluation charts"""
     import os
+
     # Use the new dashboard with charts
     dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     if not os.path.exists(dashboard_path):
@@ -41,7 +52,9 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/jobs", response_model=list[JobResponse])
-async def list_jobs(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
+async def list_jobs(
+    skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)
+):
     """List all jobs"""
     jobs = await get_jobs(db, skip=skip, limit=limit)
     return [JobResponse.from_orm(job) for job in jobs]
@@ -82,7 +95,9 @@ async def remove_worker(worker_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/workers/{worker_id}/failures", response_model=dict)
-async def get_worker_failures_endpoint(worker_id: str, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
+async def get_worker_failures_endpoint(
+    worker_id: str, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)
+):
     """Get a worker's failure history and failure rate"""
     failures = await get_worker_failures(db, worker_id, skip=skip, limit=limit)
     failures_response = [WorkerFailureResponse.from_orm(f) for f in failures]
@@ -90,23 +105,24 @@ async def get_worker_failures_endpoint(worker_id: str, skip: int = 0, limit: int
     return {
         "worker_id": worker_id,
         "failures": [f.dict() for f in failures_response],
-        "stats": stats.dict()
+        "stats": stats.dict(),
     }
 
 
 # ==================== Checkpointing Dashboard API ====================
 
+
 @router.get("/api/checkpoints/job/{job_id}")
 async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(get_db)):
     """
     Get comprehensive checkpoint data for dashboard display.
-    
+
     Returns job-level summary and per-task checkpoint details with timeline events.
     """
     import json
     from datetime import datetime
     from sqlalchemy.orm import selectinload
-    
+
     # Get job with tasks (eagerly loaded)
     result = await db.execute(
         select(JobModel)
@@ -116,11 +132,11 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     # Get all workers for status lookup
     workers_result = await db.execute(select(WorkerModel))
     workers = {w.id: w for w in workers_result.scalars().all()}
-    
+
     # Get worker failures for this job
     failures_result = await db.execute(
         select(WorkerFailureModel).where(WorkerFailureModel.job_id == job_id)
@@ -131,104 +147,133 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
         if f.task_id not in failures_by_task:
             failures_by_task[f.task_id] = []
         failures_by_task[f.task_id].append(f)
-    
+
     # Process tasks
     tasks_data = []
     total_checkpoints = 0
     resumed_count = 0
     failed_count = 0
-    
+
     for task in job.tasks:
         # Check if task was resumed (has failure with checkpoint_available)
         task_failures = failures_by_task.get(task.id, [])
         was_resumed = any(f.checkpoint_available for f in task_failures)
         if was_resumed:
             resumed_count += 1
-        
-        if task.status == 'failed':
+
+        if task.status == "failed":
             failed_count += 1
-        
+
         # Get worker info
         worker = workers.get(task.worker_id) if task.worker_id else None
         worker_status = worker.status if worker else None
-        
+
         # Build timeline events
         timeline = []
-        
+
         # Add checkpoint events from delta_checkpoint_blobs
         if task.delta_checkpoint_blobs:
             try:
                 blobs = json.loads(task.delta_checkpoint_blobs)
                 checkpoint_ids = sorted([int(k) for k in blobs.keys()])
-                
+
                 for i, cp_id in enumerate(checkpoint_ids):
-                    event_type = 'base_checkpoint' if cp_id == 1 else 'delta_checkpoint'
+                    event_type = "base_checkpoint" if cp_id == 1 else "delta_checkpoint"
                     # Estimate timestamp based on task creation and checkpoint count
                     # In real implementation, store timestamps with checkpoints
-                    timeline.append({
-                        'type': event_type,
-                        'description': f'Checkpoint #{cp_id}' + (' (Base)' if cp_id == 1 else ''),
-                        'timestamp': task.last_checkpoint_at.isoformat() if task.last_checkpoint_at else datetime.now().isoformat()
-                    })
+                    timeline.append(
+                        {
+                            "type": event_type,
+                            "description": f"Checkpoint #{cp_id}"
+                            + (" (Base)" if cp_id == 1 else ""),
+                            "timestamp": (
+                                task.last_checkpoint_at.isoformat()
+                                if task.last_checkpoint_at
+                                else datetime.now().isoformat()
+                            ),
+                        }
+                    )
             except (json.JSONDecodeError, AttributeError):
                 pass
-        
+
         # Add failure events
         for failure in task_failures:
-            timeline.append({
-                'type': 'failure',
-                'description': f'Worker {failure.worker_id[:8]}... failed',
-                'timestamp': failure.failed_at.isoformat() if failure.failed_at else datetime.now().isoformat()
-            })
-            
+            timeline.append(
+                {
+                    "type": "failure",
+                    "description": f"Worker {failure.worker_id[:8]}... failed",
+                    "timestamp": (
+                        failure.failed_at.isoformat()
+                        if failure.failed_at
+                        else datetime.now().isoformat()
+                    ),
+                }
+            )
+
             if failure.checkpoint_available:
-                timeline.append({
-                    'type': 'resume',
-                    'description': 'Task resumed from checkpoint',
-                    'timestamp': failure.failed_at.isoformat() if failure.failed_at else datetime.now().isoformat()
-                })
-        
+                timeline.append(
+                    {
+                        "type": "resume",
+                        "description": "Task resumed from checkpoint",
+                        "timestamp": (
+                            failure.failed_at.isoformat()
+                            if failure.failed_at
+                            else datetime.now().isoformat()
+                        ),
+                    }
+                )
+
         # Add completion event
-        if task.status == 'completed' and task.completed_at:
-            timeline.append({
-                'type': 'complete',
-                'description': 'Task completed',
-                'timestamp': task.completed_at.isoformat()
-            })
-        
+        if task.status == "completed" and task.completed_at:
+            timeline.append(
+                {
+                    "type": "complete",
+                    "description": "Task completed",
+                    "timestamp": task.completed_at.isoformat(),
+                }
+            )
+
         # Sort timeline by timestamp
-        timeline.sort(key=lambda x: x['timestamp'])
-        
+        timeline.sort(key=lambda x: x["timestamp"])
+
         total_checkpoints += task.checkpoint_count or 0
-        
-        tasks_data.append({
-            'task_id': task.id,
-            'worker_id': task.worker_id,
-            'worker_status': worker_status,
-            'status': task.status,
-            'progress_percent': task.progress_percent or 0,
-            'checkpoint_count': task.checkpoint_count or 0,
-            'last_checkpoint_at': task.last_checkpoint_at.isoformat() if task.last_checkpoint_at else None,
-            'resumed_from_checkpoint': was_resumed,
-            'timeline': timeline
-        })
-    
+
+        tasks_data.append(
+            {
+                "task_id": task.id,
+                "worker_id": task.worker_id,
+                "worker_status": worker_status,
+                "status": task.status,
+                "progress_percent": task.progress_percent or 0,
+                "checkpoint_count": task.checkpoint_count or 0,
+                "last_checkpoint_at": (
+                    task.last_checkpoint_at.isoformat()
+                    if task.last_checkpoint_at
+                    else None
+                ),
+                "resumed_from_checkpoint": was_resumed,
+                "timeline": timeline,
+            }
+        )
+
     # Sort tasks: running first, then by progress
-    tasks_data.sort(key=lambda t: (
-        0 if t['status'] == 'assigned' else 1 if t['status'] == 'pending' else 2,
-        -t['progress_percent']
-    ))
-    
+    tasks_data.sort(
+        key=lambda t: (
+            0 if t["status"] == "assigned" else 1 if t["status"] == "pending" else 2,
+            -t["progress_percent"],
+        )
+    )
+
     return {
-        'job_id': job_id,
-        'job_status': job.status,
-        'total_tasks': job.total_tasks or 0,
-        'completed_tasks': job.completed_tasks or 0,
-        'failed_tasks': failed_count,
-        'resumed_tasks': resumed_count,
-        'total_checkpoints': total_checkpoints,
-        'checkpointing_enabled': total_checkpoints > 0,
-        'tasks': tasks_data
+        "job_id": job_id,
+        "job_status": job.status,
+        "total_tasks": job.total_tasks or 0,
+        "completed_tasks": job.completed_tasks or 0,
+        "failed_tasks": failed_count,
+        "resumed_tasks": resumed_count,
+        "total_checkpoints": total_checkpoints,
+        "checkpointing_enabled": total_checkpoints > 0,
+        "tasks": tasks_data,
     }
 
 
@@ -236,11 +281,11 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
 async def get_recovery_events(limit: int = 20, db: AsyncSession = Depends(get_db)):
     """
     Get recent recovery events (worker failures, task resumptions).
-    
+
     Returns a list of events for the recovery events log.
     """
     from sqlalchemy import desc
-    
+
     # Get recent worker failures
     result = await db.execute(
         select(WorkerFailureModel)
@@ -248,40 +293,54 @@ async def get_recovery_events(limit: int = 20, db: AsyncSession = Depends(get_db
         .limit(limit)
     )
     failures = result.scalars().all()
-    
+
     events = []
     for failure in failures:
         # Add failure event
-        events.append({
-            'timestamp': failure.failed_at.isoformat() if failure.failed_at else None,
-            'event_type': 'worker_failure',
-            'task_id': failure.task_id,
-            'worker_id': failure.worker_id,
-            'details': failure.error_message[:100] if failure.error_message else 'Worker disconnected'
-        })
-        
+        events.append(
+            {
+                "timestamp": (
+                    failure.failed_at.isoformat() if failure.failed_at else None
+                ),
+                "event_type": "worker_failure",
+                "task_id": failure.task_id,
+                "worker_id": failure.worker_id,
+                "details": (
+                    failure.error_message[:100]
+                    if failure.error_message
+                    else "Worker disconnected"
+                ),
+            }
+        )
+
         # Add resume event if checkpoint was available
         if failure.checkpoint_available:
-            events.append({
-                'timestamp': failure.failed_at.isoformat() if failure.failed_at else None,
-                'event_type': 'task_resumed',
-                'task_id': failure.task_id,
-                'worker_id': failure.worker_id,
-                'details': 'Task eligible for checkpoint recovery'
-            })
-    
+            events.append(
+                {
+                    "timestamp": (
+                        failure.failed_at.isoformat() if failure.failed_at else None
+                    ),
+                    "event_type": "task_resumed",
+                    "task_id": failure.task_id,
+                    "worker_id": failure.worker_id,
+                    "details": "Task eligible for checkpoint recovery",
+                }
+            )
+
     # Sort by timestamp descending
-    events.sort(key=lambda x: x['timestamp'] or '', reverse=True)
-    
+    events.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+
     return events[:limit]
 
+
 # ==================== Scheduling Visualization API ====================
+
 
 @router.get("/api/scheduling-info")
 async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
     """
     Get comprehensive scheduling visualization data.
-    
+
     Returns:
     - Active scheduler algorithm and config
     - Per-worker: device specs, score, assigned tasks, task history
@@ -292,6 +351,7 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
 
     # 1. Get active scheduler config
     from foreman.db.models import SchedulerConfigModel
+
     sched_result = await db.execute(
         select(SchedulerConfigModel).where(SchedulerConfigModel.is_active == True)
     )
@@ -302,9 +362,21 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
         scheduler_info = {
             "algorithm": active_config.algorithm_name,
             "description": active_config.description,
-            "criteria_weights": json.loads(active_config.criteria_weights) if active_config.criteria_weights else [],
-            "criteria_names": json.loads(active_config.criteria_names) if active_config.criteria_names else [],
-            "criteria_types": json.loads(active_config.criteria_types) if active_config.criteria_types else [],
+            "criteria_weights": (
+                json.loads(active_config.criteria_weights)
+                if active_config.criteria_weights
+                else []
+            ),
+            "criteria_names": (
+                json.loads(active_config.criteria_names)
+                if active_config.criteria_names
+                else []
+            ),
+            "criteria_types": (
+                json.loads(active_config.criteria_types)
+                if active_config.criteria_types
+                else []
+            ),
         }
     else:
         # Check if simple scheduler is being used (default FIFO)
@@ -324,24 +396,26 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
         total = (w.total_tasks_completed or 0) + (w.total_tasks_failed or 0)
         success_rate = (w.total_tasks_completed / total * 100) if total > 0 else 100.0
 
-        workers_data.append({
-            "id": w.id,
-            "status": w.status,
-            "device_type": w.device_type or "Unknown",
-            "os_type": w.os_type,
-            "cpu_model": w.cpu_model,
-            "cpu_cores": w.cpu_cores,
-            "cpu_frequency_mhz": w.cpu_frequency_mhz,
-            "ram_total_mb": w.ram_total_mb,
-            "ram_available_mb": w.ram_available_mb,
-            "battery_level": w.battery_level,
-            "is_charging": w.is_charging,
-            "current_task_id": w.current_task_id,
-            "total_tasks_completed": w.total_tasks_completed or 0,
-            "total_tasks_failed": w.total_tasks_failed or 0,
-            "success_rate": round(success_rate, 1),
-            "last_seen": w.last_seen.isoformat() if w.last_seen else None,
-        })
+        workers_data.append(
+            {
+                "id": w.id,
+                "status": w.status,
+                "device_type": w.device_type or "Unknown",
+                "os_type": w.os_type,
+                "cpu_model": w.cpu_model,
+                "cpu_cores": w.cpu_cores,
+                "cpu_frequency_mhz": w.cpu_frequency_mhz,
+                "ram_total_mb": w.ram_total_mb,
+                "ram_available_mb": w.ram_available_mb,
+                "battery_level": w.battery_level,
+                "is_charging": w.is_charging,
+                "current_task_id": w.current_task_id,
+                "total_tasks_completed": w.total_tasks_completed or 0,
+                "total_tasks_failed": w.total_tasks_failed or 0,
+                "success_rate": round(success_rate, 1),
+                "last_seen": w.last_seen.isoformat() if w.last_seen else None,
+            }
+        )
 
     # 3. Get all jobs with task assignments for Gantt-style view
     jobs_result = await db.execute(
@@ -356,25 +430,33 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
     for job in jobs:
         task_assignments = []
         for task in job.tasks:
-            task_assignments.append({
-                "task_id": task.id,
-                "worker_id": task.worker_id,
-                "status": task.status,
-                "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            })
-        
+            task_assignments.append(
+                {
+                    "task_id": task.id,
+                    "worker_id": task.worker_id,
+                    "status": task.status,
+                    "assigned_at": (
+                        task.assigned_at.isoformat() if task.assigned_at else None
+                    ),
+                    "completed_at": (
+                        task.completed_at.isoformat() if task.completed_at else None
+                    ),
+                }
+            )
+
         # Sort tasks by assigned_at
         task_assignments.sort(key=lambda t: t["assigned_at"] or "")
 
-        jobs_data.append({
-            "job_id": job.id,
-            "status": job.status,
-            "total_tasks": job.total_tasks or 0,
-            "completed_tasks": job.completed_tasks or 0,
-            "created_at": job.created_at.isoformat() if job.created_at else None,
-            "task_assignments": task_assignments,
-        })
+        jobs_data.append(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "total_tasks": job.total_tasks or 0,
+                "completed_tasks": job.completed_tasks or 0,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "task_assignments": task_assignments,
+            }
+        )
 
     return {
         "scheduler": scheduler_info,
@@ -384,6 +466,7 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
 
 
 # ==================== Pipeline Visualization API ====================
+
 
 @router.get("/api/pipeline/jobs")
 async def get_pipeline_jobs(db: AsyncSession = Depends(get_db)):
@@ -411,7 +494,15 @@ async def get_pipeline_jobs(db: AsyncSession = Depends(get_db)):
         for task in job.tasks:
             s = task.stage or 0
             if s not in stages:
-                stages[s] = {"stage": s, "total": 0, "completed": 0, "assigned": 0, "pending": 0, "failed": 0, "blocked": 0}
+                stages[s] = {
+                    "stage": s,
+                    "total": 0,
+                    "completed": 0,
+                    "assigned": 0,
+                    "pending": 0,
+                    "failed": 0,
+                    "blocked": 0,
+                }
             stages[s]["total"] += 1
             if task.status == "completed":
                 stages[s]["completed"] += 1
@@ -430,25 +521,31 @@ async def get_pipeline_jobs(db: AsyncSession = Depends(get_db)):
         # Compute overall pipeline progress
         total_tasks = len(job.tasks)
         completed_tasks = sum(1 for t in job.tasks if t.status == "completed")
-        progress = round((completed_tasks / total_tasks) * 100) if total_tasks > 0 else 0
+        progress = (
+            round((completed_tasks / total_tasks) * 100) if total_tasks > 0 else 0
+        )
 
         # Duration
         duration = None
         if job.completed_at and job.created_at:
             duration = round((job.completed_at - job.created_at).total_seconds(), 1)
 
-        pipelines.append({
-            "job_id": job.id,
-            "status": job.status,
-            "total_stages": job.total_stages or len(stage_list),
-            "total_tasks": total_tasks,
-            "completed_tasks": completed_tasks,
-            "progress": progress,
-            "stages": stage_list,
-            "created_at": job.created_at.isoformat() if job.created_at else None,
-            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            "duration": duration,
-        })
+        pipelines.append(
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "total_stages": job.total_stages or len(stage_list),
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "progress": progress,
+                "stages": stage_list,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "completed_at": (
+                    job.completed_at.isoformat() if job.completed_at else None
+                ),
+                "duration": duration,
+            }
+        )
 
     return pipelines
 
@@ -492,16 +589,22 @@ async def get_pipeline_job_detail(job_id: str, db: AsyncSession = Depends(get_db
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        stages[s]["tasks"].append({
-            "task_id": task.id,
-            "status": task.status,
-            "worker_id": task.worker_id,
-            "dependency_count": task.dependency_count or 0,
-            "depends_on": depends_on,
-            "dependents": dependents,
-            "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-        })
+        stages[s]["tasks"].append(
+            {
+                "task_id": task.id,
+                "status": task.status,
+                "worker_id": task.worker_id,
+                "dependency_count": task.dependency_count or 0,
+                "depends_on": depends_on,
+                "dependents": dependents,
+                "assigned_at": (
+                    task.assigned_at.isoformat() if task.assigned_at else None
+                ),
+                "completed_at": (
+                    task.completed_at.isoformat() if task.completed_at else None
+                ),
+            }
+        )
 
     stage_list = [stages[k] for k in sorted(stages.keys())]
 
@@ -516,3 +619,135 @@ async def get_pipeline_job_detail(job_id: str, db: AsyncSession = Depends(get_db
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+
+
+# ==================== DNN API ====================
+
+
+@router.get("/api/dnn/jobs")
+async def get_dnn_jobs(db: AsyncSession = Depends(get_db)):
+    """List DNN inference jobs with key topology/aggregation metadata."""
+    result = await db.execute(
+        select(JobModel)
+        .where(JobModel.is_dnn_inference == True)
+        .order_by(JobModel.created_at.desc())
+        .limit(100)
+    )
+    jobs = result.scalars().all()
+
+    return [
+        {
+            "job_id": job.id,
+            "status": job.status,
+            "model_version_id": job.model_version_id,
+            "inference_graph_id": job.inference_graph_id,
+            "aggregation_strategy": job.aggregation_strategy,
+            "total_tasks": job.total_tasks,
+            "completed_tasks": job.completed_tasks,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+        for job in jobs
+    ]
+
+
+@router.get("/api/dnn/jobs/{job_id}/topology")
+async def get_dnn_job_topology(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Get inferred topology details for a DNN job from task metadata."""
+    job = await get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.is_dnn_inference:
+        raise HTTPException(status_code=400, detail="Job is not a DNN inference job")
+
+    result = await db.execute(select(TaskModel).where(TaskModel.job_id == job_id))
+    tasks = result.scalars().all()
+
+    import json
+
+    nodes = {}
+    edges = []
+    for task in tasks:
+        node_key = (
+            f"stage:{task.stage}|partition:{task.model_partition_id or 'unknown'}"
+        )
+        if node_key not in nodes:
+            nodes[node_key] = {
+                "node_key": node_key,
+                "stage": task.stage,
+                "model_partition_id": task.model_partition_id,
+                "topology_role": task.topology_role,
+                "device_requirements": (
+                    json.loads(task.device_requirements)
+                    if task.device_requirements
+                    else {}
+                ),
+            }
+
+        if task.feature_targets:
+            try:
+                for tgt in json.loads(task.feature_targets):
+                    edges.append({"source": node_key, "target": tgt})
+            except Exception:
+                pass
+
+    return {
+        "job_id": job_id,
+        "inference_graph_id": job.inference_graph_id,
+        "nodes": list(nodes.values()),
+        "edges": edges,
+    }
+
+
+@router.get("/api/dnn/jobs/{job_id}/aggregation")
+async def get_dnn_job_aggregation(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Preview aggregated output for a DNN job from completed task results."""
+    job = await get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.is_dnn_inference:
+        raise HTTPException(status_code=400, detail="Job is not a DNN inference job")
+
+    result = await db.execute(select(TaskModel).where(TaskModel.job_id == job_id))
+    tasks = result.scalars().all()
+
+    parsed_results = []
+    for task in tasks:
+        if not task.result:
+            continue
+        try:
+            import json
+
+            parsed_results.append(json.loads(task.result))
+        except Exception:
+            parsed_results.append(task.result)
+
+    aggregation_handler = AggregationHandler()
+    aggregated = aggregation_handler.aggregate(
+        parsed_results, strategy=job.aggregation_strategy or "average"
+    )
+
+    return {
+        "job_id": job_id,
+        "aggregation_strategy": job.aggregation_strategy or "average",
+        "raw_count": len(parsed_results),
+        "aggregated": aggregated,
+    }
+
+
+@router.get("/api/models/{model_version_id}/manifest")
+async def get_model_manifest(model_version_id: str):
+    """Return local artifact manifest for a model version."""
+    return {
+        "model_version_id": model_version_id,
+        "artifacts": list_model_manifest(model_version_id),
+    }
+
+
+@router.get("/model-artifacts/{model_version_id}/{file_name}")
+async def download_model_artifact(model_version_id: str, file_name: str):
+    """Serve model partition artifacts to workers via HTTP."""
+    artifact_path = resolve_partition_path(model_version_id, file_name)
+    if not artifact_path.exists() or not artifact_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(path=str(artifact_path), filename=artifact_path.name)
