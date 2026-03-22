@@ -1,147 +1,172 @@
-# Client Package
+# developer_sdk
 
-The `deveoper_sdk` package provides the CrowdCompute SDK for users to submit distributed computing jobs to the foreman.
+Python SDK for submitting distributed jobs to CrowdIO foreman/workers.
 
-## Overview
+This package provides:
+- async connection and job APIs
+- function shipping and remote execution
+- declarative task checkpointing via decorator metadata
+- multi-stage pipeline and DNN-topology pipeline helpers
+- tensor payload transport for intermediate DNN features
+- mobile-safe path constants for runtime path injection
 
-This package implements the client-side SDK that allows users to easily connect to a CrowdCompute foreman and submit Python functions for distributed execution across worker nodes.
-
-## Modules
-
-### `client.py`
-Main client implementation providing the CrowdCompute SDK interface.
-
-**Key Classes:**
-- `CrowdComputeClient` - Main client class for connecting to foreman
-
-**Key Methods:**
-- `connect(host, port)` - Connect to foreman server
-- `disconnect()` - Disconnect from foreman
-- `map(func, iterable)` - Map function over iterable using distributed workers
-- `run(func, *args, **kwargs)` - Run single function with arguments *(Status: Todo)*
-
-### `api.py`
-
-**Public API Functions:**
-- `connect(host, port)` - Connect to foreman
-- `disconnect()` - Disconnect from foreman
-- `map(func, iterable)` - Distributed map operation
-- `run(func, *args, **kwargs)` - Single function execution *(Status: Todo)*
-
-### `__init__.py`
-Package initialization that exports the main SDK functions.
-
-## Usage
-
-### Basic Usage
+## Quick start
 
 ```python
 import asyncio
-from api import connect, map, disconnect
+import developer_sdk as crowdio
+
+
+@crowdio.task(checkpoint=True, checkpoint_interval=5, checkpoint_state=["i", "acc"])
+def square_task(x):
+    # Worker receives plain function source; metadata is sent separately.
+    return x * x
+
 
 async def main():
-    # Connect to foreman
-    await connect("localhost", 9000)
-    
-    # Define a function to distribute
-    def square(x):
-        return x ** 2
-    
-    # Map function over data
-    numbers = [1, 2, 3, 4, 5]
-    results = await map(square, numbers)
-    print(f"Results: {results}")  # [1, 4, 9, 16, 25]
-    
-    # Disconnect
-    await disconnect()
+    await crowdio.connect("localhost", 9000)
+    try:
+        results = await crowdio.map(square_task, [1, 2, 3, 4])
+        print(results)
+    finally:
+        await crowdio.disconnect()
 
-# Run the example
+
 asyncio.run(main())
 ```
 
-### Advanced Usage *(Status: Todo)*
+## Public API
+
+Core async calls:
+- connect(host, port=9000)
+- disconnect()
+- map(func, iterable, **kwargs)
+- run(func, *args, **kwargs)
+- submit(func, iterable, **kwargs)
+- get(job_id, timeout=None)
+
+Pipeline calls:
+- pipeline(stages, dependency_map=None, **kwargs)
+- dnn_pipeline(stages, inference_graph_id, topology_nodes, topology_edges, ...)
+
+Intermediate feature routing:
+- send_intermediate_feature(job_id, task_id, target_task_id, payload, source_worker_id="sdk-client")
+- decode_intermediate_feature_payload(payload)
+
+Declarative task API:
+- task(...)
+- TaskMetadata
+- TaskConfig
+- get_task_metadata(func)
+- get_task_config(func)
+- is_checkpoint_task(func)
+- create_state_dict(checkpoint_state)
+- crowdio namespace (decorator convenience)
+
+Mobile path constants:
+- Constant.FILE_DIR
+- Constant.CACHE_DIR
+- Constant.OUTPUT_DIR
+
+Model/DNN helpers:
+- build_partition_artifact(...)
+- build_partition_artifacts(...)
+- validate_topology(...)
+- TopologyValidationError
+- serialize_tensor(...)
+- deserialize_tensor(...)
+
+## Job patterns
+
+### 1) Distributed map
 
 ```python
-import asyncio
-from api import connect, map, run, disconnect
-
-async def advanced_example():
-    await connect("192.168.1.100", 9000)
-    
-    # Complex function
-    def process_data(data):
-        import time
-        time.sleep(0.1)  # Simulate work
-        return sum(data) * 2
-    
-    # Process multiple data arrays
-    data_arrays = [
-        [1, 2, 3, 4, 5],
-        [10, 20, 30, 40, 50],
-        [100, 200, 300, 400, 500]
-    ]
-    
-    results = await map(process_data, data_arrays)
-    print(f"Processed results: {results}")
-    
-    # Single function execution
-    result = await run(lambda x: x * 10, 42)
-    print(f"Single result: {result}")  # 420
-    
-    await disconnect()
-
-asyncio.run(advanced_example())
+results = await crowdio.map(my_func, input_items)
 ```
 
-## Features
+### 2) Fire-and-fetch
 
-### Distributed Map Operation
-- Automatically splits data across available workers
-- Handles function serialization and transmission
-- Collects and returns results in order
-- Supports any JSON-serializable data
-
-### Error Handling
-- Automatic reconnection on connection loss
-- Graceful error reporting
-- Timeout handling for long-running tasks
-
-### Connection Management
-- Automatic WebSocket connection management
-- Heartbeat monitoring
-- Clean disconnection
-
-## Dependencies
-
-- `websockets` - WebSocket client for communication
-- `asyncio` - Asynchronous I/O support
-- `uuid` - Unique job ID generation
-- `common` package - Protocol and serialization utilities
-
-## Architecture
-
-```
-User Code → Client SDK → WebSocket → Foreman → Workers
+```python
+job_id = await crowdio.submit(my_func, input_items)
+results = await crowdio.get(job_id, timeout=60)
 ```
 
-1. **Job Submission** - User calls `map()` or `run()`
-2. **Function Serialization** - Function is serialized using inspect python package
-3. **Message Creation** - Job submission message is created
-4. **WebSocket Transmission** - Message sent to foreman
-5. **Result Collection** - Results collected and returned to user
+### 3) Multi-stage pipeline
 
-## Error Handling
+```python
+stages = [
+    {"func": stage1, "args_list": raw_items, "name": "preprocess"},
+    {
+        "func": stage2,
+        "args_list": [None] * len(raw_items),
+        "pass_upstream_results": True,
+        "name": "compute",
+    },
+]
+results = await crowdio.pipeline(stages)
+```
 
-The client handles various error scenarios:
-- **Connection Errors** - Automatic retry with exponential backoff
-- **Job Failures** - Exceptions are propagated to user code
-- **Worker Failures** - Foreman automatically reassigns failed tasks
-- **Network Issues** - Graceful degradation and error reporting
+## Checkpointing model
 
-## Best Practices
+Use the task decorator to attach metadata. The SDK extracts that metadata and sends it with job submission.
 
-1. **Always disconnect** - Use `await disconnect()` when done
-2. **Handle exceptions** - Wrap calls in try-catch blocks
-3. **Use async/await** - All operations are asynchronous
-4. **Keep functions simple** - Complex functions may have serialization issues
-5. **Monitor performance** - Use timing to optimize task distribution
+```python
+@crowdio.task(
+    checkpoint=True,
+    checkpoint_interval=10,
+    checkpoint_state=["i", "partial_sum", "progress_percent"],
+    retry_on_failure=True,
+    max_retries=3,
+)
+def heavy_task(data):
+    return sum(data)
+```
+
+Notes:
+- checkpoint_state controls which variables are persisted (or all state when omitted).
+- kwargs passed to map/submit can override decorator defaults (for example checkpoint_interval).
+
+## Mobile path abstraction
+
+Use Constant values in task configs instead of hardcoded device paths. Mobile runtimes can resolve these symbols to platform-specific paths.
+
+```python
+from developer_sdk import Constant
+
+output_target = Constant.OUTPUT_DIR
+cache_target = Constant.CACHE_DIR
+```
+
+## DNN feature transport
+
+When payload includes numpy arrays, SDK can encode/decode tensors for transport:
+
+```python
+from developer_sdk import serialize_tensor, deserialize_tensor
+```
+
+For runtime message routing in DNN flows:
+
+```python
+await crowdio.send_intermediate_feature(
+    job_id=job_id,
+    task_id="stage-a:0",
+    target_task_id="stage-b:0",
+    payload=feature_tensor,
+)
+```
+
+## Image utilities
+
+The image_utils subpackage includes reusable helpers for distributed image workflows:
+- split_image_into_tiles / split_image_into_grid / split_image_into_strips
+- reassemble_tiles / reassemble_strips / merge_results
+- apply_filter
+- encode_image / decode_image
+- load_image / save_image / get_image_info
+
+## Notes and limitations
+
+- APIs are async and require an event loop.
+- Task functions are source-serialized; keep them import-safe and deterministic.
+- dnn_pipeline validates topology and raises TopologyValidationError for invalid graphs.

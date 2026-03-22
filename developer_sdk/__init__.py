@@ -42,7 +42,13 @@ from .api import (
     create_state_dict,
     Constant,
     crowdio,
+    dnn_pipeline,
+    send_intermediate_feature,
+    decode_intermediate_feature_payload,
 )
+from .tensor_transport import serialize_tensor, deserialize_tensor
+from .topology import validate_topology, TopologyValidationError
+from .model_artifacts import build_partition_artifact, build_partition_artifacts
 
 __version__ = "0.2.0"
 __all__ = [
@@ -55,6 +61,9 @@ __all__ = [
     "get",
     "submit",
     "pipeline",
+    "dnn_pipeline",
+    "send_intermediate_feature",
+    "decode_intermediate_feature_payload",
     # Declarative Checkpointing API
     "task",
     "TaskMetadata",
@@ -65,4 +74,10 @@ __all__ = [
     "create_state_dict",
     "Constant",
     "crowdio",
+    "serialize_tensor",
+    "deserialize_tensor",
+    "build_partition_artifact",
+    "build_partition_artifacts",
+    "validate_topology",
+    "TopologyValidationError",
 ]

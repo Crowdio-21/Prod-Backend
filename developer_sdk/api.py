@@ -10,6 +10,7 @@ from .decorators import (
     crowdio,
 )
 from .constants import Constant
+from .model_artifacts import build_partition_artifact, build_partition_artifacts
 from typing import Any, Callable, List, Optional, Dict
 
 # Global client instance
@@ -24,6 +25,11 @@ __all__ = [
     "get",
     "submit",
     "pipeline",
+    "dnn_pipeline",
+    "send_intermediate_feature",
+    "decode_intermediate_feature_payload",
+    "build_partition_artifact",
+    "build_partition_artifacts",
     "task",
     "TaskMetadata",
     "TaskConfig",
@@ -155,3 +161,55 @@ async def pipeline(
         ])
     """
     return await _client.pipeline(stages, dependency_map=dependency_map, **kwargs)
+
+
+async def dnn_pipeline(
+    stages: List[Dict],
+    inference_graph_id: str,
+    topology_nodes: List[Dict],
+    topology_edges: List[Dict],
+    model_version_id: Optional[str] = None,
+    model_artifacts: Optional[List[Dict]] = None,
+    aggregation_strategy: str = "average",
+    dependency_map: Optional[Dict[str, List[str]]] = None,
+    **kwargs,
+) -> List[Any]:
+    """
+    Execute a topology-aware DNN pipeline on distributed workers.
+
+    This is the DNN-oriented variant of pipeline() and includes explicit
+    graph/topology metadata consumed by the foreman.
+    """
+    return await _client.dnn_pipeline(
+        stages=stages,
+        inference_graph_id=inference_graph_id,
+        topology_nodes=topology_nodes,
+        topology_edges=topology_edges,
+        model_version_id=model_version_id,
+        model_artifacts=model_artifacts,
+        aggregation_strategy=aggregation_strategy,
+        dependency_map=dependency_map,
+        **kwargs,
+    )
+
+
+async def send_intermediate_feature(
+    job_id: str,
+    task_id: str,
+    target_task_id: str,
+    payload: Any,
+    source_worker_id: str = "sdk-client",
+) -> None:
+    """Send an intermediate feature payload to foreman for DNN routing."""
+    await _client.send_intermediate_feature(
+        job_id=job_id,
+        task_id=task_id,
+        target_task_id=target_task_id,
+        payload=payload,
+        source_worker_id=source_worker_id,
+    )
+
+
+def decode_intermediate_feature_payload(payload: Any) -> Any:
+    """Decode SDK tensor-aware payloads into original objects/tensors."""
+    return _client.decode_intermediate_feature_payload(payload)

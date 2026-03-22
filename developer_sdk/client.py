@@ -10,6 +10,7 @@ from common.protocol import (
     create_submit_pipeline_job_message,
     create_ping_message,
     create_pong_message,
+    create_intermediate_feature_message,
 )
 from common.serializer import serialize_function
 from common.code_instrumenter import (
@@ -17,6 +18,13 @@ from common.code_instrumenter import (
     generate_task_control_wrapper,
 )
 from .decorators import get_task_metadata, TaskMetadata
+from .topology import validate_topology
+from .tensor_transport import serialize_tensor, deserialize_tensor
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - numpy may be unavailable in minimal envs
+    np = None
 
 
 class CrowdComputeClient:
@@ -111,6 +119,36 @@ class CrowdComputeClient:
         except Exception as e:
             print(f"Error handling message: {e}")
 
+    def _encode_feature_payload(self, payload: Any) -> Dict[str, Any]:
+        """Encode feature payload and serialize numpy arrays when present."""
+
+        if np is not None and isinstance(payload, np.ndarray):
+            return {
+                "transport": "tensor_transport",
+                "tensor": serialize_tensor(payload),
+            }
+
+        if isinstance(payload, dict):
+            return {k: self._encode_feature_payload(v) for k, v in payload.items()}
+
+        if isinstance(payload, list):
+            return [self._encode_feature_payload(v) for v in payload]
+
+        return payload
+
+    def _decode_feature_payload(self, payload: Any) -> Any:
+        """Decode feature payload and materialize serialized tensors."""
+
+        if isinstance(payload, dict):
+            if payload.get("transport") == "tensor_transport" and "tensor" in payload:
+                return deserialize_tensor(payload["tensor"])
+            return {k: self._decode_feature_payload(v) for k, v in payload.items()}
+
+        if isinstance(payload, list):
+            return [self._decode_feature_payload(v) for v in payload]
+
+        return payload
+
     async def map(self, func: Callable, iterable: List[Any], **kwargs) -> List[Any]:
         """
         Map function over iterable using distributed workers
@@ -194,7 +232,7 @@ class CrowdComputeClient:
                     f"[SDK] Task control: instrumented {num_funcs} functions, "
                     f"{num_ctrl_loops} loops"
                 )
-                
+
             # Create submission message with metadata
             message = self._create_submit_job_message_with_metadata(
                 func_code, iterable, job_id, task_metadata
@@ -383,6 +421,7 @@ class CrowdComputeClient:
         self,
         stages: List[Dict[str, Any]],
         dependency_map: Optional[Dict[str, List[str]]] = None,
+        dnn_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> List[Any]:
         """
@@ -461,15 +500,17 @@ class CrowdComputeClient:
                 if metadata:
                     task_meta_dict = metadata.to_dict()
 
-                stage_defs.append({
-                    "func_code": func_code,
-                    "args_list": args_list,
-                    "pass_upstream_results": stage_def.get(
-                        "pass_upstream_results", False
-                    ),
-                    "task_metadata": task_meta_dict,
-                    "name": stage_def.get("name", func.__name__),
-                })
+                stage_defs.append(
+                    {
+                        "func_code": func_code,
+                        "args_list": args_list,
+                        "pass_upstream_results": stage_def.get(
+                            "pass_upstream_results", False
+                        ),
+                        "task_metadata": task_meta_dict,
+                        "name": stage_def.get("name", func.__name__),
+                    }
+                )
 
             # Global task metadata from kwargs
             global_meta = None
@@ -486,6 +527,7 @@ class CrowdComputeClient:
                 stages=stage_defs,
                 dependency_map=dependency_map,
                 task_metadata=global_meta,
+                dnn_config=dnn_config,
             )
 
             self._submitted_jobs[job_id] = {
@@ -514,6 +556,80 @@ class CrowdComputeClient:
             raise
 
     async def run(self, func: Callable, *args, **kwargs) -> Any:
-        """Run a single function with arguments in one worker"""
-        # Like AWS lambda
-        pass
+        """Run a single function with arguments in one worker."""
+        # Reuse map() flow for consistency with metadata/checkpoint handling.
+        task_payload: Any = args
+        call_kwargs = dict(kwargs)
+        if call_kwargs:
+            task_payload = [list(args), call_kwargs]
+
+        results = await self.map(func, [task_payload])
+        if not results:
+            return None
+        return results[0]
+
+    async def dnn_pipeline(
+        self,
+        stages: List[Dict[str, Any]],
+        inference_graph_id: str,
+        topology_nodes: List[Dict[str, Any]],
+        topology_edges: List[Dict[str, Any]],
+        model_version_id: Optional[str] = None,
+        model_artifacts: Optional[List[Dict[str, Any]]] = None,
+        aggregation_strategy: str = "average",
+        dependency_map: Optional[Dict[str, List[str]]] = None,
+        **kwargs,
+    ) -> List[Any]:
+        """
+        Submit a topology-aware DNN pipeline job.
+
+        This wraps pipeline() and attaches dnn_config so foreman can route the
+        request through DNN-aware job creation and topology validation.
+        """
+        validate_topology(
+            stages=stages,
+            topology_nodes=topology_nodes,
+            topology_edges=topology_edges,
+        )
+
+        dnn_config = {
+            "inference_graph_id": inference_graph_id,
+            "topology_nodes": topology_nodes,
+            "topology_edges": topology_edges,
+            "model_version_id": model_version_id,
+            "model_artifacts": model_artifacts or [],
+            "aggregation_strategy": aggregation_strategy,
+        }
+        return await self.pipeline(
+            stages=stages,
+            dependency_map=dependency_map,
+            dnn_config=dnn_config,
+            **kwargs,
+        )
+
+    async def send_intermediate_feature(
+        self,
+        job_id: str,
+        task_id: str,
+        target_task_id: str,
+        payload: Any,
+        source_worker_id: str = "sdk-client",
+    ) -> None:
+        """Send intermediate feature payload to foreman with tensor-aware encoding."""
+        if not self.connected:
+            raise RuntimeError("Not connected to foreman. Call connect() first.")
+
+        encoded_payload = self._encode_feature_payload(payload)
+        message = create_intermediate_feature_message(
+            job_id=job_id,
+            task_id=task_id,
+            source_worker_id=source_worker_id,
+            target_task_id=target_task_id,
+            payload=encoded_payload,
+            payload_format="json",
+        )
+        await self.websocket.send(message.to_json())
+
+    def decode_intermediate_feature_payload(self, payload: Any) -> Any:
+        """Public helper for decoding tensor-aware intermediate feature payloads."""
+        return self._decode_feature_payload(payload)
