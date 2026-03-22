@@ -29,8 +29,18 @@ class JobModel(Base):
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     supports_checkpointing = Column(Boolean, default=False)
-    is_pipeline = Column(Boolean, default=False)  # Whether this is a pipeline job with dependent stages
+    is_pipeline = Column(
+        Boolean, default=False
+    )  # Whether this is a pipeline job with dependent stages
     total_stages = Column(Integer, default=1)  # Number of pipeline stages
+    is_dnn_inference = Column(
+        Boolean, default=False
+    )  # Whether this is a DNN topology-driven job
+    model_version_id = Column(String, nullable=True)  # Logical model/version identifier
+    inference_graph_id = Column(String, nullable=True)  # Topology graph identifier
+    aggregation_strategy = Column(
+        String, nullable=True
+    )  # average, weighted_sum, voting, etc.
     # serialized code could be added here if needed
     # arguments for the job could be added here if needed
 
@@ -58,20 +68,47 @@ class TaskModel(Base):
         Text, nullable=True
     )  # Storage reference (fs_path or db_id)
     base_checkpoint_size = Column(Integer, default=0)  # Bytes of base checkpoint
-    base_checkpoint_blob = Column(LargeBinary, nullable=True)  # Small base checkpoint data (<1MB)
+    base_checkpoint_blob = Column(
+        LargeBinary, nullable=True
+    )  # Small base checkpoint data (<1MB)
     delta_checkpoints = Column(Text, nullable=True)  # JSON array of delta checkpoints
-    delta_checkpoint_blobs = Column(Text, nullable=True)  # JSON map of delta_id -> base64 encoded blob
+    delta_checkpoint_blobs = Column(
+        Text, nullable=True
+    )  # JSON map of delta_id -> base64 encoded blob
     last_checkpoint_at = Column(DateTime, nullable=True)
     progress_percent = Column(Float, default=0.0)  # Task progress 0-100
     checkpoint_count = Column(Integer, default=0)  # Number of checkpoints taken
-    checkpoint_storage_path = Column(String, nullable=True)  # Path if stored externally or 'db' if in blob
+    checkpoint_storage_path = Column(
+        String, nullable=True
+    )  # Path if stored externally or 'db' if in blob
 
     # Pipeline / Dependency fields
     stage = Column(Integer, default=0)  # Pipeline stage number (0 = first stage)
-    dependency_count = Column(Integer, default=0)  # Number of unmet upstream dependencies
-    depends_on = Column(Text, nullable=True)  # JSON list of task IDs this task depends on
-    dependents = Column(Text, nullable=True)  # JSON list of task IDs that depend on this task
-    stage_func_code = Column(Text, nullable=True)  # Per-stage function code (if different from job-level)
+    dependency_count = Column(
+        Integer, default=0
+    )  # Number of unmet upstream dependencies
+    depends_on = Column(
+        Text, nullable=True
+    )  # JSON list of task IDs this task depends on
+    dependents = Column(
+        Text, nullable=True
+    )  # JSON list of task IDs that depend on this task
+    stage_func_code = Column(
+        Text, nullable=True
+    )  # Per-stage function code (if different from job-level)
+    topology_role = Column(String, nullable=True)  # source, intermediate, sink
+    feature_sources = Column(
+        Text, nullable=True
+    )  # JSON list of upstream topology node/task IDs
+    feature_targets = Column(
+        Text, nullable=True
+    )  # JSON list of downstream topology node/task IDs
+    device_requirements = Column(
+        Text, nullable=True
+    )  # JSON constraints for scheduler (RAM/runtime/etc.)
+    model_partition_id = Column(
+        String, nullable=True
+    )  # CellNet/chunk identifier for this task
 
     # Relationships
     job = relationship("JobModel", back_populates="tasks")
@@ -104,6 +141,8 @@ class WorkerModel(Base):
     is_charging = Column(Boolean, nullable=True)
     network_type = Column(String, nullable=True)  # WiFi, Cellular, Ethernet
     python_version = Column(String, nullable=True)
+    runtime = Column(String, nullable=True)  # python, kotlin, chaquopy, etc.
+    model_runtime = Column(String, nullable=True)  # tflite, onnx, torch_mobile, etc.
 
     # MCDM Performance Metrics (added for intelligent task allocation)
     cpu_usage_percent = Column(Float, nullable=True)  # Current CPU usage (0-100)

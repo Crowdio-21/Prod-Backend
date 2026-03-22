@@ -8,13 +8,13 @@ from .models import *
 
 
 async def create_job(
-    session: AsyncSession, 
-    job_id: str, 
+    session: AsyncSession,
+    job_id: str,
     total_tasks: int,
-    supports_checkpointing: bool = False
+    supports_checkpointing: bool = False,
 ) -> JobModel:
     """Create a new job
-    
+
     Args:
         session: Database session
         job_id: Unique job identifier
@@ -22,9 +22,9 @@ async def create_job(
         supports_checkpointing: Whether this job supports declarative checkpointing
     """
     job = JobModel(
-        id=job_id, 
+        id=job_id,
         total_tasks=total_tasks,
-        supports_checkpointing=supports_checkpointing
+        supports_checkpointing=supports_checkpointing,
     )
     session.add(job)
     await session.commit()
@@ -41,36 +41,42 @@ async def create_task(session: AsyncSession, task_id: str, job_id: str) -> TaskM
     return task
 
 
-async def create_worker(session: AsyncSession, worker_id: str, device_specs: dict = None) -> WorkerModel:
+async def create_worker(
+    session: AsyncSession, worker_id: str, device_specs: dict = None
+) -> WorkerModel:
     """
     Create a new worker with optional device specifications
-    
+
     Args:
         session: Database session
         worker_id: Worker identifier
         device_specs: Optional dictionary with device specifications
     """
     worker_data = {"id": worker_id}
-    
+
     # Add device specs if provided
     if device_specs:
-        worker_data.update({
-            "device_type": device_specs.get("device_type"),
-            "os_type": device_specs.get("os_type"),
-            "os_version": device_specs.get("os_version"),
-            "cpu_model": device_specs.get("cpu_model"),
-            "cpu_cores": device_specs.get("cpu_cores"),
-            "cpu_threads": device_specs.get("cpu_threads"),
-            "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
-            "ram_total_mb": device_specs.get("ram_total_mb"),
-            "ram_available_mb": device_specs.get("ram_available_mb"),
-            "gpu_model": device_specs.get("gpu_model"),
-            "battery_level": device_specs.get("battery_level"),
-            "is_charging": device_specs.get("is_charging"),
-            "network_type": device_specs.get("network_type"),
-            "python_version": device_specs.get("python_version"),
-        })
-    
+        worker_data.update(
+            {
+                "device_type": device_specs.get("device_type"),
+                "os_type": device_specs.get("os_type"),
+                "os_version": device_specs.get("os_version"),
+                "cpu_model": device_specs.get("cpu_model"),
+                "cpu_cores": device_specs.get("cpu_cores"),
+                "cpu_threads": device_specs.get("cpu_threads"),
+                "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
+                "ram_total_mb": device_specs.get("ram_total_mb"),
+                "ram_available_mb": device_specs.get("ram_available_mb"),
+                "gpu_model": device_specs.get("gpu_model"),
+                "battery_level": device_specs.get("battery_level"),
+                "is_charging": device_specs.get("is_charging"),
+                "network_type": device_specs.get("network_type"),
+                "python_version": device_specs.get("python_version"),
+                "runtime": device_specs.get("runtime"),
+                "model_runtime": device_specs.get("model_runtime"),
+            }
+        )
+
     worker = WorkerModel(**worker_data)
     session.add(worker)
     await session.commit()
@@ -78,10 +84,12 @@ async def create_worker(session: AsyncSession, worker_id: str, device_specs: dic
     return worker
 
 
-async def update_worker_device_specs(session: AsyncSession, worker_id: str, device_specs: dict):
+async def update_worker_device_specs(
+    session: AsyncSession, worker_id: str, device_specs: dict
+):
     """
     Update worker device specifications
-    
+
     Args:
         session: Database session
         worker_id: Worker identifier
@@ -102,9 +110,11 @@ async def update_worker_device_specs(session: AsyncSession, worker_id: str, devi
         "is_charging": device_specs.get("is_charging"),
         "network_type": device_specs.get("network_type"),
         "python_version": device_specs.get("python_version"),
+        "runtime": device_specs.get("runtime"),
+        "model_runtime": device_specs.get("model_runtime"),
         "connected_at": datetime.now(),
     }
-    
+
     stmt = update(WorkerModel).where(WorkerModel.id == worker_id).values(**update_data)
     await session.execute(stmt)
     await session.commit()
@@ -146,20 +156,20 @@ async def delete_worker(session: AsyncSession, worker_id: str) -> bool:
 async def clear_database(session: AsyncSession) -> dict:
     """Clear all workers, jobs, tasks, and worker failures from the database"""
     from sqlalchemy import delete as sql_delete
-    
+
     # Delete in order to respect foreign key constraints
     worker_failures_result = await session.execute(sql_delete(WorkerFailureModel))
     tasks_result = await session.execute(sql_delete(TaskModel))
     jobs_result = await session.execute(sql_delete(JobModel))
     workers_result = await session.execute(sql_delete(WorkerModel))
-    
+
     await session.commit()
-    
+
     return {
         "workers_deleted": workers_result.rowcount,
         "jobs_deleted": jobs_result.rowcount,
         "tasks_deleted": tasks_result.rowcount,
-        "worker_failures_deleted": worker_failures_result.rowcount
+        "worker_failures_deleted": worker_failures_result.rowcount,
     }
 
 
@@ -334,7 +344,7 @@ async def record_worker_failure(
     latest_checkpoint_data: Optional[str] = None,
 ) -> None:
     """Insert a worker failure record
-    
+
     Args:
         session: Database session
         worker_id: Worker identifier
@@ -411,14 +421,14 @@ async def get_latest_task_failure_with_checkpoint(
 ) -> Optional[WorkerFailureModel]:
     """
     Get the most recent failure record for a task that has checkpoint data.
-    
+
     This is used when reassigning orphaned tasks to determine if we can
     resume from a checkpoint instead of starting from scratch.
-    
+
     Args:
         session: Database session
         task_id: Task identifier
-        
+
     Returns:
         WorkerFailureModel with checkpoint data, or None if not found
     """
@@ -489,7 +499,7 @@ async def get_pending_tasks(
     query = select(TaskModel).where(TaskModel.status == "pending")
     if job_id:
         query = query.where(TaskModel.job_id == job_id)
-    
+
     # Order by task ID to ensure sequential processing
     query = query.order_by(TaskModel.id)
 
@@ -504,7 +514,7 @@ async def get_assigned_tasks(
     query = select(TaskModel).where(TaskModel.status == "assigned")
     if job_id:
         query = query.where(TaskModel.job_id == job_id)
-    
+
     query = query.order_by(TaskModel.id)
     result = await session.execute(query)
     return result.scalars().all()
@@ -517,12 +527,17 @@ async def get_job_by_id(session: AsyncSession, job_id: str) -> Optional[JobModel
 
 # ==================== Pipeline / Dependency Operations ====================
 
+
 async def create_pipeline_job(
     session: AsyncSession,
     job_id: str,
     total_tasks: int,
     total_stages: int,
     supports_checkpointing: bool = False,
+    is_dnn_inference: bool = False,
+    model_version_id: Optional[str] = None,
+    inference_graph_id: Optional[str] = None,
+    aggregation_strategy: Optional[str] = None,
 ) -> JobModel:
     """Create a pipeline job with multiple stages
 
@@ -539,6 +554,10 @@ async def create_pipeline_job(
         is_pipeline=True,
         total_stages=total_stages,
         supports_checkpointing=supports_checkpointing,
+        is_dnn_inference=is_dnn_inference,
+        model_version_id=model_version_id,
+        inference_graph_id=inference_graph_id,
+        aggregation_strategy=aggregation_strategy,
     )
     session.add(job)
     await session.commit()
@@ -671,9 +690,7 @@ async def get_blocked_tasks(
     return result.scalars().all()
 
 
-async def update_task_args(
-    session: AsyncSession, task_id: str, args: str
-) -> bool:
+async def update_task_args(session: AsyncSession, task_id: str, args: str) -> bool:
     """Update task arguments (used to inject upstream results into downstream tasks)
 
     Args:

@@ -27,13 +27,34 @@ async_session = AsyncSessionLocal
 Base = declarative_base()
 
 
+SQLITE_COLUMN_MIGRATIONS = {
+    "jobs": [
+        ("is_dnn_inference", "INTEGER DEFAULT 0"),
+        ("model_version_id", "TEXT"),
+        ("inference_graph_id", "TEXT"),
+        ("aggregation_strategy", "TEXT"),
+    ],
+    "tasks": [
+        ("topology_role", "TEXT"),
+        ("feature_sources", "TEXT"),
+        ("feature_targets", "TEXT"),
+        ("device_requirements", "TEXT"),
+        ("model_partition_id", "TEXT"),
+    ],
+    "workers": [
+        ("runtime", "TEXT"),
+        ("model_runtime", "TEXT"),
+    ],
+}
+
+
 def _sqlite_file_path() -> str:
     """Resolve filesystem path for the configured SQLite database."""
     prefix = "sqlite+aiosqlite:///"
     if not DATABASE_URL.startswith(prefix):
         return ""
 
-    raw = DATABASE_URL[len(prefix):]
+    raw = DATABASE_URL[len(prefix) :]
     if raw.startswith("./"):
         raw = os.path.join(os.getcwd(), raw[2:])
     return os.path.abspath(raw)
@@ -51,10 +72,7 @@ def _quarantine_corrupt_db(db_path: str, reason: str) -> str:
         if os.path.exists(sidecar_path):
             os.remove(sidecar_path)
 
-    print(
-        f"⚠️  Corrupt SQLite DB detected ({reason}). "
-        f"Moved to: {backup_path}"
-    )
+    print(f"⚠️  Corrupt SQLite DB detected ({reason}). " f"Moved to: {backup_path}")
     print("🛠️  A fresh database will be created automatically.")
     return backup_path
 
@@ -95,6 +113,25 @@ def ensure_sqlite_integrity() -> bool:
         return False
 
 
+async def _apply_sqlite_column_migrations(conn) -> None:
+    """Apply additive SQLite column migrations for existing databases."""
+    for table_name, columns in SQLITE_COLUMN_MIGRATIONS.items():
+        table_info = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        existing_cols = {
+            row[1] for row in table_info.fetchall()
+        }  # row[1] == column name
+
+        for column_name, column_ddl in columns:
+            if column_name in existing_cols:
+                continue
+            await conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}"
+            )
+            print(
+                f"🧩 Applied SQLite migration: added {table_name}.{column_name} ({column_ddl})"
+            )
+
+
 # Database functions
 async def get_db():
     """Get database session"""
@@ -129,6 +166,7 @@ async def init_db():
                 await conn.exec_driver_sql("PRAGMA busy_timeout = 30000")
                 await conn.exec_driver_sql("PRAGMA journal_mode = WAL")
                 await conn.run_sync(Base.metadata.create_all)
+                await _apply_sqlite_column_migrations(conn)
             return
         except OperationalError as exc:
             msg = str(exc).lower()
