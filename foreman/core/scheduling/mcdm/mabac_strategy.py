@@ -13,6 +13,8 @@ class MABACStrategy(AllocationStrategy):
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
+        # Impute missing values for fairness
+        decision_matrix = self._impute_missing(decision_matrix, criteria_types)
         """
         Rank devices using MABAC algorithm with Dynamic Weighting
         """
