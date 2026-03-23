@@ -13,6 +13,8 @@ class WRRStrategy(AllocationStrategy):
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
+        # Impute missing values for fairness
+        decision_matrix = self._impute_missing(decision_matrix, criteria_types)
         """
         Rank devices using simple weighted sum with Dynamic Weighting
         """
@@ -34,6 +36,15 @@ class WRRStrategy(AllocationStrategy):
                     inverted = max_val - decision_matrix[:, j]
                     weighted_scores += inverted * active_weights[j]
                 # If max is 0 (all zeros), cost contribution is 0
+
+            # Log normalized values for each worker and criterion
+            import logging
+            logger = logging.getLogger("mcdm_scheduler")
+            logger.debug("Normalized values (WRR):")
+            for i in range(rows):
+                logger.debug(f"  Worker {i}:")
+                for j in range(cols):
+                    logger.debug(f"    Criterion {j}: {decision_matrix[i, j]:.4f}")
 
         self._last_scores = weighted_scores
 

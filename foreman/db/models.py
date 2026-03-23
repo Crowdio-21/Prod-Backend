@@ -88,6 +88,7 @@ class WorkerModel(Base):
     current_task_id = Column(String, nullable=True)
     total_tasks_completed = Column(Integer, default=0)
     total_tasks_failed = Column(Integer, default=0)
+    total_tasks_assigned = Column(Integer, default=0)  # Total tasks assigned to this worker
 
     # Device specifications
     device_type = Column(String, nullable=True)  # PC or Android

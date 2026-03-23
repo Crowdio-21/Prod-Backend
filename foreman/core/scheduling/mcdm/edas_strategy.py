@@ -13,6 +13,8 @@ class EDASStrategy(AllocationStrategy):
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
+        # Impute missing values for fairness
+        decision_matrix = self._impute_missing(decision_matrix, criteria_types)
         """
         Rank devices using EDAS algorithm with Dynamic Weighting
         """
@@ -50,6 +52,14 @@ class EDASStrategy(AllocationStrategy):
 
         nsp = sp / max_sp
         nsn = 1 - (sn / max_sn)
+
+            # Log normalized values for each worker and criterion
+        import logging
+        logger = logging.getLogger("mcdm_scheduler")
+        logger.debug("Normalized values (EDAS):")
+        for i in range(rows):
+            logger.debug(f"  Worker {i}:")
+            logger.debug(f"    NSP: {nsp[i]:.4f}, NSN: {nsn[i]:.4f}")
 
         # 5. Appraisal Score (AS)
         as_score = 0.5 * (nsp + nsn)

@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger("mcdm_scheduler")
 """
 ARAS (Additive Ratio Assessment) Strategy
 """
@@ -13,6 +15,8 @@ class ARASStrategy(AllocationStrategy):
     """
 
     def rank_devices(self, decision_matrix, criteria_types):
+        # Impute missing values for fairness
+        decision_matrix = self._impute_missing(decision_matrix, criteria_types)
         """
         Rank devices using ARAS algorithm with Dynamic Weighting
         """
@@ -48,6 +52,13 @@ class ARASStrategy(AllocationStrategy):
         # Standardize to sum to 1 column-wise
         col_sums = np.sum(norm_matrix, axis=0)
         final_norm = norm_matrix / (col_sums + 1e-9)
+
+        # Log normalized values for each worker and criterion
+        logger.debug("Normalized values (ARAS):")
+        for i in range(final_norm.shape[0]):
+            logger.debug(f"  Worker {i}:")
+            for j in range(final_norm.shape[1]):
+                logger.debug(f"    Criterion {j}: {final_norm[i, j]:.4f}")
 
         # 3. Weighted Matrix & Optimality Function (Si)
         # USES ACTIVE WEIGHTS HERE

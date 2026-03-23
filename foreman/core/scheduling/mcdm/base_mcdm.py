@@ -17,7 +17,7 @@ from .base_strategy import AllocationStrategy
 
 # Configure MCDM-specific logger
 logger = logging.getLogger("mcdm_scheduler")
-logger.setLevel(logging.CRITICAL)
+logger.setLevel(logging.DEBUG)
 
 # Create logs directory if it doesn't exist
 log_dir = Path("logs")
@@ -25,11 +25,11 @@ log_dir.mkdir(exist_ok=True)
 
 # File handler for MCDM decisions
 file_handler = logging.FileHandler(log_dir / "mcdm_decisions.log")
-file_handler.setLevel(logging.CRITICAL)
+file_handler.setLevel(logging.DEBUG)
 
 # Console handler for important info
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.CRITICAL)
+console_handler.setLevel(logging.DEBUG)
 
 # Detailed formatter
 formatter = logging.Formatter(
@@ -70,6 +70,13 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         """
         self.strategy = strategy
         self.criteria_weights = np.array(criteria_weights)
+        # Ensure these three parameters are always present in the criteria_names list:
+        #   'battery_level', 'ram_available_mb', 'success_rate'
+        # You may add more, but these must be included for correct logging and matrix construction.
+        required_criteria = ["battery_level", "ram_available_mb", "success_rate"]
+        for rc in required_criteria:
+            if rc not in criteria_names:
+                criteria_names.append(rc)
         self.criteria_names = criteria_names
         self.criteria_types = criteria_types
 
@@ -115,7 +122,7 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         self, workers: Dict[str, Worker]
     ) -> tuple[np.ndarray, List[str]]:
         """
-        Build decision matrix from worker objects
+        Build decision matrix from worker objects, including derived context-aware features.
 
         Args:
             workers: Dictionary of Worker objects {worker_id: Worker}
@@ -125,6 +132,8 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
             - decision_matrix: (n_workers × m_criteria) numpy array
             - worker_ids: List of worker IDs corresponding to matrix rows
         """
+        import math
+        from datetime import datetime, timezone
         if not workers:
             return np.array([]), []
 
@@ -132,26 +141,93 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
         n_workers = len(worker_ids)
         n_criteria = len(self.criteria_names)
 
+        # Helper lambdas for derived features
+        def availability_score(w):
+            now = datetime.now(timezone.utc)
+            first = getattr(w, 'first_connected_at', None)
+            connected = getattr(w, 'connected_at', None)
+            disconnected = getattr(w, 'disconnected_at', None)
+            if not first:
+                return 0.0
+            total_observed = (now - first).total_seconds() if first else 0.0
+            if not connected:
+                return 0.0
+            if disconnected:
+                connected_time = (disconnected - connected).total_seconds()
+            else:
+                connected_time = (now - connected).total_seconds()
+            if total_observed <= 0:
+                return 0.0
+            return max(0.0, min(1.0, connected_time / total_observed))
+
+        def recency_score(w, lam=0.01):
+            now = datetime.now(timezone.utc)
+            last_seen = getattr(w, 'last_seen', None)
+            if not last_seen:
+                return 0.0
+            delta = (now - last_seen).total_seconds()
+            try:
+                return float(math.exp(-lam * delta))
+            except Exception:
+                return 0.0
+
+        def compute_power_score(w):
+            cpu_cores = getattr(w, 'cpu_cores', None)
+            cpu_freq = getattr(w, 'cpu_frequency_mhz', None)
+            try:
+                return float(cpu_cores or 0) * float(cpu_freq or 0)
+            except Exception:
+                return 0.0
+
+        def task_efficiency(w):
+            completed = getattr(w, 'total_tasks_completed', 0)
+            failed = getattr(w, 'total_tasks_failed', 0)
+            avg_time = getattr(w, 'avg_task_duration_sec', None)
+            total = (completed or 0) + (failed or 0)
+            if total == 0 or not avg_time or avg_time == 0:
+                return 0.0
+            success_rate = completed / total
+            try:
+                return float(success_rate) / float(avg_time)
+            except Exception:
+                return 0.0
+
+        def load_score(w):
+            cpu_cores = getattr(w, 'cpu_cores', None)
+            current_task_id = getattr(w, 'current_task_id', None)
+            current_tasks = 1 if current_task_id else 0
+            try:
+                if cpu_cores and cpu_cores > 0:
+                    return float(current_tasks) / float(cpu_cores)
+                else:
+                    return float(current_tasks)
+            except Exception:
+                return 0.0
+
+        derived_map = {
+            'availability_score': availability_score,
+            'recency_score': recency_score,
+            'compute_power_score': compute_power_score,
+            'task_efficiency': task_efficiency,
+            'load_score': load_score,
+        }
+
         # Initialize matrix
         matrix = np.zeros((n_workers, n_criteria))
 
-        # Fill matrix with worker data
+        # Fill matrix with worker data or derived features
         for i, worker_id in enumerate(worker_ids):
             worker = workers[worker_id]
-
             for j, criterion in enumerate(self.criteria_names):
-                # Get value from worker object
-                value = getattr(worker, criterion, 0.0)
-
-                # Handle None values
-                if value is None:
-                    value = 0.0
-
-                # Handle boolean values
-                if isinstance(value, bool):
-                    value = 1.0 if value else 0.0
-
-                # Convert to float
+                if criterion in derived_map:
+                    value = derived_map[criterion](worker)
+                    logger.debug(f"[Derived] {criterion} for {worker_id}: {value}")
+                else:
+                    value = getattr(worker, criterion, 0.0)
+                    if value is None:
+                        value = 0.0
+                    if isinstance(value, bool):
+                        value = 1.0 if value else 0.0
                 try:
                     matrix[i, j] = float(value)
                 except (TypeError, ValueError):
@@ -160,7 +236,7 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
                         f"Could not convert {criterion}={value} to float for worker {worker_id}"
                     )
 
-        # Log the decision matrix
+        # Log the decision matrix, highlighting the required parameters
         logger.debug(
             f"\nDecision Matrix ({n_workers} workers × {n_criteria} criteria):"
         )
@@ -171,7 +247,8 @@ class BaseMCDMScheduler(TaskScheduler, ABC):
             logger.debug(f"  {worker_id}:")
             for j, criterion in enumerate(self.criteria_names):
                 criterion_type = "BENEFIT" if self.criteria_types[j] == 1 else "COST"
-                logger.debug(f"    {criterion} = {matrix[i, j]:.4f} ({criterion_type})")
+                highlight = " <==" if criterion in ["battery_level", "ram_available_mb", "success_rate"] else ""
+                logger.debug(f"    {criterion} = {matrix[i, j]:.4f} ({criterion_type}){highlight}")
 
         return matrix, worker_ids
 

@@ -264,6 +264,17 @@ async def update_worker_task_stats(
 
     await session.execute(stmt)
     await session.commit()
+    
+    # New function: increment total_tasks_assigned
+async def update_worker_tasks_assigned(session: AsyncSession, worker_id: str):
+    """Increment total_tasks_assigned for a worker when a task is assigned"""
+    stmt = (
+        update(WorkerModel)
+        .where(WorkerModel.id == worker_id)
+        .values(total_tasks_assigned=WorkerModel.total_tasks_assigned + 1)
+    )
+    await session.execute(stmt)
+    await session.commit()
 
 
 async def increment_job_completed_tasks(session: AsyncSession, job_id: str):
