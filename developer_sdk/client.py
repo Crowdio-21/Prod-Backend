@@ -7,12 +7,17 @@ from common.protocol import (
     Message,
     MessageType,
     create_submit_job_message,
+    create_submit_job_message_with_metadata,
     create_submit_pipeline_job_message,
     create_ping_message,
     create_pong_message,
     create_intermediate_feature_message,
 )
-from common.serializer import serialize_function, encode_feature_payload, decode_feature_payload
+from common.serializer import (
+    serialize_function,
+    encode_feature_payload,
+    decode_feature_payload,
+)
 from common.code_instrumenter import (
     instrument_for_task_control,
     generate_task_control_wrapper,
@@ -198,8 +203,8 @@ class CrowdComputeClient:
                 )
 
             # Create submission message with metadata
-            message = self._create_submit_job_message_with_metadata(
-                func_code, iterable, job_id, task_metadata
+            message = create_submit_job_message_with_metadata(
+                func_code, iterable, job_id, task_metadata.to_dict()
             )
 
             # Store job metadata for tracking
@@ -233,32 +238,6 @@ class CrowdComputeClient:
             if job_id in self._submitted_jobs:
                 del self._submitted_jobs[job_id]
             raise
-
-    def _create_submit_job_message_with_metadata(
-        self, func_code: str, args_list: List[Any], job_id: str, metadata: TaskMetadata
-    ) -> Message:
-        """
-        Create a job submission message with checkpoint metadata
-
-        Args:
-            func_code: Serialized function code
-            args_list: List of task arguments
-            job_id: Job identifier
-            metadata: Task checkpoint metadata
-
-        Returns:
-            Message object ready to send
-        """
-        return Message(
-            msg_type=MessageType.SUBMIT_JOB,
-            data={
-                "func_code": func_code,
-                "args_list": args_list,
-                "total_tasks": len(args_list),
-                "task_metadata": metadata.to_dict(),
-            },
-            job_id=job_id,
-        )
 
     async def submit(self, func: Callable, iterable: List[Any], **kwargs) -> str:
         """
@@ -336,8 +315,8 @@ class CrowdComputeClient:
         }
 
         # Create and send message
-        message = self._create_submit_job_message_with_metadata(
-            func_code, iterable, job_id, task_metadata
+        message = create_submit_job_message_with_metadata(
+            func_code, iterable, job_id, task_metadata.to_dict()
         )
         await self.websocket.send(message.to_json())
 

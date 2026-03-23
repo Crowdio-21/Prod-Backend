@@ -21,6 +21,7 @@ Main symbols:
 
 Representative factory helpers:
 - create_submit_job_message
+- create_submit_job_message_with_metadata
 - create_submit_pipeline_job_message
 - create_assign_task_message
 - create_assign_task_message_with_metadata

@@ -114,6 +114,29 @@ def create_submit_job_message(
     )
 
 
+def create_submit_job_message_with_metadata(
+    func_code: str,
+    args_list: List[Any],
+    job_id: str,
+    task_metadata: Optional[Dict[str, Any]] = None,
+) -> Message:
+    """Create a job submission message with optional task metadata."""
+    data = {
+        "func_code": func_code,
+        "args_list": args_list,
+        "total_tasks": len(args_list),
+    }
+
+    if task_metadata is not None:
+        data["task_metadata"] = task_metadata
+
+    return Message(
+        msg_type=MessageType.SUBMIT_JOB,
+        data=data,
+        job_id=job_id,
+    )
+
+
 def create_submit_pipeline_job_message(
     job_id: str,
     stages: List[Dict[str, Any]],
