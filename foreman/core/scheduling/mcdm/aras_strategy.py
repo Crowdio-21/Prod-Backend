@@ -50,13 +50,13 @@ class ARASStrategy(AllocationStrategy):
         final_norm = norm_matrix / (col_sums + 1e-9)
 
             # Log normalized values for each worker and criterion
-            import logging
-            logger = logging.getLogger("mcdm_scheduler")
-            logger.debug("Normalized values (ARAS):")
-            for i in range(final_norm.shape[0]):
-                logger.debug(f"  Worker {i}:")
-                for j in range(final_norm.shape[1]):
-                    logger.debug(f"    Criterion {j}: {final_norm[i, j]:.4f}")
+        import logging
+        logger = logging.getLogger("mcdm_scheduler")
+        logger.debug("Normalized values (ARAS):")
+        for i in range(final_norm.shape[0]):
+            logger.debug(f"  Worker {i}:")
+            for j in range(final_norm.shape[1]):
+                logger.debug(f"    Criterion {j}: {final_norm[i, j]:.4f}")
 
         # 3. Weighted Matrix & Optimality Function (Si)
         # USES ACTIVE WEIGHTS HERE
