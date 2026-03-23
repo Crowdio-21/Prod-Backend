@@ -61,7 +61,18 @@ Declarative task API:
 - get_task_config(func)
 - is_checkpoint_task(func)
 - create_state_dict(checkpoint_state)
-- crowdio namespace (decorator convenience)
+- crowdio namespace (decorator convenience, defined in namespace.py)
+
+Decorator namespace import style:
+
+```python
+from developer_sdk.namespace import crowdio
+
+
+@crowdio.task(checkpoint=True)
+def my_task(x):
+    return x * x
+```
 
 Mobile path constants:
 - Constant.FILE_DIR

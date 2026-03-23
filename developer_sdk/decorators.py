@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 from functools import wraps
 import inspect
-from .constants import Constant
+from .namespace import crowdio
 
 
 @dataclass
@@ -280,14 +280,3 @@ def create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
         Dictionary with all variables initialized to None
     """
     return {var: None for var in checkpoint_state}
-
-
-# Convenience export for import style: from developer_sdk.decorators import crowdio
-class CrowdioNamespace:
-    """Namespace class for @crowdio.task decorator style"""
-
-    task = staticmethod(task)
-    Constant = Constant
-
-
-crowdio = CrowdioNamespace()

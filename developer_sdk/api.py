@@ -7,8 +7,8 @@ from .decorators import (
     get_task_config,
     is_checkpoint_task,
     create_state_dict,
-    crowdio,
 )
+from .namespace import crowdio
 from .constants import Constant
 from .model_artifacts import build_partition_artifact, build_partition_artifacts
 from typing import Any, Callable, List, Optional, Dict
