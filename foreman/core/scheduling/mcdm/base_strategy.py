@@ -13,141 +13,160 @@ import logging
 logger = logging.getLogger(__name__)
 
 class AllocationStrategy(ABC):
-    """
-    Abstract Base Class for Task Allocation Algorithms.
-    Enables Strategy Pattern for hot-swapping algorithms at runtime.
-    """
 
-    def __init__(self, criteria_weights: np.ndarray = None, use_dynamic_weighting: bool = True):
+        def _impute_missing(self, matrix: np.ndarray, criteria_types: List[int]) -> np.ndarray:
+            """
+            Impute missing values (NaN) in the decision matrix for fairness.
+            For each column:
+              - Benefit: fill NaN with mean of available values (or 0 if all missing)
+              - Cost: fill NaN with mean of available values (or 0 if all missing)
+            """
+            imputed = matrix.copy()
+            for j in range(imputed.shape[1]):
+                col = imputed[:, j]
+                nan_mask = np.isnan(col)
+                if np.all(nan_mask):
+                    fill = 0.0
+                else:
+                    fill = np.nanmean(col)
+                col[nan_mask] = fill
+                imputed[:, j] = col
+            return imputed
         """
-        Initialize allocation strategy
-
-        Args:
-            criteria_weights: Numpy array of weights for each criterion
-            use_dynamic_weighting: Whether to use Shannon Entropy for dynamic weight calculation
-                                 If False, always uses static config weights
+        Abstract Base Class for Task Allocation Algorithms.
+        Enables Strategy Pattern for hot-swapping algorithms at runtime.
         """
-        self.weights = criteria_weights
-        self.use_dynamic_weighting = use_dynamic_weighting
-        self._last_scores = None
 
-    def _calculate_entropy_weights(self, matrix: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Calculates Objective Weights using Shannon Entropy method.
-        Returns None if calculation is impossible (e.g., insufficient data).
-        
-        Args:
-            matrix: The decision matrix (n_alternatives x m_criteria)
+        def __init__(self, criteria_weights: np.ndarray = None, use_dynamic_weighting: bool = True):
+            """
+            Initialize allocation strategy
+
+            Args:
+                criteria_weights: Numpy array of weights for each criterion
+                use_dynamic_weighting: Whether to use Shannon Entropy for dynamic weight calculation
+                                    If False, always uses static config weights
+            """
+            self.weights = criteria_weights
+            self.use_dynamic_weighting = use_dynamic_weighting
+            self._last_scores = None
+
+        def _calculate_entropy_weights(self, matrix: np.ndarray) -> Optional[np.ndarray]:
+            """
+            Calculates Objective Weights using Shannon Entropy method.
+            Returns None if calculation is impossible (e.g., insufficient data).
             
-        Returns:
-            np.ndarray or None: Array of calculated weights (sum = 1.0) or None on failure
-        """
-        m_alternatives, n_criteria = matrix.shape
-
-        # Need at least 2 devices to compare variance
-        if m_alternatives < 2:
-            return None
-
-        try:
-            # Step 1: Normalization (p_ij)
-            col_sums = matrix.sum(axis=0)
-            
-            # Handle columns with sum = 0 (avoid div by zero)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                P = matrix / col_sums
-                P = np.nan_to_num(P)  # Replace NaNs with 0
-
-            # Step 2: Entropy Calculation (E_j)
-            # k = 1 / ln(m)
-            k = 1.0 / np.log(m_alternatives)
-            
-            # Calculate P * ln(P) only where P > 0
-            p_ln_p = np.zeros_like(P)
-            non_zero_mask = P > 0
-            p_ln_p[non_zero_mask] = P[non_zero_mask] * np.log(P[non_zero_mask])
-            
-            E = -k * np.sum(p_ln_p, axis=0)
-
-            # Step 3: Degree of Divergence (d_j)
-            d = 1.0 - E
-
-            # Step 4: Weight Determination (w_j)
-            d_sum = d.sum()
-
-            # If all data is identical (d_sum = 0), entropy fails
-            if d_sum == 0:
-                return None
+            Args:
+                matrix: The decision matrix (n_alternatives x m_criteria)
                 
-            w = d / d_sum
-            return w
+            Returns:
+                np.ndarray or None: Array of calculated weights (sum = 1.0) or None on failure
+            """
+            m_alternatives, n_criteria = matrix.shape
 
-        except Exception as e:
-            logger.warning(f"Entropy calculation failed: {e}. Reverting to static weights.")
-            return None
+            # Need at least 2 devices to compare variance
+            if m_alternatives < 2:
+                return None
 
-    def _get_active_weights(self, decision_matrix: np.ndarray) -> np.ndarray:
-        """
-        Helper to determine whether to use Dynamic (Entropy) or Static (Config) weights.
-        
-        Decision logic:
-        1. If use_dynamic_weighting=True: Try Shannon Entropy first, fallback to static
-        2. If use_dynamic_weighting=False: Skip entropy, use static config weights directly
-        3. Final fallback: Equal weights if nothing else works
-        """
-        cols = decision_matrix.shape[1]
-        
-        # 1. Try Dynamic Weights (if enabled)
-        if self.use_dynamic_weighting:
-            dynamic_weights = self._calculate_entropy_weights(decision_matrix)
+            try:
+                # Step 1: Normalization (p_ij)
+                col_sums = matrix.sum(axis=0)
+                
+                # Handle columns with sum = 0 (avoid div by zero)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    P = matrix / col_sums
+                    P = np.nan_to_num(P)  # Replace NaNs with 0
+
+                # Step 2: Entropy Calculation (E_j)
+                # k = 1 / ln(m)
+                k = 1.0 / np.log(m_alternatives)
+                
+                # Calculate P * ln(P) only where P > 0
+                p_ln_p = np.zeros_like(P)
+                non_zero_mask = P > 0
+                p_ln_p[non_zero_mask] = P[non_zero_mask] * np.log(P[non_zero_mask])
+                
+                E = -k * np.sum(p_ln_p, axis=0)
+
+                # Step 3: Degree of Divergence (d_j)
+                d = 1.0 - E
+
+                # Step 4: Weight Determination (w_j)
+                d_sum = d.sum()
+
+                # If all data is identical (d_sum = 0), entropy fails
+                if d_sum == 0:
+                    return None
+                    
+                w = d / d_sum
+                return w
+
+            except Exception as e:
+                logger.warning(f"Entropy calculation failed: {e}. Reverting to static weights.")
+                return None
+
+        def _get_active_weights(self, decision_matrix: np.ndarray) -> np.ndarray:
+            """
+            Helper to determine whether to use Dynamic (Entropy) or Static (Config) weights.
             
-            if dynamic_weights is not None:
-                logger.debug(f"Using DYNAMIC (Shannon Entropy) weights: {np.round(dynamic_weights, 3)}")
-                return dynamic_weights
+            Decision logic:
+            1. If use_dynamic_weighting=True: Try Shannon Entropy first, fallback to static
+            2. If use_dynamic_weighting=False: Skip entropy, use static config weights directly
+            3. Final fallback: Equal weights if nothing else works
+            """
+            cols = decision_matrix.shape[1]
+            
+            # 1. Try Dynamic Weights (if enabled)
+            if self.use_dynamic_weighting:
+                dynamic_weights = self._calculate_entropy_weights(decision_matrix)
+                
+                if dynamic_weights is not None:
+                    logger.debug(f"Using DYNAMIC (Shannon Entropy) weights: {np.round(dynamic_weights, 3)}")
+                    return dynamic_weights
+                else:
+                    logger.debug("Shannon Entropy returned no weights (insufficient data variance)")
             else:
-                logger.debug("Shannon Entropy returned no weights (insufficient data variance)")
-        else:
-            logger.debug("Dynamic weighting DISABLED - skipping Shannon Entropy calculation")
-            
-        # 2. Use Static Config Weights
-        if self.weights is not None and len(self.weights) == cols:
-            logger.debug(f"Using STATIC (Config) weights: {self.weights}")
-            return self.weights
-            
-        # 3. Emergency Fallback (Equal Weights)
-        logger.warning("No valid weights found. Using EQUAL weights.")
-        return np.ones(cols) / cols
+                logger.debug("Dynamic weighting DISABLED - skipping Shannon Entropy calculation")
+                
+            # 2. Use Static Config Weights
+            if self.weights is not None and len(self.weights) == cols:
+                logger.debug(f"Using STATIC (Config) weights: {self.weights}")
+                return self.weights
+                
+            # 3. Emergency Fallback (Equal Weights)
+            logger.warning("No valid weights found. Using EQUAL weights.")
+            return np.ones(cols) / cols
 
-    @abstractmethod
-    def rank_devices(
-        self, decision_matrix: np.ndarray, criteria_types: List[int]
-    ) -> List[int]:
-        """
-        Rank devices based on the implemented algorithm.
+        @abstractmethod
+        def rank_devices(
+            self, decision_matrix: np.ndarray, criteria_types: List[int]
+        ) -> List[int]:
+            """
+            Rank devices based on the implemented algorithm.
 
-        Args:
-            decision_matrix: Numpy array (n_alternatives x m_criteria)
-            criteria_types: List of +1 (Benefit) or -1 (Cost)
+            Args:
+                decision_matrix: Numpy array (n_alternatives x m_criteria)
+                criteria_types: List of +1 (Benefit) or -1 (Cost)
 
-        Returns:
-            List of device indices sorted by rank (best to worst)
-        """
-        raise NotImplementedError
+            Returns:
+                List of device indices sorted by rank (best to worst)
+            """
+            raise NotImplementedError
 
-    def set_weights(self, weights: np.ndarray):
-        """
-        Update criteria weights
+        def set_weights(self, weights: np.ndarray):
+            """
+            Update criteria weights
 
-        Args:
-            weights: New weights array
-        """
-        self.weights = weights
+            Args:
+                weights: New weights array
+            """
+            self.weights = weights
 
-    def set_dynamic_weighting(self, enabled: bool):
-        """
-        Enable or disable Shannon Entropy dynamic weighting at runtime
+        def set_dynamic_weighting(self, enabled: bool):
+            """
+            Enable or disable Shannon Entropy dynamic weighting at runtime
 
-        Args:
-            enabled: True to use dynamic weighting, False to use static config only
-        """
-        self.use_dynamic_weighting = enabled
-        logger.info(f"Dynamic weighting (Shannon Entropy) {'ENABLED' if enabled else 'DISABLED'}")
+            Args:
+                enabled: True to use dynamic weighting, False to use static config only
+            """
+            self.use_dynamic_weighting = enabled
+            logger.info(f"Dynamic weighting (Shannon Entropy) {'ENABLED' if enabled else 'DISABLED'}")
