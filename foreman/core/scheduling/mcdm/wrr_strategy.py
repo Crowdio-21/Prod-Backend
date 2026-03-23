@@ -35,6 +35,15 @@ class WRRStrategy(AllocationStrategy):
                     weighted_scores += inverted * active_weights[j]
                 # If max is 0 (all zeros), cost contribution is 0
 
+            # Log normalized values for each worker and criterion
+            import logging
+            logger = logging.getLogger("mcdm_scheduler")
+            logger.debug("Normalized values (WRR):")
+            for i in range(rows):
+                logger.debug(f"  Worker {i}:")
+                for j in range(cols):
+                    logger.debug(f"    Criterion {j}: {decision_matrix[i, j]:.4f}")
+
         self._last_scores = weighted_scores
 
         return np.argsort(weighted_scores)[::-1].tolist()
