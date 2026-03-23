@@ -36,6 +36,15 @@ class MABACStrategy(AllocationStrategy):
                     min_val - max_val or -1.0
                 )
 
+         # Log normalized values for each worker and criterion
+        import logging
+        logger = logging.getLogger("mcdm_scheduler")
+        logger.debug("Normalized values (MABAC):")
+        for i in range(rows):
+            logger.debug(f"  Worker {i}:")
+            for j in range(cols):
+                logger.debug(f"    Criterion {j}: {norm_matrix[i, j]:.4f}")
+
         # 2. Weighted Matrix (V)
         # MABAC specific: V = w * (n + 1)
         # USES ACTIVE WEIGHTS HERE
