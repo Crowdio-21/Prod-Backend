@@ -46,7 +46,7 @@ from .api import (
     send_intermediate_feature,
     decode_intermediate_feature_payload,
 )
-from .tensor_transport import serialize_tensor, deserialize_tensor
+from common.serializer import serialize_tensor, deserialize_tensor
 from .topology import validate_topology, TopologyValidationError
 from .model_artifacts import build_partition_artifact, build_partition_artifacts
 

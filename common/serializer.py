@@ -2,16 +2,21 @@
 Serialization utilities for CrowdCompute
 """
 
+import base64
 import inspect
 import re
 import sys
 import types
+import zlib
 from typing import Any, Callable, List, Dict
 
 try:
     import numpy as np
 except Exception:
     np = None
+
+
+DEFAULT_COMPRESS_LEVEL = 6
 
 
 def _env_info() -> str:
@@ -134,6 +139,56 @@ def bytes_to_hex(data_bytes: bytes) -> str:
     return data_bytes.hex()
 
 
+def serialize_tensor(
+    tensor: "np.ndarray",
+    compression: str = "zlib",
+    compress_level: int = DEFAULT_COMPRESS_LEVEL,
+) -> Dict[str, Any]:
+    """Serialize numpy tensor to transport-friendly dict payload."""
+    if np is None:
+        raise ImportError("numpy is required for tensor serialization")
+    if not isinstance(tensor, np.ndarray):
+        raise TypeError("tensor must be a numpy.ndarray")
+
+    raw = tensor.tobytes(order="C")
+    codec = compression or "none"
+    encoded_bytes = raw
+
+    if codec == "zlib":
+        encoded_bytes = zlib.compress(raw, level=compress_level)
+    elif codec != "none":
+        raise ValueError(f"Unsupported compression codec: {codec}")
+
+    return {
+        "dtype": str(tensor.dtype),
+        "shape": list(tensor.shape),
+        "order": "C",
+        "compression": codec,
+        "payload_b64": base64.b64encode(encoded_bytes).decode("ascii"),
+    }
+
+
+def deserialize_tensor(payload: Dict[str, Any]) -> "np.ndarray":
+    """Deserialize transport payload back into numpy tensor."""
+    if np is None:
+        raise ImportError("numpy is required for tensor deserialization")
+
+    dtype = payload["dtype"]
+    shape = tuple(payload["shape"])
+    compression = payload.get("compression", "none")
+    payload_b64 = payload["payload_b64"]
+
+    encoded = base64.b64decode(payload_b64)
+    raw = encoded
+    if compression == "zlib":
+        raw = zlib.decompress(encoded)
+    elif compression != "none":
+        raise ValueError(f"Unsupported compression codec: {compression}")
+
+    array = np.frombuffer(raw, dtype=np.dtype(dtype))
+    return array.reshape(shape)
+
+
 def encode_feature_payload(payload: Any) -> Dict[str, Any]:
     """
     Encode intermediate feature payload with tensor-aware serialization.
@@ -147,18 +202,7 @@ def encode_feature_payload(payload: Any) -> Dict[str, Any]:
     Returns:
         Encoded payload dict with tensors as serialized dicts
     """
-    # Lazy import to avoid circular dependencies
-    try:
-        from developer_sdk.tensor_transport import serialize_tensor
-    except ImportError:
-        # Fallback if tensor_transport unavailable
-        serialize_tensor = None
-
     if np is not None and isinstance(payload, np.ndarray):
-        if serialize_tensor is None:
-            raise ImportError(
-                "tensor_transport module required for tensor serialization"
-            )
         return {
             "transport": "tensor_transport",
             "tensor": serialize_tensor(payload),
@@ -186,19 +230,8 @@ def decode_feature_payload(payload: Any) -> Any:
     Returns:
         Decoded payload with tensors materialized as numpy arrays
     """
-    # Lazy import to avoid circular dependencies
-    try:
-        from developer_sdk.tensor_transport import deserialize_tensor
-    except ImportError:
-        # Fallback if tensor_transport unavailable
-        deserialize_tensor = None
-
     if isinstance(payload, dict):
         if payload.get("transport") == "tensor_transport" and "tensor" in payload:
-            if deserialize_tensor is None:
-                raise ImportError(
-                    "tensor_transport module required for tensor deserialization"
-                )
             return deserialize_tensor(payload["tensor"])
         return {k: decode_feature_payload(v) for k, v in payload.items()}
 

@@ -46,6 +46,9 @@ Main functions:
 - **Function serialization:**
   - serialize_function: gets source and strips decorators before transport
   - deserialize_function_for_PC: exec-based restoration of callable function code
+- **Tensor serialization:**
+  - serialize_tensor: numpy tensor to compressed transport payload
+  - deserialize_tensor: transport payload back to numpy tensor
 - **Tensor-aware feature payload encoding (for DNN pipelines):**
   - encode_feature_payload: recursively encodes payloads with numpy arrays as zlib-compressed transport dicts
   - decode_feature_payload: recursively decodes transport dicts and materializes numpy arrays
@@ -55,7 +58,7 @@ Main functions:
 
 Note:
 - Tensor encoding supports nested structures (dicts, lists) with automatic recursive handling
-- Uses lazy imports to avoid circular dependencies with developer_sdk.tensor_transport
+- Tensor helpers are defined in common.serializer; use this as the canonical import location
 - serialize_data and deserialize_data are placeholders in the current implementation.
 
 ### device_info.py
