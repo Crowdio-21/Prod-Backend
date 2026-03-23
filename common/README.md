@@ -39,15 +39,22 @@ Representative factory helpers:
     - create_fallback_decision_message
 
 ### serializer.py
-Function serialization helpers used for shipping executable logic to workers.
+Function and payload serialization helpers used for shipping executable logic and tensor data to workers.
 
 Main functions:
-- serialize_function: gets source and strips decorators before transport
-- deserialize_function_for_PC: exec-based restoration of callable function code
-- get_runtime_info: lightweight runtime diagnostic string
-- hex_to_bytes / bytes_to_hex: utility conversion helpers
+- **Function serialization:**
+  - serialize_function: gets source and strips decorators before transport
+  - deserialize_function_for_PC: exec-based restoration of callable function code
+- **Tensor-aware feature payload encoding (for DNN pipelines):**
+  - encode_feature_payload: recursively encodes payloads with numpy arrays as zlib-compressed transport dicts
+  - decode_feature_payload: recursively decodes transport dicts and materializes numpy arrays
+- **Utilities:**
+  - get_runtime_info: lightweight runtime diagnostic string
+  - hex_to_bytes / bytes_to_hex: utility conversion helpers
 
 Note:
+- Tensor encoding supports nested structures (dicts, lists) with automatic recursive handling
+- Uses lazy imports to avoid circular dependencies with developer_sdk.tensor_transport
 - serialize_data and deserialize_data are placeholders in the current implementation.
 
 ### device_info.py

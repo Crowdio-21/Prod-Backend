@@ -12,19 +12,13 @@ from common.protocol import (
     create_pong_message,
     create_intermediate_feature_message,
 )
-from common.serializer import serialize_function
+from common.serializer import serialize_function, encode_feature_payload, decode_feature_payload
 from common.code_instrumenter import (
     instrument_for_task_control,
     generate_task_control_wrapper,
 )
 from .decorators import get_task_metadata, TaskMetadata
 from .topology import validate_topology
-from .tensor_transport import serialize_tensor, deserialize_tensor
-
-try:
-    import numpy as np
-except Exception:  # pragma: no cover - numpy may be unavailable in minimal envs
-    np = None
 
 
 class CrowdComputeClient:
@@ -118,36 +112,6 @@ class CrowdComputeClient:
 
         except Exception as e:
             print(f"Error handling message: {e}")
-
-    def _encode_feature_payload(self, payload: Any) -> Dict[str, Any]:
-        """Encode feature payload and serialize numpy arrays when present."""
-
-        if np is not None and isinstance(payload, np.ndarray):
-            return {
-                "transport": "tensor_transport",
-                "tensor": serialize_tensor(payload),
-            }
-
-        if isinstance(payload, dict):
-            return {k: self._encode_feature_payload(v) for k, v in payload.items()}
-
-        if isinstance(payload, list):
-            return [self._encode_feature_payload(v) for v in payload]
-
-        return payload
-
-    def _decode_feature_payload(self, payload: Any) -> Any:
-        """Decode feature payload and materialize serialized tensors."""
-
-        if isinstance(payload, dict):
-            if payload.get("transport") == "tensor_transport" and "tensor" in payload:
-                return deserialize_tensor(payload["tensor"])
-            return {k: self._decode_feature_payload(v) for k, v in payload.items()}
-
-        if isinstance(payload, list):
-            return [self._decode_feature_payload(v) for v in payload]
-
-        return payload
 
     async def map(self, func: Callable, iterable: List[Any], **kwargs) -> List[Any]:
         """
@@ -619,7 +583,7 @@ class CrowdComputeClient:
         if not self.connected:
             raise RuntimeError("Not connected to foreman. Call connect() first.")
 
-        encoded_payload = self._encode_feature_payload(payload)
+        encoded_payload = encode_feature_payload(payload)
         message = create_intermediate_feature_message(
             job_id=job_id,
             task_id=task_id,
@@ -632,4 +596,4 @@ class CrowdComputeClient:
 
     def decode_intermediate_feature_payload(self, payload: Any) -> Any:
         """Public helper for decoding tensor-aware intermediate feature payloads."""
-        return self._decode_feature_payload(payload)
+        return decode_feature_payload(payload)
