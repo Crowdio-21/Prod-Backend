@@ -43,9 +43,9 @@ import argparse
 # Add project root to path so imports resolve
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, pipeline
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=3.0,
     checkpoint_state=[
@@ -61,7 +61,7 @@ from developer_sdk import connect, disconnect, crowdio, pipeline
 # Stage 0 – Preprocess: load image and split into tiles
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def preprocess_image(image_input):
     """
     Load an image from disk (or accept raw base64) and split it into tiles.
@@ -138,7 +138,7 @@ def preprocess_image(image_input):
 # Stage 1 – Process: apply filter to each tile
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def process_tiles(task_input):
     """
     Apply an image filter to every tile received from the preprocess stage.
@@ -248,7 +248,7 @@ def process_tiles(task_input):
 # Stage 2 – Postprocess: reassemble tiles into final image
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def postprocess_image(task_input):
     """
     Reassemble processed tiles back into a complete image.
@@ -574,7 +574,7 @@ async def main():
         images.append((b64, 0, f"synthetic_{size[0]}x{size[1]}"))
 
     # ── Connect to foreman ──────────────────────────────────────────
-    await connect(args.host, args.port)
+    await crowdio_connect(args.host, args.port)
 
     try:
         overall_start = time.time()
@@ -631,7 +631,7 @@ async def main():
         print(f"{'='*60}")
 
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
 
 if __name__ == "__main__":
