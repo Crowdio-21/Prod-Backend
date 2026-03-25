@@ -22,7 +22,7 @@ from pathlib import Path
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def sentiment_analysis_worker(message_data):
@@ -386,7 +386,7 @@ async def main():
         
         # Connect to foreman
         print(f"\n🔌 Connecting to foreman at ws://{FOREMAN_HOST}:{FOREMAN_PORT}...")
-        await connect(host=FOREMAN_HOST, port=FOREMAN_PORT)
+        await crowdio_connect(host=FOREMAN_HOST, port=FOREMAN_PORT)
         print(f"✅ Connected!")
         
         # Distribute work to workers
@@ -395,7 +395,7 @@ async def main():
         
         start_time = time.time()
         
-        results = await distributed_map(
+        results = await crowdio_map(
             sentiment_analysis_worker,
             tasks
         )
@@ -437,7 +437,7 @@ async def main():
         if not successful_results:
             print("\n❌ No successful results to analyze!")
             print("💡 Check if workers have required packages: pip install transformers torch")
-            await disconnect()
+            await crowdio_disconnect()
             return
         
         # Detect sentiment changes
@@ -459,17 +459,17 @@ async def main():
         print(f"💾 Detailed results saved to: {output_file.absolute()}")
         
         # Disconnect
-        await disconnect()
+        await crowdio_disconnect()
         print("\n✅ Disconnected from foreman")
         
     except KeyboardInterrupt:
         print("\n\n⚠️ Interrupted by user")
-        await disconnect()
+        await crowdio_disconnect()
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        await disconnect()
+        await crowdio_disconnect()
 
 
 if __name__ == "__main__":
