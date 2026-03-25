@@ -27,7 +27,7 @@ import time
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def mcmc_bayesian_inference_worker(config):
@@ -354,7 +354,7 @@ async def run_distributed_mcmc(data, num_chains=4, num_iterations=10000, burn_in
     print("=" * 70)
     
     print(f"\n📡 Connecting to foreman at {foreman_host}:9000...")
-    await connect(foreman_host, 9000)
+    await crowdio_connect(foreman_host, 9000)
     print("✅ Connected")
     
     # Data statistics
@@ -385,7 +385,7 @@ async def run_distributed_mcmc(data, num_chains=4, num_iterations=10000, burn_in
     start_time = time.time()
     
     print("\n⏳ Dispatching MCMC chains to workers...")
-    results = await distributed_map(mcmc_bayesian_inference_worker, configs)
+    results = await crowdio_map(mcmc_bayesian_inference_worker, configs)
     
     execution_time = time.time() - start_time
     
@@ -439,7 +439,7 @@ async def run_distributed_mcmc(data, num_chains=4, num_iterations=10000, burn_in
     else:
         print(f"\n❌ Error: {aggregated['error']}")
     
-    await disconnect()
+    await crowdio_disconnect()
     
     return aggregated
 
