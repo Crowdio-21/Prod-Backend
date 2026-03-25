@@ -17,7 +17,7 @@ import json
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def sentiment_worker(text):
@@ -181,7 +181,7 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost", for
     # Connect to foreman
     print(f"\n📡 Connecting to foreman at {foreman_host}:9000...")
     try:
-        await connect(foreman_host, 9000)
+        await crowdio_connect(foreman_host, 9000)
     except Exception as e:
         print(f"❌ Failed to connect to foreman: {e}")
         return
@@ -195,7 +195,7 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost", for
 
     if not sentences:
         print("⚠️  No sentences to analyze")
-        await disconnect()
+        await crowdio_disconnect()
         return
 
     # Submit distributed tasks
@@ -203,7 +203,7 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost", for
     
     try:
         # Use distributed_map to process sentences across workers
-        results = await distributed_map(sentiment_worker, sentences)
+        results = await crowdio_map(sentiment_worker, sentences)
         
         print(f"✅ Received {len(results)} results from workers")
 
@@ -242,7 +242,7 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost", for
         import traceback
         traceback.print_exc()
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
 
 async def main():

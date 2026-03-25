@@ -9,12 +9,12 @@ import nltk
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect, crowdio
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 # Download required NLTK data
 nltk.download('punkt_tab')
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=3.0,  # Checkpoint every 3 seconds
     checkpoint_state=["sentiment", "confidence", "progress_percent", "processing_stage"]
@@ -31,7 +31,7 @@ def sentiment_worker(text):
         Dictionary containing sentiment analysis results
         
     Note:
-        The @crowdio.task decorator enables automatic checkpointing:
+        The @CROWDio.task decorator enables automatic checkpointing:
         - State variables are captured automatically via frame introspection
         - TRANSPARENT RESUME - framework handles everything automatically!
         - Just write your pure algorithm logic
@@ -132,14 +132,14 @@ async def run_distributed_sentiment(text, foreman_host="localhost"):
         return numerator / denominator if denominator != 0 else 0
 
     # Connect to foreman
-    await connect(foreman_host, 9000)
+    await crowdio_connect(foreman_host, 9000)
 
     try:
         # Split text
         segments = split_text(text)
 
         # Distribute sentiment analysis to workers
-        worker_results = await distributed_map(sentiment_worker, segments)
+        worker_results = await crowdio_map(sentiment_worker, segments)
 
         # Parse results - handle both dict results (already parsed) and string results
         parsed_results = []
@@ -176,7 +176,7 @@ async def run_distributed_sentiment(text, foreman_host="localhost"):
 
     finally:
         # Disconnect
-        await disconnect()
+        await crowdio_disconnect()
 
 async def main():
     if len(sys.argv) != 2:

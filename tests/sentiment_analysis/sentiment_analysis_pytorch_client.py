@@ -17,7 +17,7 @@ import json
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def sentiment_worker_pytorch(text):
@@ -189,14 +189,14 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost"):
     print("=" * 70)
 
     print(f"\n📡 Connecting to foreman at {foreman_host}:9000...")
-    await connect(foreman_host, 9000)
+    await crowdio_connect(foreman_host, 9000)
     print("✅ Connected")
 
     sentences = split_text_into_sentences(text)
     print(f"📝 Sentences: {len(sentences)}")
 
     print("\n⏳ Dispatching tasks to workers...")
-    results = await distributed_map(sentiment_worker_pytorch, sentences)
+    results = await crowdio_map(sentiment_worker_pytorch, sentences)
 
     aggregated = aggregate_sentiment_results(results)
 
@@ -216,7 +216,7 @@ async def run_distributed_sentiment_analysis(text, foreman_host="localhost"):
         print(f"{i}. {emoji} {r['text']}")
         print(f"   Class: {r['class_name']} | Confidence: {r['confidence']}")
 
-    await disconnect()
+    await crowdio_disconnect()
 
 
 # =========================================================
