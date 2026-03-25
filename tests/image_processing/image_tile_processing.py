@@ -6,11 +6,11 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio
 from developer_sdk.image_utils import split_image_into_tiles, reassemble_tiles
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=3.0,
     checkpoint_state=["processed_count", "total_tiles", "avg_time", "progress"],
@@ -30,7 +30,7 @@ def process_tile(tile_data):
         Dictionary with processed tile data and metadata
 
     Note:
-        Checkpointing is enabled via @crowdio.task decorator.
+        Checkpointing is enabled via @CROWDio.task decorator.
         State variables (processed_count, total_tiles, avg_time, progress)
         are captured automatically and restored on resume.
     """
@@ -90,7 +90,7 @@ async def main():
 
     try:
         foreman_host = "localhost"
-        await connect(foreman_host, 9000)
+        await crowdio_connect(foreman_host, 9000)
 
         image_path = "image.png"
         if not os.path.isfile(image_path):
@@ -159,7 +159,7 @@ async def main():
 
         traceback.print_exc()
     finally:
-        await disconnect()
+        await crowdio_disconnect()
         print("\n👋 Disconnected from foreman")
 
 
