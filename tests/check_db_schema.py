@@ -5,7 +5,7 @@ Quick script to check database schema and worker data
 import sqlite3
 import os
 
-DATABASE_PATH = "crowdcompute.db"
+DATABASE_PATH = "crowdio.db"
 
 if not os.path.exists(DATABASE_PATH):
     print(f"❌ Database not found: {DATABASE_PATH}")
@@ -35,7 +35,7 @@ missing = [col for col in device_columns if col not in existing]
 
 if missing:
     print(f"⚠️ Missing device spec columns: {', '.join(missing)}")
-    print("💡 Delete crowdcompute.db and restart foreman to recreate with new schema")
+    print("💡 Delete crowdio.db and restart foreman to recreate with new schema")
 else:
     print("✅ All device spec columns present!")
 
