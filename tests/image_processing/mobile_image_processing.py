@@ -51,14 +51,14 @@ import argparse
 # Add project root to path so imports resolve
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, map as distributed_map
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_map
 
 
 # =====================================================================
 # Worker function — runs entirely on the device
 # =====================================================================
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=3.0,
     checkpoint_state=[
@@ -342,11 +342,11 @@ async def main():
     print(f"{'='*60}\n")
 
     # Connect and distribute
-    await connect(args.host, args.port)
+    await crowdio_connect(args.host, args.port)
 
     try:
         start = time.time()
-        results = await distributed_map(process_images_on_device, task_args)
+        results = await crowdio_map(process_images_on_device, task_args)
         elapsed = time.time() - start
 
         # --- Summary ---
@@ -422,7 +422,7 @@ async def main():
         print(f"{'='*60}")
 
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
 
 if __name__ == "__main__":

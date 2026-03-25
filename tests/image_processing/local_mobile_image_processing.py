@@ -22,10 +22,10 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, map as distributed_map
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_map
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True, checkpoint_interval=3.0, checkpoint_state=["processed", "errors"]
 )
 def process_images_on_device(config):
@@ -182,7 +182,7 @@ async def main():
     # Developer-friendly config: no hardcoded Android paths.
     # Mobile runtime can resolve crowdio.Constant.FILE_DIR to selected folder path.
     task_config = {
-        "image_dir": crowdio.Constant.FILE_DIR,
+        "image_dir": CROWDio.Constant.FILE_DIR,
         "filter": args.filter,
         "max_images": args.max_images,
         "preview_quality": args.preview_quality,
@@ -198,10 +198,10 @@ async def main():
     print(f"client_output   : {args.client_output_dir}")
     print("=" * 64)
 
-    await connect(args.host, args.port)
+    await crowdio_connect(args.host, args.port)
     try:
         started = time.time()
-        results = await distributed_map(process_images_on_device, [task_config])
+        results = await crowdio_map(process_images_on_device, [task_config])
         wall_time = time.time() - started
 
         print("\nResults")
@@ -236,7 +236,7 @@ async def main():
         print(f"Saved previews: {saved_previews} -> {args.client_output_dir}")
         print(f"Wall time: {wall_time:.2f}s")
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
 
 if __name__ == "__main__":
