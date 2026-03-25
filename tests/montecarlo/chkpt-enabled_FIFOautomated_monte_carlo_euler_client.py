@@ -11,10 +11,10 @@ from datetime import datetime
 # Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, map as distributed_map, disconnect, crowdio
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=5.0,  # Default; mutated at runtime per-run
     checkpoint_state=[
@@ -36,7 +36,7 @@ def monte_carlo_euler_worker(num_trials):
         Dictionary containing trial results and statistics
 
     Note:
-        The @crowdio.task decorator enables automatic checkpointing:
+        The @CROWDio.task decorator enables automatic checkpointing:
         - State variables are captured automatically via frame introspection
         - TRANSPARENT RESUME - framework handles everything automatically!
         - Just write your pure algorithm logic
@@ -220,7 +220,7 @@ async def run_distributed_monte_carlo_euler(
     # Apply the requested checkpoint interval before connecting
     set_checkpoint_interval(checkpoint_interval)
 
-    await connect(foreman_host, 9000)
+    await crowdio_connect(foreman_host, 9000)
 
     if num_workers is None:
         num_workers = 4
@@ -233,7 +233,7 @@ async def run_distributed_monte_carlo_euler(
         task_inputs[-1] += remainder
 
     start_time = time.time()
-    results = await distributed_map(monte_carlo_euler_worker, task_inputs)
+    results = await crowdio_map(monte_carlo_euler_worker, task_inputs)
     job_exec_time_s = time.time() - start_time
 
     aggregated = aggregate_monte_carlo_results(results)
@@ -250,7 +250,7 @@ async def run_distributed_monte_carlo_euler(
     )
     throughput = total_trials / job_exec_time_s if job_exec_time_s > 0 else 0.0
 
-    await disconnect()
+    await crowdio_disconnect()
 
     return {
         "total_trials": total_trials,
