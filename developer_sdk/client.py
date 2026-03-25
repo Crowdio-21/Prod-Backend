@@ -14,7 +14,7 @@ from common.protocol import (
 from common.serializer import serialize_function
 from common.code_instrumenter import (
     instrument_for_task_control,
-    generate_task_control_wrapper,
+    generate_runtime_wrappers,
 )
 from .decorators import CROWDio_get_task_metadata, CROWDioTaskMetadata
 
@@ -187,8 +187,11 @@ class CrowdComputeClient:
             func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
                 func_code, checkpoint_state_vars=checkpoint_state_vars
             )
-            control_wrapper = generate_task_control_wrapper()
-            func_code = control_wrapper + "\n" + func_code
+            runtime_wrapper = generate_runtime_wrappers(
+                include_checkpoint=True,
+                include_task_control=True,
+            )
+            func_code = runtime_wrapper + "\n" + func_code
             if num_funcs > 0:
                 print(
                     f"[SDK] Task control: instrumented {num_funcs} functions, "
@@ -316,8 +319,11 @@ class CrowdComputeClient:
         func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
             func_code, checkpoint_state_vars=checkpoint_state_vars
         )
-        control_wrapper = generate_task_control_wrapper()
-        func_code = control_wrapper + "\n" + func_code
+        runtime_wrapper = generate_runtime_wrappers(
+            include_checkpoint=True,
+            include_task_control=True,
+        )
+        func_code = runtime_wrapper + "\n" + func_code
         if num_funcs > 0:
             print(
                 f"[SDK] Task control: instrumented {num_funcs} functions, "
@@ -459,8 +465,11 @@ class CrowdComputeClient:
                 func_code, _, _ = instrument_for_task_control(
                     func_code, checkpoint_state_vars=stage_ckpt_vars
                 )
-                ctrl_wrapper = generate_task_control_wrapper()
-                func_code = ctrl_wrapper + "\n" + func_code
+                runtime_wrapper = generate_runtime_wrappers(
+                    include_checkpoint=True,
+                    include_task_control=True,
+                )
+                func_code = runtime_wrapper + "\n" + func_code
                 task_meta_dict = None
                 if metadata:
                     task_meta_dict = metadata.to_dict()
