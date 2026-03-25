@@ -139,52 +139,75 @@ class CheckpointInstrumenter(ast.NodeTransformer):
 
         return False
     
-    def _create_ckpt_update_call(self) -> ast.Expr:
+    def _create_ckpt_update_call(self) -> ast.Try:
         """
-        Create AST for: _ckpt_update({var1: var1, var2: var2, ...})
+        Create AST for: try: _ckpt_update({var1: var1, ...}); except NameError: pass
         """
-        # Create dict with checkpoint variables
         keys = [ast.Constant(value=var) for var in self.checkpoint_state_vars]
         values = [ast.Name(id=var, ctx=ast.Load()) for var in self.checkpoint_state_vars]
-        
         state_dict = ast.Dict(keys=keys, values=values)
-        
-        # Create function call: _ckpt_update(state_dict)
         call = ast.Call(
             func=ast.Name(id='_ckpt_update', ctx=ast.Load()),
             args=[state_dict],
             keywords=[]
         )
-        
-        return ast.Expr(value=call)
+        return ast.Try(
+            body=[ast.Expr(value=call)],
+            handlers=[ast.ExceptHandler(
+                type=ast.Name(id='NameError', ctx=ast.Load()),
+                name=None,
+                body=[ast.Pass()]
+            )],
+            orelse=[],
+            finalbody=[]
+        )
     
     def visit_For(self, node: ast.For) -> ast.For:
-        """Inject checkpoint call at end of for loop body"""
-        # First, visit children
+        """Inject checkpoint call at end of for loop body, skip if already present."""
         self.generic_visit(node)
-        
-        # Add checkpoint call at end of loop body
-        ckpt_call = self._create_ckpt_update_call()
-        node.body.append(ckpt_call)
-        self.loops_instrumented += 1
-        
+        # Idempotency: skip if _ckpt_update already present
+        if not any(self._is_ckpt_update_call(stmt) for stmt in node.body):
+            ckpt_call = self._create_ckpt_update_call()
+            node.body.append(ckpt_call)
+            self.loops_instrumented += 1
         return node
     
     def visit_While(self, node: ast.While) -> ast.While:
-        """Inject checkpoint call at end of while loop body"""
-        # Skip 'while paused:' loops injected by task control instrumentation
+        """Inject checkpoint call at end of while loop body, skip if already present."""
         if self._is_pause_wait_test(node.test):
             return node
-        
-        # First, visit children
         self.generic_visit(node)
-        
-        # Add checkpoint call at end of loop body
-        ckpt_call = self._create_ckpt_update_call()
-        node.body.append(ckpt_call)
-        self.loops_instrumented += 1
-        
+        if not any(self._is_ckpt_update_call(stmt) for stmt in node.body):
+            ckpt_call = self._create_ckpt_update_call()
+            node.body.append(ckpt_call)
+            self.loops_instrumented += 1
         return node
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        """Instrument assignments to checkpointed variables with checkpoint call."""
+        self.generic_visit(node)
+        # Only instrument if assignment is to a tracked variable
+        if any(isinstance(t, ast.Name) and t.id in self.checkpoint_state_vars for t in node.targets):
+            self.assignments_instrumented += 1
+            return [node, self._create_ckpt_update_call()]
+        return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        return self.visit_FunctionDef(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
+        return self.visit_For(node)
+
+    def _is_ckpt_update_call(self, node: ast.stmt) -> bool:
+        # Detects if a statement is a _ckpt_update call
+        if isinstance(node, ast.Try):
+            for stmt in node.body:
+                if self._is_ckpt_update_call(stmt):
+                    return True
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            return isinstance(func, ast.Name) and func.id == '_ckpt_update'
+        return False
 
 
 class TaskControlInstrumenter(ast.NodeTransformer):
@@ -341,7 +364,7 @@ class ResumeInstrumenter(ast.NodeTransformer):
         self.func_name = None
     
     def _create_ast_value(self, value: Any) -> Optional[ast.expr]:
-        """Create an AST node for a Python value"""
+        """Create an AST node for a Python value (no double call, correct None check)"""
         if isinstance(value, (int, float)):
             return ast.Constant(value=value)
         elif isinstance(value, str):
@@ -351,20 +374,29 @@ class ResumeInstrumenter(ast.NodeTransformer):
         elif value is None:
             return ast.Constant(value=None)
         elif isinstance(value, list):
-            return ast.List(
-                elts=[self._create_ast_value(v) for v in value if self._create_ast_value(v)],
-                ctx=ast.Load()
-            )
+            elts = []
+            for v in value:
+                node = self._create_ast_value(v)
+                if node is not None:
+                    elts.append(node)
+            return ast.List(elts=elts, ctx=ast.Load())
         elif isinstance(value, dict):
-            return ast.Dict(
-                keys=[ast.Constant(value=k) for k in value.keys()],
-                values=[self._create_ast_value(v) for v in value.values()]
-            )
+            keys = []
+            vals = []
+            for k, v in value.items():
+                key_node = ast.Constant(value=k)
+                val_node = self._create_ast_value(v)
+                if val_node is not None:
+                    keys.append(key_node)
+                    vals.append(val_node)
+            return ast.Dict(keys=keys, values=vals)
         elif isinstance(value, tuple):
-            return ast.Tuple(
-                elts=[self._create_ast_value(v) for v in value if self._create_ast_value(v)],
-                ctx=ast.Load()
-            )
+            elts = []
+            for v in value:
+                node = self._create_ast_value(v)
+                if node is not None:
+                    elts.append(node)
+            return ast.Tuple(elts=elts, ctx=ast.Load())
         return None
     
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
@@ -379,82 +411,50 @@ class ResumeInstrumenter(ast.NodeTransformer):
         """Replace initial variable assignments with checkpoint values"""
         if not self.in_function:
             return node
-        
         # Check if this is a simple assignment to a checkpointed variable
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             var_name = node.targets[0].id
             if var_name in self.checkpoint_state and var_name not in self.modified_vars:
-                # Replace with checkpoint value
                 value = self.checkpoint_state[var_name]
                 new_value = self._create_ast_value(value)
-                if new_value:
+                if new_value is not None:
                     node.value = new_value
                     self.modified_vars.add(var_name)
-        
         return node
     
     def visit_For(self, node: ast.For) -> ast.For:
-        """Adjust for loop range to start from checkpoint position"""
-        if not self.in_function or self.found_main_loop:
+        """Adjust for loop range to start from checkpointed loop index (not percent progress)"""
+        if not self.in_function:
             return node
-        
-        # Check if this is a for loop with range()
-        if isinstance(node.iter, ast.Call):
-            func = node.iter.func
-            if isinstance(func, ast.Name) and func.id == 'range':
-                # Get progress from checkpoint
-                progress = self.checkpoint_state.get("progress_percent", 0)
-                
-                if progress > 0:
-                    args = node.iter.args
-                    
-                    if len(args) == 1:
-                        # range(n) -> range(_resume_start, n)
-                        end_arg = args[0]
-                        start_expr = ast.Call(
-                            func=ast.Name(id='int', ctx=ast.Load()),
-                            args=[ast.BinOp(
-                                left=ast.BinOp(
-                                    left=ast.Constant(value=progress),
-                                    op=ast.Mult(),
-                                    right=end_arg
-                                ),
-                                op=ast.Div(),
-                                right=ast.Constant(value=100)
-                            )],
-                            keywords=[]
-                        )
-                        node.iter.args = [start_expr, end_arg]
-                        self.found_main_loop = True
-                    
-                    elif len(args) >= 2:
-                        # range(start, end) -> range(max(start, calculated), end)
-                        orig_start, end_arg = args[0], args[1]
-                        start_expr = ast.Call(
+        # Only handle simple for i in range(n) or range(start, n)
+        if isinstance(node.target, ast.Name):
+            loop_var = node.target.id
+            if loop_var in self.checkpoint_state:
+                resume_from = self.checkpoint_state[loop_var]
+                args = node.iter.args if isinstance(node.iter, ast.Call) else []
+                if len(args) == 1:
+                    # range(n) -> range(resume_from, n)
+                    node.iter.args = [ast.Constant(value=resume_from), args[0]]
+                elif len(args) >= 2:
+                    # range(start, end) -> range(max(start, resume_from), end)
+                    orig_start, end_arg = args[0], args[1]
+                    start_expr = ast.Call(
                             func=ast.Name(id='max', ctx=ast.Load()),
                             args=[
-                                orig_start,
-                                ast.Call(
-                                    func=ast.Name(id='int', ctx=ast.Load()),
-                                    args=[ast.BinOp(
-                                        left=ast.BinOp(
-                                            left=ast.Constant(value=progress),
-                                            op=ast.Mult(),
-                                            right=end_arg
-                                        ),
-                                        op=ast.Div(),
-                                        right=ast.Constant(value=100)
-                                    )],
-                                    keywords=[]
-                                )
-                            ],
-                            keywords=[]
-                        )
-                        node.iter.args = [start_expr, args[1]] + args[2:]
-                        self.found_main_loop = True
-        
+                            orig_start,
+                            ast.Constant(value=resume_from)
+                        ],
+                        keywords=[]
+                    )
+                    node.iter.args = [start_expr, args[1]] + args[2:]
         self.generic_visit(node)
         return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        return self.visit_FunctionDef(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
+        return self.visit_For(node)
 
 
 def instrument_for_mobile(
