@@ -34,7 +34,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, pipeline
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
 
 
 def _require_numpy():
@@ -248,12 +248,12 @@ def _build_stage0_payload(
     }
 
 
-@crowdio.task()
+@CROWDio.task()
 def emit_payload(payload):
     return payload
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=5.0,
     checkpoint_state=["partition_idx", "progress_percent"],
@@ -633,7 +633,7 @@ def run_tflite_partition(task_input):
     }
 
 
-@crowdio.task()
+@CROWDio.task()
 def classify_with_trace(task_input):
     import base64
     import io
@@ -790,7 +790,7 @@ async def run_single_job(args):
     )
 
     t0 = time.time()
-    results = await pipeline(stages)
+    results = await crowdio_pipeline(stages)
     pipeline_wall = time.time() - t0
 
     parsed = []
@@ -865,13 +865,13 @@ async def main():
     print(f"Devices per job    : {args.num_devices}")
     print(f"Tasks per stage    : {args.tasks_per_stage}")
 
-    await connect(args.host, args.port)
+    await crowdio_connect(args.host, args.port)
     try:
         started = time.time()
         results, pipeline_wall, stage0_payload = await run_single_job(args)
         total_wall = time.time() - started
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
     ok = [r for r in results if "error" not in r]
     failed = [r for r in results if "error" in r]

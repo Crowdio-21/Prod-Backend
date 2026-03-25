@@ -26,7 +26,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, pipeline
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
 
 
 def _require_numpy():
@@ -201,13 +201,13 @@ def _build_stage0_payload(model_name, input_size, num_partitions, dtype="float32
     }
 
 
-@crowdio.task()
+@CROWDio.task()
 def emit_payload(payload):
     """Simple stage-0 carrier task to inject prebuilt partition payload."""
     return payload
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=5.0,
     checkpoint_state=["partition_idx", "progress_percent"],
@@ -422,7 +422,7 @@ def run_tflite_partition_traced(task_input):
     }
 
 
-@crowdio.task()
+@CROWDio.task()
 def classify_with_trace(task_input):
     """Final stage classifier that also returns partition trace metadata."""
     import base64
@@ -584,7 +584,7 @@ async def run_single_pipeline_job(args):
     )
 
     t0 = time.time()
-    results = await pipeline(stages)
+    results = await crowdio_pipeline(stages)
     wall = time.time() - t0
 
     parsed = []
@@ -727,13 +727,13 @@ async def main():
     print(f"Jobs               : {args.jobs}")
     print(f"Concurrency        : {args.concurrency}")
 
-    await connect(args.host, args.port)
+    await crowdio_connect(args.host, args.port)
     try:
         started = time.time()
         results, per_job_wall, stage0_payload = await run_pipeline_jobs(args)
         total_wall = time.time() - started
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
     ok = [r for r in results if "error" not in r]
     failed = [r for r in results if "error" in r]
