@@ -9,7 +9,7 @@ import os
 import sqlite3
 
 # Database URL
-DATABASE_URL = "sqlite+aiosqlite:///./crowdcompute.db"
+DATABASE_URL = "sqlite+aiosqlite:///./crowdio.db"
 
 # Create async engine
 # timeout (seconds) lets SQLite wait for transient locks instead of failing fast.
@@ -138,7 +138,7 @@ async def init_db():
             if attempt == max_retries:
                 raise RuntimeError(
                     "SQLite database is locked and could not be initialized after retries. "
-                    "Close any DB viewers/writers holding crowdcompute.db and retry."
+                    "Close any DB viewers/writers holding crowdio.db and retry."
                 ) from exc
 
             wait_seconds = attempt

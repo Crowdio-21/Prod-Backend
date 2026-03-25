@@ -44,7 +44,7 @@ CROWDio uses a hub-and-spoke model:
                                                                        | Status, metrics, persistence
                                                                        v
                                                          +-------------------------------+
-                                                         | SQLite (crowdcompute.db)      |
+                                                         | SQLite (crowdio.db)      |
                                                          | foreman/db/models.py          |
                                                          +-------------------------------+
 ```
@@ -399,7 +399,7 @@ No results returning:
 - Check Foreman `/api/jobs` and `/api/workers` endpoints.
 
 DB/schema drift:
-- If model schema changed, stop services and recreate `crowdcompute.db`.
+- If model schema changed, stop services and recreate `crowdio.db`.
 
 Large payload disconnects:
 - Current implementation uses `max_size=None` for WebSocket in Foreman and SDK to avoid default 1 MB caps.
