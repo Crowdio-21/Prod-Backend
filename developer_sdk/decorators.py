@@ -1,5 +1,5 @@
 """
-Declarative checkpointing SDK for CrowdCompute
+Declarative checkpointing SDK for CROWDio
 
 Provides decorators and metadata classes for task definition with
 automatic checkpoint support. Developers declare:
@@ -14,14 +14,14 @@ The system automatically handles:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 from functools import wraps
 import inspect
-from .namespace import crowdio
+from .constants import CROWDioConstant
 
 
 @dataclass
-class TaskMetadata:
+class CROWDioTaskMetadata:
     """
     Metadata for a task's checkpointing configuration
 
@@ -65,7 +65,7 @@ class TaskMetadata:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TaskMetadata":
+    def from_dict(cls, data: Dict[str, Any]) -> "CROWDioTaskMetadata":
         """Deserialize metadata from dictionary"""
         return cls(
             checkpoint_enabled=data.get("checkpoint_enabled", False),
@@ -123,19 +123,19 @@ class TaskMetadata:
         return {key: state[key] for key in self.checkpoint_state if key in state}
 
 
-class TaskConfig:
+class CROWDioTaskConfig:
     """
     Configuration wrapper for task functions
 
     Attached to decorated functions via __crowdio_config__ attribute.
     """
 
-    def __init__(self, metadata: TaskMetadata, original_func: Callable):
+    def __init__(self, metadata: CROWDioTaskMetadata, original_func: Callable):
         self.metadata = metadata
         self.original_func = original_func
         self._wrapper_func: Optional[Callable] = None
 
-    def get_metadata(self) -> TaskMetadata:
+    def get_metadata(self) -> CROWDioTaskMetadata:
         """Get task metadata"""
         return self.metadata
 
@@ -144,7 +144,7 @@ class TaskConfig:
         return self.metadata.checkpoint_enabled
 
 
-def task(
+def CROWDio_task(
     parallel: bool = True,
     checkpoint: bool = False,
     checkpoint_interval: float = 10.0,
@@ -154,17 +154,16 @@ def task(
     timeout: Optional[float] = None,
 ) -> Callable:
     """
-    Decorator for declaring a CrowdCompute task with checkpoint support
+    Decorator for declaring a CROWDio task with checkpoint support
 
     Usage:
-        @crowdio.task(
+        @CROWDio.task(
             parallel=True,
             checkpoint=True,
             checkpoint_interval=5,
             checkpoint_state=["i", "partial_result", "progress_percent"]
         )
         def my_task(state, data):
-            # state is automatically injected with checkpoint support
             for i in range(state.get("i", 0), len(data)):
                 state["i"] = i
                 state["partial_result"] = process(data[i])
@@ -182,12 +181,12 @@ def task(
         timeout: Task timeout in seconds (None = no timeout)
 
     Returns:
-        Decorated function with TaskConfig attached
+        Decorated function with CROWDioTaskConfig attached
     """
 
     def decorator(func: Callable) -> Callable:
         # Create metadata for this task
-        metadata = TaskMetadata(
+        metadata = CROWDioTaskMetadata(
             checkpoint_enabled=checkpoint,
             checkpoint_interval=checkpoint_interval,
             checkpoint_state=checkpoint_state or [],
@@ -199,7 +198,7 @@ def task(
         )
 
         # Create task config
-        config = TaskConfig(metadata, func)
+        config = CROWDioTaskConfig(metadata, func)
 
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -225,37 +224,37 @@ def task(
     return decorator
 
 
-def get_task_metadata(func: Callable) -> Optional[TaskMetadata]:
+def CROWDio_get_task_metadata(func: Callable) -> Optional[CROWDioTaskMetadata]:
     """
-    Extract TaskMetadata from a decorated function
+    Extract CROWDioTaskMetadata from a decorated function
 
     Args:
         func: Potentially decorated function
 
     Returns:
-        TaskMetadata if function was decorated with @task, else None
+        CROWDioTaskMetadata if function was decorated with @CROWDio_task, else None
     """
     if hasattr(func, "__crowdio_metadata__"):
         return func.__crowdio_metadata__
     return None
 
 
-def get_task_config(func: Callable) -> Optional[TaskConfig]:
+def CROWDio_get_task_config(func: Callable) -> Optional[CROWDioTaskConfig]:
     """
-    Extract TaskConfig from a decorated function
+    Extract CROWDioTaskConfig from a decorated function
 
     Args:
         func: Potentially decorated function
 
     Returns:
-        TaskConfig if function was decorated with @task, else None
+        CROWDioTaskConfig if function was decorated with @CROWDio_task, else None
     """
     if hasattr(func, "__crowdio_config__"):
         return func.__crowdio_config__
     return None
 
 
-def is_checkpoint_task(func: Callable) -> bool:
+def CROWDio_is_checkpoint_task(func: Callable) -> bool:
     """
     Check if a function has checkpointing enabled
 
@@ -265,11 +264,11 @@ def is_checkpoint_task(func: Callable) -> bool:
     Returns:
         True if function has checkpoint=True decorator
     """
-    metadata = get_task_metadata(func)
+    metadata = CROWDio_get_task_metadata(func)
     return metadata is not None and metadata.checkpoint_enabled
 
 
-def create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
+def CROWDio_create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
     """
     Create an initial state dictionary with declared checkpoint variables
 
@@ -280,3 +279,13 @@ def create_state_dict(checkpoint_state: List[str]) -> Dict[str, Any]:
         Dictionary with all variables initialized to None
     """
     return {var: None for var in checkpoint_state}
+
+
+class CROWDioNamespace:
+    """Namespace class for @CROWDio.task decorator style"""
+
+    task = staticmethod(CROWDio_task)
+    Constant = CROWDioConstant
+
+
+CROWDio = CROWDioNamespace()

@@ -1,36 +1,22 @@
 import asyncio
 import json
 import uuid
-from pathlib import Path
 import websockets
 from typing import Any, Callable, List, Optional, Dict
 from common.protocol import (
     Message,
     MessageType,
     create_submit_job_message,
-    create_submit_job_message_with_metadata,
     create_submit_pipeline_job_message,
     create_ping_message,
     create_pong_message,
-    create_intermediate_feature_message,
 )
-from common.serializer import (
-    serialize_function,
-    encode_feature_payload,
-    decode_feature_payload,
-)
+from common.serializer import serialize_function
 from common.code_instrumenter import (
     instrument_for_task_control,
     generate_task_control_wrapper,
 )
-from .decorators import get_task_metadata, TaskMetadata
-from .model_artifacts import build_partition_artifact
-from .topology import validate_topology
-
-
-def _native_model_stage_passthrough(task_input: Any) -> Any:
-    """Fallback stage callable for native runtimes that execute model partitions directly."""
-    return task_input
+from .decorators import CROWDio_get_task_metadata, CROWDioTaskMetadata
 
 
 class CrowdComputeClient:
@@ -154,11 +140,11 @@ class CrowdComputeClient:
 
         try:
             # Extract metadata from decorated function (if present)
-            metadata = get_task_metadata(func)
+            metadata = CROWDio_get_task_metadata(func)
 
             # Apply any overrides from kwargs
             if metadata:
-                task_metadata = TaskMetadata(
+                task_metadata = CROWDioTaskMetadata(
                     checkpoint_enabled=kwargs.get(
                         "checkpoint", metadata.checkpoint_enabled
                     ),
@@ -178,7 +164,7 @@ class CrowdComputeClient:
                 )
             else:
                 # Create default metadata if not decorated
-                task_metadata = TaskMetadata(
+                task_metadata = CROWDioTaskMetadata(
                     checkpoint_enabled=kwargs.get("checkpoint", False),
                     checkpoint_interval=kwargs.get("checkpoint_interval", 10.0),
                     checkpoint_state=kwargs.get("checkpoint_state", []),
@@ -208,10 +194,10 @@ class CrowdComputeClient:
                     f"[SDK] Task control: instrumented {num_funcs} functions, "
                     f"{num_ctrl_loops} loops"
                 )
-
+                
             # Create submission message with metadata
-            message = create_submit_job_message_with_metadata(
-                func_code, iterable, job_id, task_metadata.to_dict()
+            message = self._create_submit_job_message_with_metadata(
+                func_code, iterable, job_id, task_metadata
             )
 
             # Store job metadata for tracking
@@ -246,6 +232,36 @@ class CrowdComputeClient:
                 del self._submitted_jobs[job_id]
             raise
 
+    def _create_submit_job_message_with_metadata(
+        self,
+        func_code: str,
+        args_list: List[Any],
+        job_id: str,
+        metadata: CROWDioTaskMetadata,
+    ) -> Message:
+        """
+        Create a job submission message with checkpoint metadata
+
+        Args:
+            func_code: Serialized function code
+            args_list: List of task arguments
+            job_id: Job identifier
+            metadata: Task checkpoint metadata
+
+        Returns:
+            Message object ready to send
+        """
+        return Message(
+            msg_type=MessageType.SUBMIT_JOB,
+            data={
+                "func_code": func_code,
+                "args_list": args_list,
+                "total_tasks": len(args_list),
+                "task_metadata": metadata.to_dict(),
+            },
+            job_id=job_id,
+        )
+
     async def submit(self, func: Callable, iterable: List[Any], **kwargs) -> str:
         """
         Submit a job asynchronously without waiting for results
@@ -264,9 +280,9 @@ class CrowdComputeClient:
         job_id = str(uuid.uuid4())
 
         # Extract metadata
-        metadata = get_task_metadata(func)
+        metadata = CROWDio_get_task_metadata(func)
         if metadata:
-            task_metadata = TaskMetadata(
+            task_metadata = CROWDioTaskMetadata(
                 checkpoint_enabled=kwargs.get(
                     "checkpoint", metadata.checkpoint_enabled
                 ),
@@ -283,7 +299,7 @@ class CrowdComputeClient:
                 _func_name=metadata._func_name,
             )
         else:
-            task_metadata = TaskMetadata(
+            task_metadata = CROWDioTaskMetadata(
                 checkpoint_enabled=kwargs.get("checkpoint", False),
                 checkpoint_interval=kwargs.get("checkpoint_interval", 10.0),
                 _func_name=func.__name__,
@@ -322,8 +338,8 @@ class CrowdComputeClient:
         }
 
         # Create and send message
-        message = create_submit_job_message_with_metadata(
-            func_code, iterable, job_id, task_metadata.to_dict()
+        message = self._create_submit_job_message_with_metadata(
+            func_code, iterable, job_id, task_metadata
         )
         await self.websocket.send(message.to_json())
 
@@ -371,8 +387,6 @@ class CrowdComputeClient:
         self,
         stages: List[Dict[str, Any]],
         dependency_map: Optional[Dict[str, List[str]]] = None,
-        dnn_config: Optional[Dict[str, Any]] = None,
-        pipeline_mode: str = "barrier",
         **kwargs,
     ) -> List[Any]:
         """
@@ -390,7 +404,7 @@ class CrowdComputeClient:
         Args:
             stages: Ordered list of stage definitions.  Each stage is a dict:
                 {
-                    "func": <callable>,        # optional for native model stages
+                    "func": <callable>,        # function for this stage
                     "args_list": [arg1, ...],  # one entry per task
                     "pass_upstream_results": False,  # inject upstream results?
                     "name": "stage_name",      # optional human label
@@ -425,31 +439,18 @@ class CrowdComputeClient:
         try:
             # Build stage definitions for the protocol message
             stage_defs = []
-            for stage_idx, stage_def in enumerate(stages):
-                func = stage_def.get("func")
+            for stage_def in stages:
+                func = stage_def["func"]
                 args_list = stage_def["args_list"]
-                stage_name = stage_def.get("name")
-                if not stage_name:
-                    if func is not None:
-                        stage_name = func.__name__
-                    else:
-                        stage_name = f"stage_{stage_idx}"
 
-                execution_mode = stage_def.get("execution_mode")
-                model_partition_id = stage_def.get("model_partition_id") or stage_name
-
-                # Serialise function (or internal passthrough for native model stages)
-                if func is None:
-                    if not execution_mode:
-                        execution_mode = "native_model"
-                    func_code = serialize_function(_native_model_stage_passthrough)
-                    metadata = None
+                # Serialise function
+                if hasattr(func, "__crowdio_original__"):
+                    func_code = serialize_function(func.__crowdio_original__)
                 else:
-                    if hasattr(func, "__crowdio_original__"):
-                        func_code = serialize_function(func.__crowdio_original__)
-                    else:
-                        func_code = serialize_function(func)
-                    metadata = get_task_metadata(func)
+                    func_code = serialize_function(func)
+
+                # Extract per-stage task metadata
+                metadata = CROWDio_get_task_metadata(func)
 
                 # Pre-instrument with task control (pause/kill) at SDK level
                 stage_ckpt_vars = []
@@ -464,19 +465,15 @@ class CrowdComputeClient:
                 if metadata:
                     task_meta_dict = metadata.to_dict()
 
-                stage_defs.append(
-                    {
-                        "func_code": func_code,
-                        "args_list": args_list,
-                        "pass_upstream_results": stage_def.get(
-                            "pass_upstream_results", False
-                        ),
-                        "task_metadata": task_meta_dict,
-                        "name": stage_name,
-                        "execution_mode": execution_mode or "python",
-                        "model_partition_id": model_partition_id,
-                    }
-                )
+                stage_defs.append({
+                    "func_code": func_code,
+                    "args_list": args_list,
+                    "pass_upstream_results": stage_def.get(
+                        "pass_upstream_results", False
+                    ),
+                    "task_metadata": task_meta_dict,
+                    "name": stage_def.get("name", func.__name__),
+                })
 
             # Global task metadata from kwargs
             global_meta = None
@@ -493,8 +490,6 @@ class CrowdComputeClient:
                 stages=stage_defs,
                 dependency_map=dependency_map,
                 task_metadata=global_meta,
-                dnn_config=dnn_config,
-                pipeline_mode=pipeline_mode,
             )
 
             self._submitted_jobs[job_id] = {
@@ -523,239 +518,6 @@ class CrowdComputeClient:
             raise
 
     async def run(self, func: Callable, *args, **kwargs) -> Any:
-        """Run a single function with arguments in one worker."""
-        # Reuse map() flow for consistency with metadata/checkpoint handling.
-        task_payload: Any = args
-        call_kwargs = dict(kwargs)
-        if call_kwargs:
-            task_payload = [list(args), call_kwargs]
-
-        results = await self.map(func, [task_payload])
-        if not results:
-            return None
-        return results[0]
-
-    async def dnn_pipeline(
-        self,
-        stages: List[Dict[str, Any]],
-        inference_graph_id: Optional[str] = None,
-        topology_nodes: Optional[List[Dict[str, Any]]] = None,
-        topology_edges: Optional[List[Dict[str, Any]]] = None,
-        model_paths: Optional[List[str]] = None,
-        model_partition_ids: Optional[List[str]] = None,
-        model_version_id: Optional[str] = None,
-        model_artifacts: Optional[List[Dict[str, Any]]] = None,
-        aggregation_strategy: str = "average",
-        dependency_map: Optional[Dict[str, List[str]]] = None,
-        pipeline_mode: str = "streaming",
-        **kwargs,
-    ) -> List[Any]:
-        """
-        Submit a topology-aware DNN pipeline job.
-
-        You can provide explicit topology metadata (topology_nodes/topology_edges)
-        or model paths (either model_paths=[...] or per-stage "model" fields),
-        in which case the SDK builds a linear topology from stage order
-        automatically.
-        """
-        if not stages:
-            raise ValueError("stages must not be empty")
-
-        stage_model_paths: List[Optional[str]] = []
-        stage_model_count = 0
-        for stage in stages:
-            model_path = stage.get("model")
-            if model_path:
-                stage_model_paths.append(str(model_path))
-                stage_model_count += 1
-            else:
-                stage_model_paths.append(None)
-
-        if stage_model_count and stage_model_count != len(stages):
-            raise ValueError(
-                "When using per-stage model fields, every stage must include a model path"
-            )
-
-        resolved_model_paths = list(model_paths or [])
-        if not resolved_model_paths and stage_model_count:
-            resolved_model_paths = [p for p in stage_model_paths if p is not None]
-
-        if resolved_model_paths and stage_model_count:
-            explicit_stage_models = [p for p in stage_model_paths if p is not None]
-            if len(explicit_stage_models) != len(resolved_model_paths):
-                raise ValueError(
-                    "model_paths length must match the number of stage model entries"
-                )
-            for idx, (from_stage, from_arg) in enumerate(
-                zip(explicit_stage_models, resolved_model_paths)
-            ):
-                if from_stage != from_arg:
-                    raise ValueError(
-                        f"Conflicting model path at stage index {idx}: stage model '{from_stage}' != model_paths '{from_arg}'"
-                    )
-
-        normalized_stages: List[Dict[str, Any]] = []
-        used_stage_names = set()
-        for idx, stage in enumerate(stages):
-            stage_copy = dict(stage)
-            stage_name = stage_copy.get("name")
-            if not stage_name:
-                if idx < len(stage_model_paths) and stage_model_paths[idx]:
-                    stage_name = Path(stage_model_paths[idx]).stem
-                elif idx < len(resolved_model_paths):
-                    stage_name = Path(resolved_model_paths[idx]).stem
-                else:
-                    func = stage_copy.get("func")
-                    stage_name = getattr(func, "__name__", f"stage_{idx}")
-
-            base_name = str(stage_name)
-            unique_name = base_name
-            suffix = 1
-            while unique_name in used_stage_names:
-                unique_name = f"{base_name}_{suffix}"
-                suffix += 1
-
-            stage_copy["name"] = unique_name
-            stage_has_func = stage_copy.get("func") is not None
-            if not stage_has_func and idx < len(resolved_model_paths):
-                stage_copy["execution_mode"] = stage_copy.get(
-                    "execution_mode", "native_model"
-                )
-                stage_copy["model_partition_id"] = stage_copy.get(
-                    "model_partition_id", unique_name
-                )
-            stage_copy.pop("model", None)
-            used_stage_names.add(unique_name)
-            normalized_stages.append(stage_copy)
-
-        if resolved_model_paths and len(resolved_model_paths) != len(normalized_stages):
-            raise ValueError("model_paths length must match stages length")
-
-        resolved_partition_ids = list(model_partition_ids or [])
-        if resolved_partition_ids and not resolved_model_paths:
-            raise ValueError(
-                "model_partition_ids requires model paths (from model_paths or per-stage model)"
-            )
-
-        if resolved_partition_ids and len(resolved_partition_ids) != len(
-            normalized_stages
-        ):
-            raise ValueError("model_partition_ids length must match stages length")
-
-        if resolved_model_paths and not resolved_partition_ids:
-            # Keep partition IDs aligned with stage names for topology validation.
-            resolved_partition_ids = [stage["name"] for stage in normalized_stages]
-
-        resolved_topology_nodes = topology_nodes
-        resolved_topology_edges = topology_edges
-
-        if resolved_topology_nodes is None or resolved_topology_edges is None:
-            if not resolved_model_paths:
-                raise ValueError(
-                    "Provide topology_nodes/topology_edges or model_paths for auto-topology"
-                )
-
-            resolved_topology_nodes = []
-            for idx, stage in enumerate(normalized_stages):
-                if idx == 0:
-                    role = "source"
-                elif idx == len(normalized_stages) - 1:
-                    role = "sink"
-                else:
-                    role = "intermediate"
-
-                requirements = stage.get("requirements") or {}
-                if not isinstance(requirements, dict):
-                    requirements = {}
-
-                resolved_topology_nodes.append(
-                    {
-                        "node_id": stage["name"],
-                        "role": role,
-                        "model_partition_id": resolved_partition_ids[idx],
-                        "requirements": requirements,
-                    }
-                )
-
-            resolved_topology_edges = [
-                {
-                    "source": normalized_stages[idx]["name"],
-                    "target": normalized_stages[idx + 1]["name"],
-                    "metadata": {"kind": "pipeline"},
-                }
-                for idx in range(len(normalized_stages) - 1)
-            ]
-        else:
-            resolved_topology_nodes = list(resolved_topology_nodes)
-            resolved_topology_edges = list(resolved_topology_edges)
-
-        resolved_model_artifacts = model_artifacts
-        if resolved_model_artifacts is None and resolved_model_paths:
-            resolved_model_artifacts = []
-            for idx, model_path in enumerate(resolved_model_paths):
-                resolved_model_artifacts.append(
-                    build_partition_artifact(
-                        model_partition_id=resolved_partition_ids[idx],
-                        file_path=model_path,
-                        assigned_device_id=None,
-                    )
-                )
-        elif resolved_model_artifacts is None:
-            resolved_model_artifacts = []
-
-        resolved_inference_graph_id = (
-            inference_graph_id or f"dnn-graph-{uuid.uuid4().hex[:12]}"
-        )
-
-        resolved_model_version_id = model_version_id
-        if resolved_model_artifacts and not resolved_model_version_id:
-            resolved_model_version_id = f"dnn-model-{uuid.uuid4().hex[:12]}"
-
-        validate_topology(
-            stages=normalized_stages,
-            topology_nodes=resolved_topology_nodes,
-            topology_edges=resolved_topology_edges,
-        )
-
-        dnn_config = {
-            "inference_graph_id": resolved_inference_graph_id,
-            "topology_nodes": resolved_topology_nodes,
-            "topology_edges": resolved_topology_edges,
-            "model_version_id": resolved_model_version_id,
-            "model_artifacts": resolved_model_artifacts,
-            "aggregation_strategy": aggregation_strategy,
-        }
-        return await self.pipeline(
-            stages=normalized_stages,
-            dependency_map=dependency_map,
-            dnn_config=dnn_config,
-            pipeline_mode=pipeline_mode,
-            **kwargs,
-        )
-
-    async def send_intermediate_feature(
-        self,
-        job_id: str,
-        task_id: str,
-        target_task_id: str,
-        payload: Any,
-        source_worker_id: str = "sdk-client",
-    ) -> None:
-        """Send intermediate feature payload to foreman with tensor-aware encoding."""
-        if not self.connected:
-            raise RuntimeError("Not connected to foreman. Call connect() first.")
-
-        encoded_payload = encode_feature_payload(payload)
-        message = create_intermediate_feature_message(
-            job_id=job_id,
-            task_id=task_id,
-            source_worker_id=source_worker_id,
-            target_task_id=target_task_id,
-            payload=encoded_payload,
-            payload_format="json",
-        )
-        await self.websocket.send(message.to_json())
-
-    def decode_intermediate_feature_payload(self, payload: Any) -> Any:
-        """Public helper for decoding tensor-aware intermediate feature payloads."""
-        return decode_feature_payload(payload)
+        """Run a single function with arguments in one worker"""
+        # Like AWS lambda
+        pass
