@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 def get_db_connection():
-    """Get connection to the crowdcompute database"""
-    db_path = os.path.join(os.path.dirname(__file__), '..', 'crowdcompute.db')
+    """Get connection to the crowdio database"""
+    db_path = os.path.join(os.path.dirname(__file__), '..', 'crowdio.db')
     if not os.path.exists(db_path):
         print(f"❌ Database not found at: {db_path}")
         sys.exit(1)
