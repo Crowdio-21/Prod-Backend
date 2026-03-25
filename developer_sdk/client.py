@@ -14,9 +14,9 @@ from common.protocol import (
 from common.serializer import serialize_function
 from common.code_instrumenter import (
     instrument_for_task_control,
-    generate_task_control_wrapper,
+    generate_runtime_wrappers,
 )
-from .decorators import get_task_metadata, TaskMetadata
+from .decorators import CROWDio_get_task_metadata, CROWDioTaskMetadata
 
 
 class CrowdComputeClient:
@@ -140,11 +140,11 @@ class CrowdComputeClient:
 
         try:
             # Extract metadata from decorated function (if present)
-            metadata = get_task_metadata(func)
+            metadata = CROWDio_get_task_metadata(func)
 
             # Apply any overrides from kwargs
             if metadata:
-                task_metadata = TaskMetadata(
+                task_metadata = CROWDioTaskMetadata(
                     checkpoint_enabled=kwargs.get(
                         "checkpoint", metadata.checkpoint_enabled
                     ),
@@ -164,7 +164,7 @@ class CrowdComputeClient:
                 )
             else:
                 # Create default metadata if not decorated
-                task_metadata = TaskMetadata(
+                task_metadata = CROWDioTaskMetadata(
                     checkpoint_enabled=kwargs.get("checkpoint", False),
                     checkpoint_interval=kwargs.get("checkpoint_interval", 10.0),
                     checkpoint_state=kwargs.get("checkpoint_state", []),
@@ -187,8 +187,11 @@ class CrowdComputeClient:
             func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
                 func_code, checkpoint_state_vars=checkpoint_state_vars
             )
-            control_wrapper = generate_task_control_wrapper()
-            func_code = control_wrapper + "\n" + func_code
+            runtime_wrapper = generate_runtime_wrappers(
+                include_checkpoint=True,
+                include_task_control=True,
+            )
+            func_code = runtime_wrapper + "\n" + func_code
             if num_funcs > 0:
                 print(
                     f"[SDK] Task control: instrumented {num_funcs} functions, "
@@ -233,7 +236,11 @@ class CrowdComputeClient:
             raise
 
     def _create_submit_job_message_with_metadata(
-        self, func_code: str, args_list: List[Any], job_id: str, metadata: TaskMetadata
+        self,
+        func_code: str,
+        args_list: List[Any],
+        job_id: str,
+        metadata: CROWDioTaskMetadata,
     ) -> Message:
         """
         Create a job submission message with checkpoint metadata
@@ -276,9 +283,9 @@ class CrowdComputeClient:
         job_id = str(uuid.uuid4())
 
         # Extract metadata
-        metadata = get_task_metadata(func)
+        metadata = CROWDio_get_task_metadata(func)
         if metadata:
-            task_metadata = TaskMetadata(
+            task_metadata = CROWDioTaskMetadata(
                 checkpoint_enabled=kwargs.get(
                     "checkpoint", metadata.checkpoint_enabled
                 ),
@@ -295,7 +302,7 @@ class CrowdComputeClient:
                 _func_name=metadata._func_name,
             )
         else:
-            task_metadata = TaskMetadata(
+            task_metadata = CROWDioTaskMetadata(
                 checkpoint_enabled=kwargs.get("checkpoint", False),
                 checkpoint_interval=kwargs.get("checkpoint_interval", 10.0),
                 _func_name=func.__name__,
@@ -312,8 +319,11 @@ class CrowdComputeClient:
         func_code, num_funcs, num_ctrl_loops = instrument_for_task_control(
             func_code, checkpoint_state_vars=checkpoint_state_vars
         )
-        control_wrapper = generate_task_control_wrapper()
-        func_code = control_wrapper + "\n" + func_code
+        runtime_wrapper = generate_runtime_wrappers(
+            include_checkpoint=True,
+            include_task_control=True,
+        )
+        func_code = runtime_wrapper + "\n" + func_code
         if num_funcs > 0:
             print(
                 f"[SDK] Task control: instrumented {num_funcs} functions, "
@@ -446,7 +456,7 @@ class CrowdComputeClient:
                     func_code = serialize_function(func)
 
                 # Extract per-stage task metadata
-                metadata = get_task_metadata(func)
+                metadata = CROWDio_get_task_metadata(func)
 
                 # Pre-instrument with task control (pause/kill) at SDK level
                 stage_ckpt_vars = []
@@ -455,8 +465,11 @@ class CrowdComputeClient:
                 func_code, _, _ = instrument_for_task_control(
                     func_code, checkpoint_state_vars=stage_ckpt_vars
                 )
-                ctrl_wrapper = generate_task_control_wrapper()
-                func_code = ctrl_wrapper + "\n" + func_code
+                runtime_wrapper = generate_runtime_wrappers(
+                    include_checkpoint=True,
+                    include_task_control=True,
+                )
+                func_code = runtime_wrapper + "\n" + func_code
                 task_meta_dict = None
                 if metadata:
                     task_meta_dict = metadata.to_dict()

@@ -22,7 +22,7 @@ if __name__ == "__main__":
     print("📊 Dashboard:     http://localhost:8000")
     print("📚 API Docs:      http://localhost:8000/docs")
     print("🔌 WebSocket:     ws://localhost:9000")
-    print("🗄️  Database:      ./crowdcompute.db")
+    print("🗄️  Database:      ./crowdio.db")
     print("=" * 60)
     print("Press Ctrl+C to stop the server")
     print("=" * 60)

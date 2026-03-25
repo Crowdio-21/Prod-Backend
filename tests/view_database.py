@@ -18,7 +18,7 @@ def view_database():
     try:
         # Connect to SQLite database (database is in project root, not tests directory)
         project_root = os.path.dirname(os.path.dirname(__file__))
-        db_path = os.path.join(project_root, 'crowdcompute.db')
+        db_path = os.path.join(project_root, 'crowdio.db')
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         

@@ -2,7 +2,7 @@
 """
 Example client demonstrating declarative checkpointing
 
-This example shows how to use the @crowdio.task decorator with
+This example shows how to use the @CROWDio.task decorator with
 checkpoint_enabled=True to enable automatic state capture and recovery.
 
 The task simulates a long-running computation (e.g., Monte Carlo simulation)
@@ -18,7 +18,7 @@ import json
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map, run, disconnect, crowdio
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 
 def parse_result(result):
@@ -42,7 +42,7 @@ def parse_result(result):
 # =============================================================================
 # Example 1: Simple checkpoint-enabled task - PURE LOGIC, NO RESUME CODE!
 # =============================================================================
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=0.5,  # Checkpoint every 0.5 seconds
     checkpoint_state=["count", "total", "samples", "progress_percent"]  # Variables to capture
@@ -118,7 +118,7 @@ def monte_carlo_pi(num_samples):
 # =============================================================================
 # Example 2: Task with retry logic
 # =============================================================================
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=0.5,
     checkpoint_state=["processed", "results", "progress_percent"],
@@ -172,7 +172,7 @@ def process_data_batch(batch):
 # =============================================================================
 # Example 3: Task without checkpointing (for comparison)
 # =============================================================================
-@crowdio.task(
+@CROWDio.task(
     checkpoint=False  # Explicitly disabled
 )
 def quick_task(x):
@@ -203,13 +203,13 @@ async def main():
     print("Declarative Checkpointing Demo")
     print("=" * 60)
     print()
-    print("This demo shows automatic state capture using @crowdio.task decorator")
+    print("This demo shows automatic state capture using @CROWDio.task decorator")
     print()
     
     try:
         # Connect to foreman
         print(f"Connecting to foreman at {foreman_host}:9000...")
-        await connect(foreman_host, 9000)
+        await crowdio_connect(foreman_host, 9000)
         print("Connected!\n")
         
         # =====================================================================
@@ -232,7 +232,7 @@ async def main():
         print()
         
         start_time = time.time()
-        results = await map(monte_carlo_pi, sample_counts)
+        results = await crowdio_map(monte_carlo_pi, sample_counts)
         end_time = time.time()
         
         print("\nResults:")
@@ -279,7 +279,7 @@ async def main():
         print(f"Processing {len(batches)} batches...")
         
         start_time = time.time()
-        batch_results = await map(process_data_batch, batches)
+        batch_results = await crowdio_map(process_data_batch, batches)
         end_time = time.time()
         
         print("\nResults:")
@@ -315,7 +315,7 @@ async def main():
         print(f"Running {len(numbers)} quick tasks...")
         
         start_time = time.time()
-        quick_results = await map(quick_task, numbers)
+        quick_results = await crowdio_map(quick_task, numbers)
         end_time = time.time()
         
         print(f"\nResults: {quick_results[:5]}... (first 5 shown)")
@@ -348,7 +348,7 @@ Best Practices:
         traceback.print_exc()
         
     finally:
-        await disconnect()
+        await crowdio_disconnect()
         print("\nDisconnected from foreman")
 
 

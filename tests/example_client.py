@@ -11,7 +11,7 @@ import time
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import connect, map, run, disconnect
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def square(x):
@@ -56,14 +56,14 @@ async def main():
     try:
         # Connect to foreman
         print(f"Connecting to foreman at {foreman_host}:9000...")
-        await connect(foreman_host, 9000)
+        await crowdio_connect(foreman_host, 9000)
         print("Connected!")
         
         # Example 1: Simple map operation
         print("\n1. Running square function on numbers 1-10...")
         numbers = list(range(1, 11))
         start_time = time.time()
-        results = await map(square, numbers)
+        results = await crowdio_map(square, numbers)
         end_time = time.time()
         
         print(f"Results: {results}")
@@ -73,7 +73,7 @@ async def main():
         print("\n2. Calculating fibonacci numbers...")
         fib_inputs = [10, 15, 20, 25, 30]
         start_time = time.time()
-        fib_results = await map(fibonacci, fib_inputs)
+        fib_results = await crowdio_map(fibonacci, fib_inputs)
         end_time = time.time()
         
         print(f"Fibonacci results: {fib_results}")
@@ -88,7 +88,7 @@ async def main():
             [1000, 2000, 3000, 4000, 5000]
         ]
         start_time = time.time()
-        processed_results = await map(process_data, data_arrays)
+        processed_results = await crowdio_map(process_data, data_arrays)
         end_time = time.time()
         
         print(f"Processed results: {processed_results}")
@@ -109,7 +109,7 @@ async def main():
         print(f"Error: {e}")
     finally:
         # Disconnect
-        await disconnect()
+        await crowdio_disconnect()
         print("Disconnected from foreman")
 
 

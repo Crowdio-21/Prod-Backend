@@ -8,11 +8,11 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, map as distributed_map
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_map
 from developer_sdk.image_utils import split_image_into_tiles, reassemble_tiles
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=False,
     checkpoint_interval=3.0,
     checkpoint_state=["processed_count", "total_tiles", "avg_time", "progress"],
@@ -129,7 +129,7 @@ async def process_image(image_path, tile_size, filter_type, output_dir):
     ]
 
     start_time = time.time()
-    raw_results = await distributed_map(process_tile, tile_inputs)
+    raw_results = await crowdio_map(process_tile, tile_inputs)
     total_time = time.time() - start_time
 
     import json as _json
@@ -188,7 +188,7 @@ async def main():
     num_to_process = max(1, int(math.ceil(total_images * (args.percent / 100.0))))
     selected_images = image_paths[:num_to_process]
 
-    await connect("localhost", 9000)
+    await crowdio_connect("localhost", 9000)
     try:
         print(
             f"Processing {len(selected_images)} of {total_images} images ({args.percent}%)."
@@ -206,7 +206,7 @@ async def main():
                 )
             )
     finally:
-        await disconnect()
+        await crowdio_disconnect()
 
 
 if __name__ == "__main__":

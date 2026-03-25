@@ -66,7 +66,7 @@ import math
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import connect, disconnect, crowdio, pipeline
+from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
 
 
 # =====================================================================
@@ -340,7 +340,7 @@ def build_inception_dag(num_partitions=4, input_size=224):
 # Stage 0 – Partition the model and emit the execution plan
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def partition_model(config):
     """
     Build the partition plan and convert each partition to a TFLite sub-model.
@@ -474,7 +474,7 @@ def partition_model(config):
 # Stage 1 – Execute a TFLite partition slice on a worker device
 # =====================================================================
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=5.0,
     checkpoint_state=["partition_idx", "progress_percent"],
@@ -763,7 +763,7 @@ def run_tflite_partition(task_input):
 # Stage 2 – Fuse / join branches (skip-connection add, or concat)
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def fuse_branches(task_input):
     """
     Join / concatenate / add activation tensors from multiple upstream
@@ -875,7 +875,7 @@ def fuse_branches(task_input):
 # Stage 3 – Final classification head
 # =====================================================================
 
-@crowdio.task()
+@CROWDio.task()
 def classify(task_input):
     """
     Run the classification head (Global Average Pooling -> Dense -> Softmax)
@@ -1184,7 +1184,7 @@ async def main():
             dtype=args.dtype,
         )
     else:
-        await connect(args.host, args.port)
+        await crowdio_connect(args.host, args.port)
 
     try:
         if not args.local:
@@ -1229,7 +1229,7 @@ async def main():
 
     finally:
         if not args.local:
-            await disconnect()
+            await crowdio_disconnect()
 
 
 if __name__ == "__main__":

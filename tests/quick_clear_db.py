@@ -18,7 +18,7 @@ async def quick_clear():
     
     # Database is in project root, not tests directory
     project_root = os.path.dirname(os.path.dirname(__file__))
-    db_path = os.path.join(project_root, 'crowdcompute.db')
+    db_path = os.path.join(project_root, 'crowdio.db')
     
     async with aiosqlite.connect(db_path) as db:
         # Clear all tables

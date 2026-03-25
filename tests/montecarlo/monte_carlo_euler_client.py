@@ -23,10 +23,10 @@ import time
 # Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import connect, map as distributed_map, disconnect, crowdio
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 
-@crowdio.task(
+@CROWDio.task(
     checkpoint=True,
     checkpoint_interval=2.0,  # Checkpoint every 5 seconds
     checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
@@ -43,7 +43,7 @@ def monte_carlo_euler_worker(num_trials):
         Dictionary containing trial results and statistics
         
     Note:
-        The @crowdio.task decorator enables automatic checkpointing:
+        The @CROWDio.task decorator enables automatic checkpointing:
         - State variables are captured automatically via frame introspection
         - TRANSPARENT RESUME - framework handles everything automatically!
         - Just write your pure algorithm logic
@@ -215,7 +215,7 @@ async def run_distributed_monte_carlo_euler(total_trials, num_workers=None, fore
     print("=" * 70)
     
     print(f"\n📡 Connecting to foreman at {foreman_host}:9000...")
-    await connect(foreman_host, 9000)
+    await crowdio_connect(foreman_host, 9000)
     print("✅ Connected")
     
     print(f"\n🎯 Total Monte Carlo trials: {total_trials:,}")
@@ -238,7 +238,7 @@ async def run_distributed_monte_carlo_euler(total_trials, num_workers=None, fore
     start_time = time.time()
     
     print("\n⏳ Dispatching tasks to workers...")
-    results = await distributed_map(monte_carlo_euler_worker, task_inputs)
+    results = await crowdio_map(monte_carlo_euler_worker, task_inputs)
     
     execution_time = time.time() - start_time
     
@@ -273,7 +273,7 @@ async def run_distributed_monte_carlo_euler(total_trials, num_workers=None, fore
     for i, r in enumerate(aggregated.get("worker_results", []), 1):
         print(f"{i}. e ≈ {r['estimated_e']:.6f} | {r['num_trials']:,} trials | {r['latency_ms']} ms")
     
-    await disconnect()
+    await crowdio_disconnect()
     
     return aggregated
 
