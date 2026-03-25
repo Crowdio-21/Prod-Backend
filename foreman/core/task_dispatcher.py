@@ -142,14 +142,13 @@ class TaskDispatcher:
                 prepared_code, num_loops = instrument_for_mobile(
                     func_code=func_code, checkpoint_state_vars=checkpoint_state_vars
                 )
-                print(
-                    f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker"
-                )
-
-            # Prepend the mobile checkpoint wrapper
-            # Note: Task control (pause/kill) is already instrumented by the SDK
-            wrapper = generate_mobile_checkpoint_wrapper()
-            prepared_code = wrapper + "\n" + prepared_code
+                print(f"TaskDispatcher: Instrumented {num_loops} loops for mobile worker")
+            
+            # Prepend the mobile checkpoint wrapper only if not already present.
+            # SDK-side runtime wrapping may already include checkpoint support.
+            if "_MobileCheckpointState" not in prepared_code:
+                wrapper = generate_mobile_checkpoint_wrapper()
+                prepared_code = wrapper + "\n" + prepared_code
             return prepared_code
 
         except Exception as e:
