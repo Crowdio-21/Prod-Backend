@@ -1,3 +1,490 @@
+import ast
+import enum
+import logging
+import threading
+import time
+from typing import List, Dict, Any, Optional, Tuple
+
+
+# ===========================================================================
+# NEW — Runtime wrapper generators (updated)
+# ===========================================================================
+
+def generate_controller_wrapper() -> str:
+    """
+    Generate the check_control() wrapper that must be prepended to code
+    instrumented with ControllerInstrumenter.
+    """
+    return '''\
+# CROWDio runtime marker: controller_wrapper_v1
+__CROWDIO_CONTROLLER_WRAPPER__ = True
+
+import threading
+import time
+
+class TaskKilledException(Exception):
+    """Raised by check_control() when the task has been killed."""
+
+pause_event = threading.Event()
+kill_event  = threading.Event()
+
+def check_control():
+    """
+    Cooperative checkpoint injected by ControllerInstrumenter.
+    - If kill_event is set  → raises TaskKilledException.
+    - If pause_event is set → blocks via Event.wait() until cleared,
+      then re-checks kill (handles kill-during-pause).
+    """
+    if kill_event.is_set():
+        raise TaskKilledException("Task was killed")
+    if pause_event.is_set():
+        while pause_event.is_set():
+            pause_event.wait(timeout=0.05)
+            if kill_event.is_set():
+                raise TaskKilledException("Task was killed during pause")
+
+def setup_control():
+    """Reset both events before starting a new task run."""
+    pause_event.clear()
+    kill_event.clear()
+'''
+
+def generate_manual_checkpoint_wrapper() -> str:
+    """
+    Generate wrapper code that exposes a ``checkpoint`` (ManualCheckpointUtils)
+    instance to instrumented scripts.
+    """
+    return '''\
+# CROWDio runtime marker: manual_checkpoint_wrapper_v1
+__CROWDIO_MANUAL_CHECKPOINT_WRAPPER__ = True
+
+import threading
+import time
+
+class TaskKilledException(Exception):
+    """Raised when the task has been killed via checkpoint.kill()."""
+
+class _ManualCheckpointUtils:
+    """Cooperative checkpoint helper exposed as `checkpoint` to task scripts."""
+    def __init__(self):
+        self.pause_event = threading.Event()
+        self.kill_event  = threading.Event()
+        self._lock  = threading.Lock()
+        self._state = {}
+    def pause(self):
+        self.pause_event.set()
+    def resume(self):
+        self.pause_event.clear()
+    def kill(self):
+        self.kill_event.set()
+        self.pause_event.clear()   # wake up any waiting thread
+    def reset(self):
+        self.pause_event.clear()
+        self.kill_event.clear()
+        with self._lock:
+            self._state = {}
+    def check(self):
+        """Cooperative checkpoint: raise if killed, block if paused."""
+        if self.kill_event.is_set():
+            raise TaskKilledException("Task was killed")
+        if self.pause_event.is_set():
+            while self.pause_event.is_set():
+                self.pause_event.wait(timeout=0.05)
+                if self.kill_event.is_set():
+                    raise TaskKilledException("Task was killed during pause")
+    def save(self, state_dict):
+        """Persist checkpoint state (dict of variable names → values)."""
+        with self._lock:
+            self._state.update(state_dict)
+    def get_state(self):
+        """Return a snapshot of the latest saved state."""
+        with self._lock:
+            return dict(self._state)
+    def clear_state(self):
+        with self._lock:
+            self._state = {}
+
+# Singleton exposed to task scripts
+checkpoint = _ManualCheckpointUtils()
+'''
+
+def generate_runtime_wrappers(
+    include_checkpoint: bool = True,
+    include_task_control: bool = True,
+    include_controller: bool = False,
+    include_manual_checkpoint: bool = False,
+) -> str:
+    """
+    Build runtime wrappers in dependency-safe order.
+    Args:
+        include_checkpoint:        Include legacy _ckpt_update / _MobileCheckpointState.
+        include_task_control:      Include legacy _TaskControl (thread-local flags).
+        include_controller:        Include EventTaskControl check_control() wrapper.
+        include_manual_checkpoint: Include ManualCheckpointUtils `checkpoint` singleton.
+    Returns:
+        Combined wrapper code string.
+    """
+    parts = []
+    if include_checkpoint:
+        parts.append(generate_mobile_checkpoint_wrapper())
+    if include_task_control:
+        parts.append(generate_task_control_wrapper())
+    if include_controller:
+        parts.append(generate_controller_wrapper())
+    if include_manual_checkpoint:
+        parts.append(generate_manual_checkpoint_wrapper())
+    return "\n".join(parts)
+
+# ===========================================================================
+# NEW pipeline functions for controller/manual checkpointing
+# ===========================================================================
+
+def instrument_with_controller(
+    func_code: str,
+) -> Tuple[str, int, int]:
+    """
+    Instrument function code with check_control() calls (ControllerInstrumenter).
+    This is the preferred alternative to instrument_for_task_control().
+    - Injects a single ``check_control()`` call at the top of every loop body.
+    - check_control() raises TaskKilledException (propagates through try/finally)
+      and blocks via threading.Event.wait() for pause — no busy-loop.
+    - Idempotent: safe to call multiple times.
+    Args:
+        func_code: Original function source code.
+    Returns:
+        Tuple of (instrumented_code, num_functions_instrumented, num_loops_instrumented).
+    """
+    try:
+        tree = ast.parse(func_code)
+        instrumenter = ControllerInstrumenter()
+        tree = instrumenter.visit(tree)
+        ast.fix_missing_locations(tree)
+        return (
+            ast.unparse(tree),
+            instrumenter.functions_instrumented,
+            instrumenter.loops_instrumented,
+        )
+    except Exception as e:
+        logger.warning("[CodeInstrumenter] Controller instrumentation failed: %s", e)
+        return func_code, 0, 0
+
+def prepare_code_with_controller(
+    func_code: str,
+    include_checkpoint: bool = False,
+    checkpoint_state_vars: Optional[List[str]] = None,
+) -> str:
+    """
+    Full pipeline: inject check_control() calls and prepend EventTaskControl wrapper.
+    Optionally also injects _ckpt_update() calls for checkpoint state capture.
+    Args:
+        func_code:              Original function source code.
+        include_checkpoint:     If True, also run CheckpointInstrumenter and
+                                prepend the mobile checkpoint wrapper.
+        checkpoint_state_vars:  Variable names to capture (required when
+                                include_checkpoint=True).
+    Returns:
+        Code with controller wrapper (and optionally checkpoint wrapper)
+        prepended, and check_control() calls injected.
+    """
+    if "__CROWDIO_CONTROLLER_WRAPPER__ = True" in func_code:
+        return func_code
+    instrumented, num_funcs, num_loops = instrument_with_controller(func_code)
+    logger.debug(
+        "[CodeInstrumenter] Controller: instrumented %s functions, %s loops",
+        num_funcs,
+        num_loops,
+    )
+    if include_checkpoint and checkpoint_state_vars:
+        try:
+            tree = ast.parse(instrumented)
+            ckpt_instrumenter = CheckpointInstrumenter(checkpoint_state_vars)
+            tree = ckpt_instrumenter.visit(tree)
+            ast.fix_missing_locations(tree)
+            instrumented = ast.unparse(tree)
+            logger.debug(
+                "[CodeInstrumenter] Checkpoint: instrumented %s loops",
+                ckpt_instrumenter.loops_instrumented,
+            )
+        except Exception as e:
+            logger.warning("[CodeInstrumenter] Checkpoint pass failed: %s", e)
+    wrapper = generate_runtime_wrappers(
+        include_checkpoint=include_checkpoint,
+        include_task_control=False,
+        include_controller=True,
+    )
+    return wrapper + "\n" + instrumented
+
+def prepare_code_manual_checkpoint(
+    func_code: str,
+) -> str:
+    """
+    Prepend the manual checkpoint wrapper to a script that already contains
+    explicit ``checkpoint.check()`` / ``checkpoint.save()`` calls.
+    No AST transformation is performed — this is a pure prepend for scripts
+    authored with cooperative checks already in place.
+    Args:
+        func_code: Script source code with checkpoint.check() calls.
+    Returns:
+        Wrapper code + original script, ready for exec() on the worker.
+    """
+    if "__CROWDIO_MANUAL_CHECKPOINT_WRAPPER__ = True" in func_code:
+        return func_code
+    wrapper = generate_manual_checkpoint_wrapper()
+    return wrapper + "\n" + func_code
+######################################################################
+# NEW ① — Manual Checkpointing Utils (SDK helpers)
+######################################################################
+
+class TaskKilledException(Exception):
+    """
+    Raised by check_control() / ManualCheckpointUtils.check() when the task
+    has been killed. Propagates naturally through try/finally blocks so
+    resources are cleaned up correctly — unlike a bare `return 'killed'`.
+    """
+
+
+class ManualCheckpointUtils:
+    """
+    SDK helpers for cooperative, author-placed checkpoints.
+
+    Why use this instead of AST injection?
+    - No fragility from decorators, generators, async, or complex try/finally.
+    - Script authors call check() exactly where it is safe to pause/resume.
+    - Works with both the legacy _TaskControl globals and the new
+      EventTaskControl (threading.Event) model — detected automatically.
+
+    Usage (script author writes):
+        from sdk import checkpoint   # ManualCheckpointUtils instance
+        def my_task(data):
+            results = []
+            for i, item in enumerate(data):
+                checkpoint.check()                        # cooperative point
+                checkpoint.save({'i': i, 'results': results})
+                results.append(process(item))
+            return results
+
+    The framework prepends the necessary wrapper (generate_manual_checkpoint_wrapper)
+    so `checkpoint` is available without any import in the script itself.
+    """
+
+    _lock: threading.Lock
+    _state: Dict[str, Any]
+    _use_events: bool
+    _pause_event: Optional[threading.Event]
+    _kill_event: Optional[threading.Event]
+    _paused_flag: Optional[bool]
+    _killed_flag: Optional[bool]
+
+    def __init__(
+        self,
+        pause_event: Optional[threading.Event] = None,
+        kill_event: Optional[threading.Event] = None,
+    ):
+        self._lock = threading.Lock()
+        self._state: Dict[str, Any] = {}
+
+        if pause_event is not None and kill_event is not None:
+            self._use_events = True
+            self._pause_event = pause_event
+            self._kill_event = kill_event
+        else:
+            self._use_events = False
+            self._pause_event = None
+            self._kill_event = None
+            self._paused_flag = False
+            self._killed_flag = False
+
+    def pause(self) -> None:
+        if self._use_events:
+            self._pause_event.set()
+        else:
+            self._paused_flag = True
+
+    def resume(self) -> None:
+        if self._use_events:
+            self._pause_event.clear()
+        else:
+            self._paused_flag = False
+
+    def kill(self) -> None:
+        if self._use_events:
+            self._kill_event.set()
+        else:
+            self._killed_flag = True
+
+    def reset(self) -> None:
+        if self._use_events:
+            self._pause_event.clear()
+            self._kill_event.clear()
+        else:
+            self._paused_flag = False
+            self._killed_flag = False
+        with self._lock:
+            self._state = {}
+
+    def check(self) -> None:
+        if self._is_killed():
+            raise TaskKilledException("Task was killed")
+        if self._is_paused():
+            self._wait_for_resume()
+        if self._is_killed():
+            raise TaskKilledException("Task was killed during pause")
+
+    def _is_killed(self) -> bool:
+        if self._use_events:
+            return self._kill_event.is_set()
+        return bool(self._killed_flag)
+
+    def _is_paused(self) -> bool:
+        if self._use_events:
+            return self._pause_event.is_set()
+        return bool(self._paused_flag)
+
+    def _wait_for_resume(self) -> None:
+        if self._use_events:
+            while self._pause_event.is_set():
+                self._pause_event.wait(timeout=0.05)
+        else:
+            while self._paused_flag:
+                time.sleep(0.05)
+
+    def save(self, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._state.update(state)
+
+    def get_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._state)
+
+    def clear_state(self) -> None:
+        with self._lock:
+            self._state = {}
+
+######################################################################
+# NEW ② — ControllerInstrumenter  (AST injector for check_control())
+######################################################################
+
+class ControllerInstrumenter(ast.NodeTransformer):
+    """
+    AST transformer that injects a single ``check_control()`` call at the
+    start of every loop body.
+
+    Why prefer this over TaskControlInstrumenter?
+    - One injected call instead of two (kill-if + pause-while).
+    - ``check_control()`` raises TaskKilledException, which propagates
+      through try/finally cleanly — unlike a bare ``return 'killed'``.
+    - Idempotent: skips loops that already contain a check_control() call.
+    - Respects the generated pause-wait loops so it never double-injects.
+
+    The check_control() function itself is provided by the runtime wrapper
+    (generate_controller_wrapper / generate_runtime_wrappers).
+    """
+    def __init__(self) -> None:
+        super().__init__()
+        self.loops_instrumented = 0
+        self.functions_instrumented = 0
+
+    @staticmethod
+    def _has_check_control(stmts: List[ast.stmt]) -> bool:
+        for stmt in stmts:
+            if (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id == 'check_control'
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _is_generated_pause_loop(node: ast.While) -> bool:
+        test = node.test
+        if not (isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute)):
+            return False
+        attr: ast.Attribute = test.func
+        return (
+            isinstance(attr.value, ast.Name)
+            and attr.value.id in ('pause_event', '_TaskControl')
+            and attr.attr in ('is_set', 'is_paused')
+        )
+
+    @staticmethod
+    def _create_check_control_call() -> ast.Expr:
+        return ast.Expr(
+            value=ast.Call(
+                func=ast.Name(id='check_control', ctx=ast.Load()),
+                args=[],
+                keywords=[]
+            )
+        )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        self.generic_visit(node)
+        self.functions_instrumented += 1
+        return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
+        self.generic_visit(node)
+        self.functions_instrumented += 1
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.For:
+        self.generic_visit(node)
+        if not self._has_check_control(node.body):
+            node.body.insert(0, self._create_check_control_call())
+            self.loops_instrumented += 1
+        return node
+
+    visit_AsyncFor = visit_For
+
+    def visit_While(self, node: ast.While) -> ast.While:
+        if self._is_generated_pause_loop(node):
+            return node
+        self.generic_visit(node)
+        if not self._has_check_control(node.body):
+            node.body.insert(0, self._create_check_control_call())
+            self.loops_instrumented += 1
+        return node
+
+######################################################################
+# NEW ③ — EventTaskControl  (threading.Event-based signal model)
+######################################################################
+
+class EventTaskControl:
+    """
+    Thread-safe pause / kill control using threading.Event.
+    """
+    def __init__(self) -> None:
+        self.pause_event: threading.Event = threading.Event()
+        self.kill_event: threading.Event = threading.Event()
+
+    def pause(self) -> None:
+        self.pause_event.set()
+
+    def resume(self) -> None:
+        self.pause_event.clear()
+
+    def kill(self) -> None:
+        self.kill_event.set()
+        self.pause_event.clear()
+
+    def reset(self) -> None:
+        self.pause_event.clear()
+        self.kill_event.clear()
+
+    def check(self) -> None:
+        if self.kill_event.is_set():
+            raise TaskKilledException("Task was killed")
+        if self.pause_event.is_set():
+            while self.pause_event.is_set():
+                self.pause_event.wait(timeout=0.05)
+                if self.kill_event.is_set():
+                    raise TaskKilledException("Task was killed during pause")
+
+    def make_check_control(self):
+        def check_control():
+            self.check()
+        return check_control
 """
 AST-based code instrumentation for mobile workers
 
@@ -21,6 +508,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
+from typing import List, Dict, Any, Optional, Tuple
 
 
 class WorkerType(enum.Enum):

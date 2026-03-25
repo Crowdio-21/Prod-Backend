@@ -5,7 +5,7 @@ Manages MCDM scheduler configurations and provides default configurations.
 """
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import select
 

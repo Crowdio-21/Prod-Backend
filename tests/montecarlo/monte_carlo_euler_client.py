@@ -23,14 +23,13 @@ import time
 # Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
+from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
+from common.code_instrumenter import ManualCheckpointUtils
+
+# Create a global checkpoint instance (in real use, the runtime would inject this)
+checkpoint = ManualCheckpointUtils()
 
 
-@CROWDio.task(
-    checkpoint=True,
-    checkpoint_interval=2.0,  # Checkpoint every 5 seconds
-    checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
-)
 def monte_carlo_euler_worker(num_trials):
     """
     Worker function to perform Monte Carlo trials for estimating e
@@ -60,34 +59,26 @@ def monte_carlo_euler_worker(num_trials):
     
     start = time.time()
     trials_completed = 0
-    total_count = 0
-    estimated_e = 0.0
-    progress_percent = 0.0  # Include in checkpoint_state for progress tracking
-    
-    random.seed()  # Ensure different seeds on different workers
-    
-    
     try:
-        # Simple loop - framework automatically adjusts range on resume!
         for i in range(num_trials):
+            checkpoint.check()
             random_sum = 0.0
             count = 0
-            
-            # Keep adding random numbers until sum exceeds 1
             while random_sum < 1.0:
                 random_sum += random.random()
                 count += 1
-            
             total_count += count
             trials_completed = i + 1
-            
-            # Update progress and estimate - these are captured automatically!
             progress_percent = (trials_completed / num_trials) * 100
             estimated_e = total_count / trials_completed if trials_completed > 0 else 0.0
-            
-        
+            # Save checkpoint state after each trial
+            checkpoint.save({
+                "trials_completed": trials_completed,
+                "total_count": total_count,
+                "estimated_e": estimated_e,
+                "progress_percent": progress_percent
+            })
         latency_ms = int((time.time() - start) * 1000)
-        
         result = {
             "num_trials": num_trials,
             "total_count": total_count,
@@ -95,15 +86,19 @@ def monte_carlo_euler_worker(num_trials):
             "latency_ms": latency_ms,
             "status": "success"
         }
-        
         print(f"[Worker] Completed {num_trials:,} trials | e ≈ {estimated_e:.6f} | Total time: {latency_ms/1000:.1f}s")
         return result
-        
     except Exception as e:
         import traceback
         traceback.print_exc()
-        
         latency_ms = int((time.time() - start) * 1000)
+        return {
+            "num_trials": num_trials,
+            "estimated_e": 0.0,
+            "latency_ms": latency_ms,
+            "status": "error",
+            "error": str(e)
+        }
         
         return {
             "num_trials": num_trials,

@@ -8,7 +8,7 @@ with the CrowdCompute TaskScheduler interface.
 import json
 import logging
 import numpy as np
-from typing import List, Optional, Set, Dict
+from typing import List, Optional, Set, Dict, Tuple
 from abc import ABC
 from pathlib import Path
 

@@ -3,7 +3,7 @@ Task scheduling interface and implementations
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 
