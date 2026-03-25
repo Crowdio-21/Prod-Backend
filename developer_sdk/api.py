@@ -1,81 +1,111 @@
 from .client import CrowdComputeClient
 from .decorators import (
-    task,
-    TaskMetadata,
-    TaskConfig,
-    get_task_metadata,
-    get_task_config,
-    is_checkpoint_task,
-    create_state_dict,
-    crowdio,
+    CROWDio_task,
+    CROWDioTaskMetadata,
+    CROWDioTaskConfig,
+    CROWDio_get_task_metadata,
+    CROWDio_get_task_config,
+    CROWDio_is_checkpoint_task,
+    CROWDio_create_state_dict,
+    CROWDio,
 )
-from .constants import Constant
+from .constants import CROWDioConstant
 from typing import Any, Callable, List, Optional, Dict
 
 # Global client instance
 _client = CrowdComputeClient()
 
-# Re-export decorator for convenient import
 __all__ = [
-    "connect",
-    "disconnect",
-    "map",
-    "run",
-    "get",
-    "submit",
-    "pipeline",
+    # Preferred lowercase API
+    "crowdio_connect",
+    "crowdio_disconnect",
+    "crowdio_map",
+    "crowdio_run",
+    "crowdio_get",
+    "crowdio_submit",
+    "crowdio_pipeline",
     "task",
-    "TaskMetadata",
-    "TaskConfig",
-    "get_task_metadata",
-    "get_task_config",
-    "is_checkpoint_task",
-    "create_state_dict",
-    "crowdio",
-    "Constant",
+    # Connection API
+    "CROWDio_connect",
+    "CROWDio_disconnect",
+    # Execution API
+    "CROWDio_map",
+    "CROWDio_run",
+    "CROWDio_get",
+    "CROWDio_submit",
+    "CROWDio_pipeline",
+    # Declarative task API
+    "CROWDio_task",
+    "CROWDioTaskMetadata",
+    "CROWDioTaskConfig",
+    "CROWDio_get_task_metadata",
+    "CROWDio_get_task_config",
+    "CROWDio_is_checkpoint_task",
+    "CROWDio_create_state_dict",
+    "CROWDioConstant",
+    "CROWDio",
 ]
 
 
-# Public API functions
-async def connect(host: str, port: int = 9000):
-    """Connect to foreman server"""
+# ============================================================================
+# CROWDio Distributed Computing API
+# ============================================================================
+
+async def CROWDio_connect(host: str, port: int = 9000):
+    """
+    CROWDio_connect - Initialize the CROWDio environment and connect to foreman
+
+    Establishes connection to the distributed computing cluster (foreman server).
+    Must be called before any distributed operations.
+
+    Args:
+        host: Hostname/IP of foreman server
+        port: Port number (default 9000)
+    """
     await _client.connect(host, port)
 
 
-async def disconnect():
-    """Disconnect from foreman server"""
+async def CROWDio_disconnect():
+    """
+    CROWDio_disconnect - Finalize CROWDio environment and disconnect
+
+    Cleanly closes the connection to the foreman server.
+    Should be called when all distributed work is complete.
+    """
     await _client.disconnect()
 
 
-async def map(func: Callable, iterable: List[Any], **kwargs) -> List[Any]:
+async def CROWDio_map(func: Callable, iterable: List[Any], **kwargs) -> List[Any]:
     """
-    Map function over iterable using distributed workers
+    CROWDio_map - Distribute function across all workers and gather results
 
-    If function is decorated with @task, checkpoint metadata is automatically
-    extracted and sent to workers for checkpoint-aware execution.
+    Sends tasks to all available workers in a collective operation.
+    If function is decorated with @CROWDio_task, checkpoint metadata is
+    automatically extracted and sent to workers for checkpoint-aware execution.
 
     Args:
-        func: Function to execute (optionally decorated with @task)
-        iterable: List of arguments to map over
+        func: Function to execute (optionally decorated with @CROWDio_task)
+        iterable: List of arguments (one per worker process)
         **kwargs: Additional options:
             - checkpoint: Override checkpoint setting (bool)
             - checkpoint_interval: Override checkpoint interval (float)
 
     Returns:
-        List of results from all workers
+        List of results from all workers (same order as iterable)
     """
     return await _client.map(func, iterable, **kwargs)
 
 
-async def run(func: Callable, *args, **kwargs) -> Any:
+async def CROWDio_run(func: Callable, *args, **kwargs) -> Any:
     """
-    Run a single function with arguments on a worker
+    CROWDio_run - Send a task to a single worker and receive result
 
-    If function is decorated with @task, checkpoint metadata is automatically
-    used for checkpoint-aware execution.
+    Sends a single task to an available worker and waits for the result.
+    If function is decorated with @CROWDio_task, checkpoint metadata is
+    automatically used for checkpoint-aware execution.
 
     Args:
-        func: Function to execute (optionally decorated with @task)
+        func: Function to execute (optionally decorated with @CROWDio_task)
         *args: Positional arguments for the function
         **kwargs: Keyword arguments for the function
 
@@ -85,59 +115,65 @@ async def run(func: Callable, *args, **kwargs) -> Any:
     return await _client.run(func, *args, **kwargs)
 
 
-async def submit(func: Callable, iterable: List[Any], **kwargs) -> str:
+async def CROWDio_submit(func: Callable, iterable: List[Any], **kwargs) -> str:
     """
-    Submit a job asynchronously without waiting for results
+    CROWDio_submit - Non-blocking submission of a job to workers
+
+    Asynchronous job submission. Sends tasks and returns immediately with a
+    job handle for later result retrieval via CROWDio_get().
 
     Args:
-        func: Function to execute (optionally decorated with @task)
+        func: Function to execute (optionally decorated with @CROWDio_task)
         iterable: List of arguments for tasks
         **kwargs: Additional options
 
     Returns:
-        job_id: Identifier to retrieve results later with get()
+        job_id: Handle to retrieve results later with CROWDio_get()
     """
     return await _client.submit(func, iterable, **kwargs)
 
 
-async def get(job_id: str, timeout: Optional[float] = None) -> Any:
+async def CROWDio_get(job_id: str, timeout: Optional[float] = None) -> Any:
     """
-    Get results for a specific job
+    CROWDio_get - Wait for results from a non-blocking submission
+
+    Waits for results from a job submitted via CROWDio_submit().
+    Blocks until results are available or timeout is reached.
 
     Args:
-        job_id: Job identifier from submit()
-        timeout: Maximum seconds to wait (None = wait forever)
+        job_id: Job identifier from CROWDio_submit()
+        timeout: Maximum seconds to wait (None = wait indefinitely)
 
     Returns:
-        List of results or raises TimeoutError
+        List of results from the job
+
+    Raises:
+        TimeoutError: If timeout is exceeded before results arrive
     """
     return await _client.get_results(job_id, timeout)
 
 
-async def pipeline(
+async def CROWDio_pipeline(
     stages: List[Dict],
     dependency_map: Optional[Dict[str, List[str]]] = None,
     **kwargs,
 ) -> List[Any]:
     """
-    Execute a pipeline of dependent stages on distributed workers.
+    CROWDio_pipeline - Execute a DAG of dependent computation stages
 
-    Each stage defines a function and a list of arguments.  Tasks in later
-    stages are automatically blocked until their upstream dependencies
-    complete (tracked via a dependency counter).  When all upstream tasks
-    finish, the downstream task's counter reaches zero and it becomes
-    eligible for scheduling — just like how checkpointing is transparent
-    to the user.
+    Implements pipeline parallelism with automatic dependency management.
+    Tasks are blocked until their upstream dependencies complete
+    (tracked via a dependency counter).
 
     Args:
         stages: Ordered list of stage dicts, each with:
-            - func: Callable (optionally decorated with @task)
+            - func: Callable (optionally decorated with @CROWDio_task)
             - args_list: List of arguments (one per task in this stage)
             - pass_upstream_results: bool (default False) – if True,
               upstream results are injected into downstream args
             - name: Optional human-readable stage label
         dependency_map: Optional explicit task→[deps] mapping for
-            arbitrary DAG topologies.  If omitted, stages form
+            arbitrary DAG topologies. If omitted, stages form
             sequential barriers.
         **kwargs: Extra options (checkpoint, checkpoint_interval, …)
 
@@ -146,7 +182,7 @@ async def pipeline(
 
     Example::
 
-        results = await crowdio.pipeline([
+        results = await CROWDio_pipeline([
             {"func": preprocess,  "args_list": raw_data},
             {"func": compute,     "args_list": [None]*len(raw_data),
              "pass_upstream_results": True},
@@ -155,3 +191,17 @@ async def pipeline(
         ])
     """
     return await _client.pipeline(stages, dependency_map=dependency_map, **kwargs)
+
+
+# ============================================================================
+# Preferred lowercase API aliases
+# ============================================================================
+
+crowdio_connect = CROWDio_connect
+crowdio_disconnect = CROWDio_disconnect
+crowdio_map = CROWDio_map
+crowdio_run = CROWDio_run
+crowdio_get = CROWDio_get
+crowdio_submit = CROWDio_submit
+crowdio_pipeline = CROWDio_pipeline
+task = CROWDio_task
