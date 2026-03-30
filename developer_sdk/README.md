@@ -410,8 +410,60 @@ The image_utils subpackage includes reusable helpers for distributed image workf
 - encode_image / decode_image
 - load_image / save_image / get_image_info
 
+Example: split -> process -> reassemble
+
+Important:
+- For remote/mobile workers, put task-specific imports inside the task function.
+- CrowdIO sends function source for execution, so local module scope imports may not exist on the worker runtime.
+
+```python
+import asyncio
+from developer_sdk import connect, disconnect, crowdio
+from developer_sdk.image_utils import (
+    load_image,
+    save_image,
+    get_image_info,
+    split_image_into_tiles,
+    reassemble_tiles,
+)
+
+
+@crowdio.task(checkpoint=True, checkpoint_interval=3.0, checkpoint_state=["progress"])
+def process_tile(tile_data):
+    # tile_data["image"] is base64 PNG from split_image_into_tiles
+    from developer_sdk.image_utils import apply_filter
+    progress = 100.0
+    filtered = apply_filter(tile_data["image"], filter_type=tile_data.get("filter_type", "sharpen"))
+    return {
+        "tile_id": tile_data["tile_id"],
+        "image": filtered,
+        "position": tile_data["position"],
+        "size": tile_data["size"],
+    }
+
+
+async def main():
+    await connect("localhost", 9000)
+    try:
+        image = load_image("image.png")
+        print(get_image_info(image))
+
+        tiles = split_image_into_tiles(image, tile_size=200)
+        tile_inputs = [{**t, "filter_type": "sharpen"} for t in tiles]
+
+        processed_tiles = await process_tile.map(tile_inputs)
+        result_image = reassemble_tiles(processed_tiles, image.size)
+        save_image(result_image, "output/processed_sharpen.png")
+    finally:
+        await disconnect()
+
+
+asyncio.run(main())
+```
+
 ## Notes and limitations
 
 - APIs are async and require an event loop.
 - Task functions are source-serialized; keep them import-safe and deterministic.
+- If a task depends on optional/runtime modules (for example image helpers), import them inside the task body.
 - dnn_pipeline validates topology and raises TopologyValidationError for invalid graphs.
