@@ -283,9 +283,6 @@ Pipeline calls:
 - pipeline(stages, dependency_map=None, **kwargs)
 - dnn_pipeline(stages, inference_graph_id, topology_nodes, topology_edges, ...)
 
-Intermediate feature routing:
-- send_intermediate_feature(job_id, task_id, target_task_id, payload, source_worker_id="sdk-client")
-- decode_intermediate_feature_payload(payload)
 
 Declarative task API:
 - task(...)
@@ -296,17 +293,6 @@ Declarative task API:
 - is_checkpoint_task(func)
 - create_state_dict(checkpoint_state)
 - crowdio namespace (decorator convenience, defined in namespace.py)
-
-Decorator namespace import style:
-
-```python
-from developer_sdk.namespace import crowdio
-
-
-@crowdio.task(checkpoint=True)
-def my_task(x):
-    return x * x
-```
 
 Mobile path constants:
 - Constant.FILE_DIR
@@ -321,85 +307,72 @@ Model/DNN helpers:
 - serialize_tensor(...)
 - deserialize_tensor(...)
 
-## Job patterns
-
-### 1) Distributed map
-
-```python
-results = await crowdio.map(my_func, input_items)
-```
-
-### 2) Fire-and-fetch
-
-```python
-job_id = await crowdio.submit(my_func, input_items)
-results = await crowdio.get(job_id, timeout=60)
-```
-
-### 3) Multi-stage pipeline
-
-```python
-stages = [
-    {"func": stage1, "args_list": raw_items, "name": "preprocess"},
-    {
-        "func": stage2,
-        "args_list": [None] * len(raw_items),
-        "pass_upstream_results": True,
-        "name": "compute",
-    },
-]
-results = await crowdio.pipeline(stages)
-```
-
-## Checkpointing model
-
-Use the task decorator to attach metadata. The SDK extracts that metadata and sends it with job submission.
-
-```python
-@crowdio.task(
-    checkpoint=True,
-    checkpoint_interval=10,
-    checkpoint_state=["i", "partial_sum", "progress_percent"],
-    retry_on_failure=True,
-    max_retries=3,
-)
-def heavy_task(data):
-    return sum(data)
-```
-
-Notes:
-- checkpoint_state controls which variables are persisted (or all state when omitted).
-- kwargs passed to map/submit can override decorator defaults (for example checkpoint_interval).
-
 ## Mobile path abstraction
 
 Use Constant values in task configs instead of hardcoded device paths. Mobile runtimes can resolve these symbols to platform-specific paths.
 
 ```python
-from developer_sdk import Constant
+import asyncio
+from developer_sdk import connect, disconnect, crowdio, map as distributed_map
 
-output_target = Constant.OUTPUT_DIR
-cache_target = Constant.CACHE_DIR
+
+@crowdio.task()
+def process_images_on_device(config):
+    import builtins
+    import os
+
+    # Key helper: convert @CROWDIO:* aliases into real runtime paths.
+    # Example: @CROWDIO:FILE_DIR -> /storage/emulated/0/MyPickedFolder
+    def resolve_path_alias(value):
+        # Non-alias values pass through unchanged.
+        if not isinstance(value, str) or not value.startswith("@CROWDIO:"):
+            return value
+        alias_map = getattr(builtins, "_crowdio_path_aliases", {})
+        return alias_map.get(value, value)
+
+    image_dir = resolve_path_alias(config.get("image_dir"))
+    if isinstance(image_dir, str) and image_dir.startswith("@CROWDIO:"):
+        return {
+            "processed": 0,
+            "errors": [
+                "Path alias was not resolved on worker. "
+                "Ensure mobile runtime injects builtins._crowdio_path_aliases."
+            ],
+        }
+
+    if not image_dir or not os.path.isdir(image_dir):
+        return {
+            "processed": 0,
+            "errors": [f"Image directory not found: {image_dir}"],
+        }
+
+    # Process files from the resolved real path...
+    return {"processed": 1, "errors": [], "image_dir": image_dir}
+
+
+async def main():
+    await connect("localhost", 9000)
+    try:
+        task_config = {
+            # Readable developer config: no hardcoded Android/iOS paths.
+            "image_dir": crowdio.Constant.FILE_DIR,
+            "filter": "sharpen",
+            "max_images": 10,
+        }
+        result = await distributed_map(process_images_on_device, [task_config])
+        print(result)
+    finally:
+        await disconnect()
+
+
+asyncio.run(main())
 ```
 
-## DNN feature transport
-
-When payload includes numpy arrays, SDK can encode/decode tensors for transport:
-
-```python
-from developer_sdk import serialize_tensor, deserialize_tensor
-```
-
-For runtime message routing in DNN flows:
-
-```python
-await crowdio.send_intermediate_feature(
-    job_id=job_id,
-    task_id="stage-a:0",
-    target_task_id="stage-b:0",
-    payload=feature_tensor,
-)
-```
+Expected runtime behavior on mobile workers:
+- Runtime injects alias mapping into `builtins._crowdio_path_aliases`, for example:
+  - `{"@CROWDIO:FILE_DIR": "/storage/emulated/0/MyPickedFolder"}`
+- Worker resolves `@CROWDIO:*` values before file I/O.
+- Developer code remains portable and path-safe across devices.
 
 ## Image utilities
 
