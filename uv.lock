@@ -207,6 +207,18 @@ wheels = [
 ]
 
 [[package]]
+name = "crowdio-sdk"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fa/3a/a94547a2fa70eec18ec6440af69b7f8595fac69cffe76fec54bd90f92710/crowdio_sdk-0.3.1.tar.gz", hash = "sha256:59d667706f01f3869cf617e4c7e615e6b26e1842227fe1c96c389b546e6bba39", size = 29241, upload-time = "2026-04-01T05:41:16.958Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/ea/da4319fea874ba1c37ababae2672f5732ab9c4d70947b33ea9391bb2abd2/crowdio_sdk-0.3.1-py3-none-any.whl", hash = "sha256:70d878147803785145f3cdfe1bbfc7bfe7bfccd1d5dab722359a406d02752d90", size = 34930, upload-time = "2026-04-01T05:41:15.67Z" },
+]
+
+[[package]]
 name = "cuda-bindings"
 version = "12.9.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1556,6 +1568,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "asyncio-mqtt" },
     { name = "cloudpickle" },
+    { name = "crowdio-sdk" },
     { name = "fastapi" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -1583,6 +1596,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "==0.19.0" },
     { name = "asyncio-mqtt", specifier = "==0.16.1" },
     { name = "cloudpickle", specifier = "==3.0.0" },
+    { name = "crowdio-sdk", specifier = ">=0.3.1" },
     { name = "fastapi", specifier = "==0.104.1" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "onnx", specifier = ">=1.21.0" },

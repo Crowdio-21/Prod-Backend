@@ -7,7 +7,7 @@ import argparse
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from developer_sdk.image_utils import reassemble_tiles
+from crowdio.image_utils import reassemble_tiles
 
 def process_image_worker(image_data):
     """

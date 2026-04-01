@@ -17,7 +17,7 @@ import json
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect
+from crowdio import crowdio_connect, crowdio_map, crowdio_disconnect
 
 
 def sentiment_worker_pytorch(text):

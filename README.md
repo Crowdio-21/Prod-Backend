@@ -31,7 +31,7 @@ CROWDio uses a hub-and-spoke model:
 ```text
 +------------------------+          WebSocket (:9000)         +------------------------+
 |   SDK Client App       |  <--------------------------------> |      Foreman           |
-| (developer_sdk/api.py) |                                     | (FastAPI + Scheduler)  |
+| (crowdio/api.py) |                                     | (FastAPI + Scheduler)  |
 +------------------------+                                     +------------------------+
                                                                        |
                                                                        | Assign tasks / collect results
@@ -83,8 +83,8 @@ Responsibilities:
 
 ### Developer SDK (Client)
 Entry points:
-- `developer_sdk/api.py` (public async functions)
-- `developer_sdk/client.py` (`CrowdComputeClient`)
+- `crowdio/api.py` (public async functions)
+- `crowdio/client.py` (`CrowdComputeClient`)
 
 Key public functions:
 - `connect(host, port=9000)`
@@ -107,7 +107,7 @@ Top-level modules and intent:
 
 - `foreman/`: Orchestration server, APIs, scheduler, DB layer
 - `pc_worker/`: Worker runtime and worker-side API
-- `developer_sdk/`: Client SDK and decorators
+- `crowdio/`: Client SDK and decorators
 - `common/`: Shared protocol, serialization, instrumentation utilities
 - `evaluation/`: Benchmarking and analysis framework
 - `tests/`: Quick-start runners and sample workloads
@@ -199,7 +199,7 @@ python tests/run_multiple_workers.py 8 --start-port 8001
 
 ```python
 import asyncio
-from developer_sdk import connect, map, disconnect
+from crowdio import connect, map, disconnect
 
 
 def square(x):
@@ -221,7 +221,7 @@ if __name__ == "__main__":
 
 ```python
 import asyncio
-from developer_sdk import connect, submit, get, disconnect
+from crowdio import connect, submit, get, disconnect
 
 
 def heavy(x):
@@ -244,7 +244,7 @@ if __name__ == "__main__":
 
 ```python
 import asyncio
-from developer_sdk import connect, pipeline, disconnect
+from crowdio import connect, pipeline, disconnect
 
 
 def stage_a(x):
@@ -274,10 +274,10 @@ if __name__ == "__main__":
 
 ## 9. Checkpointing and Recovery
 
-Decorator API: `developer_sdk/decorators.py`
+Decorator API: `crowdio/decorators.py`
 
 ```python
-from developer_sdk import crowdio
+from crowdio import crowdio
 
 
 @crowdio.task(
@@ -426,4 +426,4 @@ For module-level details, also see:
 - `foreman/README.md`
 - `pc_worker/README.md`
 - `tests/README.md`
-- `developer_sdk/README.md`
+- `crowdio/README.md`
