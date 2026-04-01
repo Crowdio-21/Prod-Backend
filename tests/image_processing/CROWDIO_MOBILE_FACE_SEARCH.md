@@ -34,7 +34,7 @@ The mobile runtime resolves aliases by injecting `builtins._crowdio_path_aliases
 ## Minimal Crowdio Task (Worker Side)
 
 ```python
-from developer_sdk import crowdio
+from crowdio import crowdio
 
 
 @crowdio.task(checkpoint=True, checkpoint_interval=5.0)
@@ -117,7 +117,7 @@ def scan_photos_for_child(config):
 
 ```python
 import asyncio
-from developer_sdk import connect, disconnect, crowdio, map as distributed_map
+from crowdio import connect, disconnect, crowdio, map as distributed_map
 
 
 async def run_mobile_face_search(host, port, child_embeddings):

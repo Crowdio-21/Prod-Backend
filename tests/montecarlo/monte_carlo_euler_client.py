@@ -23,7 +23,7 @@ import time
 # Add root directory to Python path (go up two levels from tests/montecarlo/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
+from crowdio import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 
 @CROWDio.task(
@@ -286,7 +286,7 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 5000  # Default: 100 million trials (reduced for faster testing)
+    total_trials = 500000  # Default: 100 million trials (reduced for faster testing)
     num_workers = 2  # Default: 6 workers
     foreman_host = "localhost"
     

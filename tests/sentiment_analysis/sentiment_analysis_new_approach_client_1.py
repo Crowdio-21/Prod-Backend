@@ -9,7 +9,7 @@ import nltk
 # Add parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from developer_sdk import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
+from crowdio import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 # Download required NLTK data
 nltk.download('punkt_tab')

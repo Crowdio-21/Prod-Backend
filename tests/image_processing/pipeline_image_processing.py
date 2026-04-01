@@ -43,7 +43,7 @@ import argparse
 # Add project root to path so imports resolve
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
+from crowdio import crowdio_connect, crowdio_disconnect, CROWDio, crowdio_pipeline
 
 @CROWDio.task(
     checkpoint=True,
@@ -484,7 +484,7 @@ async def run_pipeline_single(image_b64, image_id, tile_size, filter_type, label
 
     # The pipeline call – the dependency counter system handles the
     # stage-to-stage data flow and blocking automatically.
-    results = await pipeline([
+    results = await crowdio_pipeline([
         {
             "func": preprocess_image,
             "args_list": [stage_0_input],       # 1 task in stage 0

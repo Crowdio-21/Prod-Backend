@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from developer_sdk.client import CrowdComputeClient
+from crowdio.client import CrowdComputeClient
 from .real_metrics_collector import RealMetricsCollector, RealSystemMetrics, collect_real_evaluation
 from .visualization import EvaluationVisualizer
 

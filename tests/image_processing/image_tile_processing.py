@@ -6,8 +6,8 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from developer_sdk import crowdio_connect, crowdio_disconnect, CROWDio
-from developer_sdk.image_utils import split_image_into_tiles, reassemble_tiles
+from crowdio import crowdio_connect, crowdio_disconnect, CROWDio
+from crowdio.image_utils import split_image_into_tiles, reassemble_tiles
 
 
 @CROWDio.task(

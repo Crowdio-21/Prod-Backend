@@ -41,7 +41,7 @@ class PipelineStage:
     - A list of input arguments (one per task in the stage)
     - An optional flag to pass upstream results as arguments
 
-    Usage (SDK-side, see developer_sdk/client.py):
+    Usage (SDK-side, see crowdio/client.py):
         stage_a = PipelineStage(func_code_a, args_list_a)
         stage_b = PipelineStage(func_code_b, args_list_b, pass_upstream_results=True)
     """
