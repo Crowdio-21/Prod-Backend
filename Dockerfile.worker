@@ -1,0 +1,53 @@
+# ============================================================
+# CROWDio — PC Worker Service
+# Worker REST API: http://0.0.0.0:8001
+# Connects to Foreman WebSocket at ws://foreman:9000
+# ============================================================
+
+# --- Build stage: install dependencies ---
+FROM python:3.12.6-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# --- Runtime stage ---
+FROM python:3.12.6-slim AS runtime
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application source
+COPY common/    common/
+COPY pc_worker/ pc_worker/
+
+# Expose worker REST API port
+EXPOSE 8001
+
+# Health-check against the worker API
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Environment-configurable arguments (override at runtime via docker run -e or compose)
+ENV FOREMAN_URL=ws://foreman:9000
+ENV API_HOST=0.0.0.0
+ENV API_PORT=8001
+ENV MAX_CONCURRENT_TASKS=1
+ENV HEARTBEAT_INTERVAL=30
+
+CMD ["sh", "-c", \
+     "python -m pc_worker.main \
+      --foreman-url $FOREMAN_URL \
+      --api-host $API_HOST \
+      --api-port $API_PORT \
+      --max-concurrent-tasks $MAX_CONCURRENT_TASKS \
+      --heartbeat-interval $HEARTBEAT_INTERVAL"]

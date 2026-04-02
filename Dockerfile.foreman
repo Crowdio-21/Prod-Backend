@@ -1,0 +1,47 @@
+# ============================================================
+# CROWDio — Foreman Service
+# REST API : http://0.0.0.0:8000
+# WebSocket: ws://0.0.0.0:9000
+# ============================================================
+
+# --- Build stage: install dependencies ---
+FROM python:3.12.6-slim AS builder
+
+WORKDIR /app
+
+# Install system build deps (needed for some Python packages)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# --- Runtime stage ---
+FROM python:3.12.6-slim AS runtime
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application source
+COPY common/   common/
+COPY foreman/  foreman/
+COPY evaluation/ evaluation/
+
+# Persistent data directory (SQLite DB + checkpoints)
+RUN mkdir -p /data/checkpoints
+ENV CROWDIO_DATA_DIR=/data
+
+# Expose REST API and WebSocket ports
+EXPOSE 8000 9000
+
+# Health-check against the REST API
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/api/stats || exit 1
+
+# Run Foreman via uvicorn (module path foreman.main:app)
+CMD ["python", "-m", "uvicorn", "foreman.main:app", "--host", "0.0.0.0", "--port", "8000"]
