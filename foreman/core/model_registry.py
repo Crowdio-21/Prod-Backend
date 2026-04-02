@@ -7,9 +7,49 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
-
+from urllib.parse import urlparse
 
 MODEL_STORE_DIR = Path(".model_store")
+_ENV_LOADED = False
+
+
+def _load_foreman_env_once() -> None:
+    """Load env vars from foreman/.env once, without overriding process env."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        try:
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+
+                if "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+
+                value = value.strip()
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+
+                os.environ.setdefault(key, value)
+        except Exception:
+            # Keep URL generation resilient; fall back to built-in defaults.
+            pass
+
+    _ENV_LOADED = True
 
 
 def _safe_component(value: str) -> str:
@@ -76,7 +116,51 @@ def list_model_manifest(model_version_id: str) -> List[Dict[str, str]]:
     return manifest
 
 
-def build_model_artifact_url(model_version_id: str, file_name: str) -> str:
-    host = os.getenv("FOREMAN_PUBLIC_HOST", "localhost")
-    port = os.getenv("FOREMAN_API_PORT", "8000")
-    return f"http://{host}:{port}/model-artifacts/{_safe_component(model_version_id)}/{_safe_component(file_name)}"
+def _normalize_public_host(host_value: str) -> str:
+    """Normalize host value by removing scheme and optional port."""
+    host = (host_value or "").strip()
+    if not host:
+        return ""
+
+    if "://" in host:
+        parsed = urlparse(host)
+        host = parsed.hostname or ""
+    elif host.startswith("[") and "]" in host:
+        # IPv6 host with optional port, e.g. [::1]:9000
+        host = host[1 : host.index("]")]
+    elif host.count(":") == 1:
+        maybe_host, maybe_port = host.rsplit(":", 1)
+        if maybe_port.isdigit():
+            host = maybe_host
+
+    return host.strip()
+
+
+def build_model_artifact_url(
+    model_version_id: str,
+    file_name: str,
+    host_override: Optional[str] = None,
+    port_override: Optional[str] = None,
+    scheme_override: Optional[str] = None,
+) -> str:
+    """Build a download URL for model artifacts reachable by workers."""
+    _load_foreman_env_once()
+
+    host = _normalize_public_host(
+        host_override or os.getenv("FOREMAN_PUBLIC_HOST", "localhost")
+    )
+    if not host:
+        host = "localhost"
+
+    port = str(port_override or os.getenv("FOREMAN_API_PORT", "8000")).strip()
+    if not port:
+        port = "8000"
+
+    scheme = (scheme_override or os.getenv("FOREMAN_PUBLIC_SCHEME", "http")).strip()
+    if not scheme:
+        scheme = "http"
+
+    return (
+        f"{scheme}://{host}:{port}/model-artifacts/"
+        f"{_safe_component(model_version_id)}/{_safe_component(file_name)}"
+    )

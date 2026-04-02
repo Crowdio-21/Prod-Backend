@@ -7,10 +7,12 @@ Extended with mobile worker support:
 - Transparent to developers - they write pure logic
 """
 
+import asyncio
 import json
 from typing import List, Optional, Any, Dict
 
 from .scheduling import TaskScheduler, Task as SchedulerTask, Worker
+from .scheduling.model_affinity_scheduler import ModelAffinityScheduler
 from .payload_store import resolve_text_ref
 from .utils import (
     _get_pending_tasks,
@@ -45,7 +47,13 @@ class TaskDispatcher:
     - Update task and worker status
     """
 
-    def __init__(self, scheduler: TaskScheduler, connection_manager, job_manager):
+    def __init__(
+        self,
+        scheduler: TaskScheduler,
+        connection_manager,
+        job_manager,
+        model_load_tracker=None,
+    ):
         """
         Initialize task dispatcher
 
@@ -53,10 +61,22 @@ class TaskDispatcher:
             scheduler: Scheduling algorithm to use
             connection_manager: ConnectionManager instance
             job_manager: JobManager instance
+            model_load_tracker: Optional tracker for LOAD_MODEL readiness gating
         """
         self.scheduler = scheduler
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+        self.model_load_tracker = model_load_tracker
+        self._assignment_retry_tasks: Dict[str, asyncio.Task] = {}
+
+        # Wrap the base scheduler with model-affinity awareness for DNN tasks
+        if model_load_tracker:
+            self._affinity_scheduler = ModelAffinityScheduler(
+                base_scheduler=scheduler,
+                model_load_tracker=model_load_tracker,
+            )
+        else:
+            self._affinity_scheduler = None
 
     # ==================== Code Preparation for Mobile Workers ====================
 
@@ -181,6 +201,64 @@ class TaskDispatcher:
 
         return recovered_task_ids
 
+    def _get_native_model_partition_id(
+        self, execution_metadata: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Return required partition id when task runs in native model mode."""
+        if not execution_metadata:
+            return None
+
+        execution_mode = str(execution_metadata.get("execution_mode", "")).lower()
+        if execution_mode != "native_model":
+            return None
+
+        partition_id = execution_metadata.get("model_partition_id")
+        if not partition_id:
+            return None
+        return str(partition_id)
+
+    def _seconds_until_native_model_ready(
+        self, worker_id: str, model_partition_id: str
+    ) -> float:
+        """Return remaining wait time before assigning a native model task."""
+        if not self.model_load_tracker or not model_partition_id:
+            return 0.0
+
+        remaining = self.model_load_tracker.seconds_until_ready(
+            worker_id, model_partition_id
+        )
+        if remaining is None:
+            return 0.0
+        return max(0.0, float(remaining))
+
+    def schedule_job_assignment_retry(
+        self, job_id: str, delay_seconds: float = 1.0
+    ) -> None:
+        """Schedule a one-shot delayed assignment attempt for a job."""
+        if not job_id:
+            return
+
+        delay = max(0.1, float(delay_seconds))
+        existing = self._assignment_retry_tasks.get(job_id)
+        if existing and not existing.done():
+            return
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(delay)
+                func_code = self.job_manager.get_func_code(job_id)
+                if not func_code:
+                    return
+                await self.assign_tasks_for_job(job_id, func_code, [])
+            except Exception as exc:
+                print(
+                    f"TaskDispatcher: Deferred assignment retry failed for job {job_id}: {exc}"
+                )
+            finally:
+                self._assignment_retry_tasks.pop(job_id, None)
+
+        self._assignment_retry_tasks[job_id] = asyncio.create_task(_retry())
+
     # ==================== Task Assignment ====================
 
     async def assign_tasks_for_job(
@@ -222,19 +300,32 @@ class TaskDispatcher:
         all_workers = await self._get_all_workers()
 
         # Convert pending tasks to scheduler tasks
-        scheduler_tasks = [
-            SchedulerTask(
+        scheduler_tasks = []
+        has_model_tasks = False
+        for task in pending_tasks:
+            st = SchedulerTask(
                 id=task.id,
                 job_id=task.job_id,
                 args=task.args,
                 priority=getattr(task, "priority", 0),
                 stage_func_code=getattr(task, "stage_func_code", None),
             )
-            for task in pending_tasks
-        ]
+            # Attach model_partition_id so the affinity scheduler can use it
+            partition_id = getattr(task, "model_partition_id", None)
+            if partition_id:
+                st.model_partition_id = partition_id  # type: ignore[attr-defined]
+                has_model_tasks = True
+            scheduler_tasks.append(st)
+
+        # Use affinity scheduler for DNN tasks when available
+        active_scheduler = (
+            self._affinity_scheduler
+            if has_model_tasks and self._affinity_scheduler
+            else self.scheduler
+        )
 
         # Use batch assignment - ranks workers ONCE instead of per-task
-        assignments = await self.scheduler.batch_select_workers(
+        assignments = await active_scheduler.batch_select_workers(
             scheduler_tasks, available_workers, all_workers
         )
 
@@ -265,6 +356,35 @@ class TaskDispatcher:
                     )
                     continue
 
+            # Gate DNN tasks: only assign to workers with the required model loaded
+            partition_id = getattr(scheduler_task, "model_partition_id", None)
+            if partition_id and self.model_load_tracker:
+                if not self.model_load_tracker.is_model_resident(
+                    worker_id, partition_id
+                ):
+                    # Try to find an alternative worker that has the model loaded
+                    resident_workers = (
+                        self.model_load_tracker.workers_with_model_resident(
+                            partition_id
+                        )
+                    )
+                    alt_worker = next(
+                        (
+                            w
+                            for w in resident_workers
+                            if w in available_workers and w not in used_workers
+                        ),
+                        None,
+                    )
+                    if alt_worker:
+                        worker_id = alt_worker
+                    else:
+                        print(
+                            f"TaskDispatcher: Skipping task {scheduler_task.id} — "
+                            f"no worker has model {partition_id} loaded"
+                        )
+                        continue
+
             args_text = resolve_text_ref(scheduler_task.args)
             task_args = json.loads(args_text) if args_text else []
 
@@ -272,9 +392,15 @@ class TaskDispatcher:
             task_func_code = (
                 getattr(scheduler_task, "stage_func_code", None) or func_code
             )
+            execution_metadata = self._build_execution_metadata(task_db)
 
             success = await self._assign_task_to_worker(
-                job_id, scheduler_task.id, task_func_code, task_args, worker_id
+                job_id,
+                scheduler_task.id,
+                task_func_code,
+                task_args,
+                worker_id,
+                execution_metadata=execution_metadata,
             )
             if success:
                 tasks_assigned += 1
@@ -293,6 +419,47 @@ class TaskDispatcher:
             return json.loads(req_text)
         except Exception:
             return {}
+
+    def _parse_json_text_field(self, value: Optional[str], default: Any) -> Any:
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+
+    def _build_execution_metadata(self, task_obj) -> Optional[Dict[str, Any]]:
+        """Build optional execution hints for runtimes that execute native models."""
+        if not task_obj:
+            return None
+
+        metadata: Dict[str, Any] = {}
+        model_partition_id = getattr(task_obj, "model_partition_id", None)
+        if model_partition_id:
+            metadata["execution_mode"] = "native_model"
+            metadata["model_partition_id"] = model_partition_id
+
+        topology_role = getattr(task_obj, "topology_role", None)
+        if topology_role:
+            metadata["topology_role"] = topology_role
+
+        feature_sources = self._parse_json_text_field(
+            getattr(task_obj, "feature_sources", None), []
+        )
+        if feature_sources:
+            metadata["feature_sources"] = feature_sources
+
+        feature_targets = self._parse_json_text_field(
+            getattr(task_obj, "feature_targets", None), []
+        )
+        if feature_targets:
+            metadata["feature_targets"] = feature_targets
+
+        requirements = self._parse_device_requirements(task_obj)
+        if requirements:
+            metadata["device_requirements"] = requirements
+
+        return metadata or None
 
     def _worker_meets_requirements(
         self, worker: Optional[Worker], requirements: Dict[str, Any]
@@ -407,8 +574,25 @@ class TaskDispatcher:
                 )
                 return False
 
-            # Pick the first pending task
-            task = pending_tasks[0]
+            # Find the first pending task this worker can handle (model gate)
+            task = None
+            for candidate in pending_tasks:
+                partition_id = getattr(candidate, "model_partition_id", None)
+                if partition_id and self.model_load_tracker:
+                    if not self.model_load_tracker.is_model_resident(
+                        worker_id, partition_id
+                    ):
+                        continue
+                task = candidate
+                break
+
+            if task is None:
+                print(
+                    f"TaskDispatcher: No pending task compatible with worker "
+                    f"{worker_id}'s loaded model; skipping single-worker assignment"
+                )
+                return False
+
             job_id = task.job_id
 
             # For pipeline tasks, use per-stage func_code if available
@@ -420,8 +604,14 @@ class TaskDispatcher:
 
             args_text = resolve_text_ref(task.args)
             task_args = json.loads(args_text) if args_text else []
+            execution_metadata = self._build_execution_metadata(task)
             success = await self._assign_task_to_worker(
-                job_id, task.id, func_code, task_args, worker_id
+                job_id,
+                task.id,
+                func_code,
+                task_args,
+                worker_id,
+                execution_metadata=execution_metadata,
             )
             return success
 
@@ -460,7 +650,13 @@ class TaskDispatcher:
         return total_assigned > 0
 
     async def _assign_task_to_worker(
-        self, job_id: str, task_id: str, func_code: str, task_args: Any, worker_id: str
+        self,
+        job_id: str,
+        task_id: str,
+        func_code: str,
+        task_args: Any,
+        worker_id: str,
+        execution_metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Assign a specific task to a specific worker.
@@ -484,6 +680,25 @@ class TaskDispatcher:
         try:
             # Get task_metadata from job_manager for declarative checkpointing
             task_metadata = self.job_manager.get_task_metadata(job_id)
+
+            # Native runtimes may need time to finish LOAD_MODEL before task execution.
+            required_partition_id = self._get_native_model_partition_id(
+                execution_metadata
+            )
+            if required_partition_id:
+                wait_seconds = self._seconds_until_native_model_ready(
+                    worker_id, required_partition_id
+                )
+                if wait_seconds > 0.0:
+                    print(
+                        f"TaskDispatcher: Deferring task {task_id} for worker {worker_id} "
+                        f"until model partition {required_partition_id} is ready "
+                        f"(wait {wait_seconds:.2f}s)"
+                    )
+                    self.schedule_job_assignment_retry(
+                        job_id, delay_seconds=wait_seconds
+                    )
+                    return False
 
             # Check if we have checkpoint data for this task from a previous failure
             checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
@@ -523,6 +738,7 @@ class TaskDispatcher:
                         progress_percent=checkpoint_data.get("progress_percent", 0),
                         checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
                         task_metadata=task_metadata,
+                        execution_metadata=execution_metadata,
                     )
                 else:
                     # Use standard message
@@ -539,6 +755,7 @@ class TaskDispatcher:
                         task_kwargs={},
                         progress_percent=checkpoint_data.get("progress_percent", 0),
                         checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
+                        execution_metadata=execution_metadata,
                     )
                 print(
                     f"TaskDispatcher: 🔄 Resuming task {task_id} from checkpoint "
@@ -554,11 +771,16 @@ class TaskDispatcher:
                         task_id=task_id,
                         job_id=job_id,
                         task_metadata=task_metadata,
+                        execution_metadata=execution_metadata,
                     )
                 else:
                     # Use standard message
                     message = create_assign_task_message(
-                        prepared_code, [task_args], task_id, job_id  # Use prepared code
+                        prepared_code,
+                        [task_args],
+                        task_id,
+                        job_id,
+                        execution_metadata=execution_metadata,
                     )
 
             # Get worker websocket

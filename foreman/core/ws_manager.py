@@ -14,6 +14,7 @@ from .task_dispatcher import TaskDispatcher
 from .message_handlers import ClientMessageHandler, WorkerMessageHandler
 from .completion_handler import JobCompletionHandler
 from .dynamic_topology import DynamicTopologyPlanner
+from .model_load_tracker import ModelLoadTracker
 from .scheduling import TaskScheduler, create_scheduler
 from .utils import (
     _update_worker_status,
@@ -60,7 +61,8 @@ class WebSocketManager:
         """
         # Core components
         self.connection_manager = ConnectionManager()
-        self.job_manager = JobManager()
+        self.model_load_tracker = ModelLoadTracker.from_env()
+        self.job_manager = JobManager(model_load_tracker=self.model_load_tracker)
 
         # Scheduler
         if scheduler is None:
@@ -72,6 +74,7 @@ class WebSocketManager:
             scheduler=self.scheduler,
             connection_manager=self.connection_manager,
             job_manager=self.job_manager,
+            model_load_tracker=self.model_load_tracker,
         )
 
         # Completion handler
@@ -84,6 +87,7 @@ class WebSocketManager:
             connection_manager=self.connection_manager,
             job_manager=self.job_manager,
             task_dispatcher=self.task_dispatcher,
+            model_load_tracker=self.model_load_tracker,
         )
 
         self.worker_handler = WorkerMessageHandler(
@@ -91,6 +95,8 @@ class WebSocketManager:
             job_manager=self.job_manager,
             task_dispatcher=self.task_dispatcher,
             completion_handler=self.completion_handler,
+            model_load_tracker=self.model_load_tracker,
+            client_handler=self.client_handler,
         )
 
         self.dynamic_topology_planner = DynamicTopologyPlanner(
@@ -168,6 +174,9 @@ class WebSocketManager:
                 # Record failures for tasks assigned to this worker BEFORE removing from connection manager
                 # This captures checkpoint data for task resumption
                 await self._record_worker_disconnection_failures(worker_id)
+
+                # Clear model residency state for this worker
+                self.model_load_tracker.clear_worker_residency(worker_id)
 
                 self.connection_manager.remove_worker(worker_id)
                 await _update_worker_status(worker_id, "offline")

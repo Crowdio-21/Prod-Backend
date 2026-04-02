@@ -15,3 +15,4 @@ class WorkerConfig(BaseModel):
     heartbeat_interval: int = 30
     api_host: str = "0.0.0.0"
     api_port: int = 8001
+    model_cache_dir: str = ".worker_model_cache"

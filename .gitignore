@@ -228,6 +228,7 @@ pipeline_output/
 *.csv
 .png
 
+
 #dnn outputs
 *.json
 
@@ -242,3 +243,7 @@ pipeline_output/
 
 #tensor store
 tensor_store/
+
+# dnn test generated artifacts
+tests/dnn_crowdnet/models/
+tests/dnn_crowdnet/partitions/
