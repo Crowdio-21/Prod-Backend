@@ -21,8 +21,13 @@ It runs:
 - Task lifecycle: pending, assigned, blocked, completed, failed
 - Worker coordination: registration, availability, failure recovery
 - Scheduling: FIFO, round robin, least loaded, performance, priority, and MCDM variants
+- Model-affinity scheduling: tiered worker selection preferring workers with models already resident or cached
 - Pipeline execution: dependency counters and downstream unblocking
+- Streaming pipeline mode: per-input dependencies for pipeline parallelism across multiple inputs
 - DNN topology execution: graph-aware routing and aggregation
+- Model residency tracking: tracks which model partitions are loaded in memory or cached on disk per worker
+- Smart model loading: skips download/reload when the target worker already has the model (from_cache)
+- Auto stage-worker assignment: assigns pipeline stages to workers by model affinity instead of requiring explicit device mappings
 - Checkpointing: base/delta storage and resume-aware recovery support
 
 ## Folder Map
@@ -84,10 +89,12 @@ Examples:
 
 1. SDK client connects to ws://localhost:9000 and submits SUBMIT_JOB or SUBMIT_PIPELINE_JOB.
 2. Foreman creates DB records and prepares dispatchable tasks.
-3. Workers connect to ws://localhost:9000 and announce WORKER_READY.
-4. Task dispatcher selects workers using the active scheduler and sends ASSIGN_TASK or RESUME_TASK.
-5. Workers return TASK_RESULT / TASK_ERROR / TASK_CHECKPOINT / TASK_PROGRESS.
-6. Foreman updates state, handles dependency unblocking, and emits final JOB_RESULTS.
+3. Workers connect to ws://localhost:9000 and announce WORKER_READY (including cached_model_partitions list).
+4. Model load tracker registers each worker's cached partitions for affinity decisions.
+5. Task dispatcher selects workers using the active scheduler (with model-affinity wrapper for DNN jobs) and sends ASSIGN_TASK or RESUME_TASK.
+6. For DNN pipelines, LOAD_MODEL is sent with from_cache=true when the worker already has the model on disk.
+7. Workers return TASK_RESULT / TASK_ERROR / TASK_CHECKPOINT / TASK_PROGRESS.
+8. Foreman updates state, handles dependency unblocking (barrier or streaming mode), and emits final JOB_RESULTS.
 
 ## Scheduling Notes
 

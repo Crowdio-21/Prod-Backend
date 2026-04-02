@@ -32,12 +32,17 @@ Representative factory helpers:
 - create_task_progress_message
 - create_job_progress_message
 - DNN orchestration helpers:
-    - create_load_model_message
+    - create_load_model_message (supports from_cache flag to skip re-download)
     - create_device_topology_message
     - create_topology_update_message
     - create_intermediate_feature_message
     - create_aggregation_config_message
     - create_fallback_decision_message
+
+Notable protocol fields:
+- WORKER_READY carries `cached_model_partitions` list for model affinity tracking
+- SUBMIT_PIPELINE_JOB carries `pipeline_mode` ("barrier" or "streaming")
+- LOAD_MODEL carries `from_cache` flag when worker already has the model on disk
 
 ### serializer.py
 Function and payload serialization helpers used for shipping executable logic and tensor data to workers.

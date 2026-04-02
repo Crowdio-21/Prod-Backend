@@ -280,8 +280,13 @@ Core async calls:
 - get(job_id, timeout=None)
 
 Pipeline calls:
-- pipeline(stages, dependency_map=None, **kwargs)
-- dnn_pipeline(stages, inference_graph_id, topology_nodes, topology_edges, ...)
+- pipeline(stages, dependency_map=None, pipeline_mode="barrier", **kwargs)
+- dnn_pipeline(stages, model_paths=[...], pipeline_mode="streaming", ...)
+- dnn_pipeline(stages, inference_graph_id=..., topology_nodes=..., topology_edges=..., pipeline_mode=..., ...)
+
+Pipeline modes:
+- **barrier** (default for `pipeline`): all tasks in stage N must complete before stage N+1 starts
+- **streaming** (default for `dnn_pipeline`): each input flows through stages independently — task (stage=S, input=i) depends only on (stage=S-1, input=i)
 
 
 Declarative task API:
@@ -434,9 +439,61 @@ async def main():
 asyncio.run(main())
 ```
 
+## DNN pipeline from compact stage models (auto topology)
+
+You can run pipeline-parallel DNN inference by keeping model metadata directly in each stage.
+The SDK derives a linear topology from stage order and uploads model artifacts automatically.
+By default `dnn_pipeline` uses `pipeline_mode="streaming"`, so each input flows through
+stages independently — enabling true pipeline parallelism when multiple workers are available.
+Workers that already have a model cached on disk will skip the download step automatically.
+
+```python
+import asyncio
+from developer_sdk import connect, disconnect, dnn_pipeline
+
+
+async def main():
+    await connect("localhost", 9000)
+    try:
+        results = await dnn_pipeline(
+            stages=[
+                {
+                    "name": "cell_a",
+                    "model": "cell_a.onnx",
+                    "args_list": [{"input": "sample"}],
+                },
+                {
+                    "name": "cell_b",
+                    "model": "cell_b.onnx",
+                    "args_list": [None],
+                    "pass_upstream_results": True,
+                },
+                {
+                    "name": "cell_c",
+                    "model": "cell_c.onnx",
+                    "args_list": [None],
+                    "pass_upstream_results": True,
+                },
+            ],
+            # pipeline_mode="streaming" is the default for dnn_pipeline
+            # Use pipeline_mode="barrier" for legacy stage-barrier behavior
+        )
+        print(results)
+    finally:
+        await disconnect()
+
+
+asyncio.run(main())
+```
+
 ## Notes and limitations
 
 - APIs are async and require an event loop.
 - Task functions are source-serialized; keep them import-safe and deterministic.
 - If a task depends on optional/runtime modules (for example image helpers), import them inside the task body.
 - dnn_pipeline validates topology and raises TopologyValidationError for invalid graphs.
+- When stage "model" fields or model_paths are provided, topology and model assignment metadata are generated automatically.
+- `pipeline_mode="streaming"` wires per-input dependencies so each input flows through the pipeline independently; this is the default for `dnn_pipeline`.
+- `pipeline_mode="barrier"` (default for `pipeline`) gates each stage until all tasks in the previous stage complete.
+- The foreman automatically assigns stages to workers with model affinity — developers do not need to specify device IDs.
+- Native runtimes can execute dnn_pipeline stages without user Python functions by using stage-level model definitions.

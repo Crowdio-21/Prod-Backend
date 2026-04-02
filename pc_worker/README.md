@@ -42,6 +42,8 @@ Main worker implementation with task execution engine.
 - Task execution engine with error handling
 - Statistics tracking and monitoring
 - Automatic reconnection and recovery
+- Reports cached model partitions on connect (WORKER_READY) for model-affinity scheduling
+- Supports from_cache model loading — skips download when model already exists locally
 
 **Key Methods:**
 - `connect()` - Connect to foreman
