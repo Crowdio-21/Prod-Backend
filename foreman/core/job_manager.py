@@ -33,7 +33,7 @@ class JobManager:
     - Retrieve job results
     """
 
-    def __init__(self):
+    def __init__(self, model_load_tracker=None):
         # Cache function code for active jobs: job_id -> func_code
         self._job_cache: Dict[str, str] = {}
 
@@ -48,6 +48,9 @@ class JobManager:
 
         # DNN topology manager for topology-aware jobs
         self.topology_manager = TopologyManager()
+
+        # Shared tracker for staged model loading lifecycle
+        self.model_load_tracker = model_load_tracker
 
     # ==================== Job Creation ====================
 
@@ -137,6 +140,7 @@ class JobManager:
         inference_graph_id: Optional[str] = None,
         aggregation_strategy: Optional[str] = None,
         dnn_config: Optional[Dict[str, Any]] = None,
+        pipeline_mode: str = "barrier",
     ) -> int:
         """
         Create a pipeline job with dependent stages.
@@ -216,7 +220,11 @@ class JobManager:
 
         # Create all tasks with dependency wiring via DependencyManager
         created = await self.dependency_manager.create_pipeline_tasks(
-            job_id, pipeline_stages, dependency_map, dnn_config=dnn_config
+            job_id,
+            pipeline_stages,
+            dependency_map,
+            dnn_config=dnn_config,
+            pipeline_mode=pipeline_mode,
         )
 
         # Set job to running
@@ -238,6 +246,7 @@ class JobManager:
         aggregation_strategy: str = "average",
         dependency_map: Optional[Dict[str, List[str]]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
+        pipeline_mode: str = "barrier",
     ) -> int:
         """
         Create a topology-aware DNN inference job.
@@ -269,6 +278,7 @@ class JobManager:
                 "topology_nodes": topology_nodes,
                 "topology_edges": topology_edges,
             },
+            pipeline_mode=pipeline_mode,
         )
 
         # Mark job metadata as DNN-enabled for downstream handlers.
@@ -529,6 +539,10 @@ class JobManager:
 
         # Clean up pipeline data
         self.dependency_manager.cleanup_job(job_id)
+
+        # Clean up staged model loading state, if tracker is configured.
+        if self.model_load_tracker:
+            self.model_load_tracker.cleanup_job(job_id)
 
         print(f"JobManager: Job {job_id} finalized")
 

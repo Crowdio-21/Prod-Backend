@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+from pathlib import Path
 import websockets
 from typing import Any, Callable, List, Optional, Dict
 from common.protocol import (
@@ -23,7 +24,13 @@ from common.code_instrumenter import (
     generate_task_control_wrapper,
 )
 from .decorators import get_task_metadata, TaskMetadata
+from .model_artifacts import build_partition_artifact
 from .topology import validate_topology
+
+
+def _native_model_stage_passthrough(task_input: Any) -> Any:
+    """Fallback stage callable for native runtimes that execute model partitions directly."""
+    return task_input
 
 
 class CrowdComputeClient:
@@ -365,6 +372,7 @@ class CrowdComputeClient:
         stages: List[Dict[str, Any]],
         dependency_map: Optional[Dict[str, List[str]]] = None,
         dnn_config: Optional[Dict[str, Any]] = None,
+        pipeline_mode: str = "barrier",
         **kwargs,
     ) -> List[Any]:
         """
@@ -382,7 +390,7 @@ class CrowdComputeClient:
         Args:
             stages: Ordered list of stage definitions.  Each stage is a dict:
                 {
-                    "func": <callable>,        # function for this stage
+                    "func": <callable>,        # optional for native model stages
                     "args_list": [arg1, ...],  # one entry per task
                     "pass_upstream_results": False,  # inject upstream results?
                     "name": "stage_name",      # optional human label
@@ -417,18 +425,31 @@ class CrowdComputeClient:
         try:
             # Build stage definitions for the protocol message
             stage_defs = []
-            for stage_def in stages:
-                func = stage_def["func"]
+            for stage_idx, stage_def in enumerate(stages):
+                func = stage_def.get("func")
                 args_list = stage_def["args_list"]
+                stage_name = stage_def.get("name")
+                if not stage_name:
+                    if func is not None:
+                        stage_name = func.__name__
+                    else:
+                        stage_name = f"stage_{stage_idx}"
 
-                # Serialise function
-                if hasattr(func, "__crowdio_original__"):
-                    func_code = serialize_function(func.__crowdio_original__)
+                execution_mode = stage_def.get("execution_mode")
+                model_partition_id = stage_def.get("model_partition_id") or stage_name
+
+                # Serialise function (or internal passthrough for native model stages)
+                if func is None:
+                    if not execution_mode:
+                        execution_mode = "native_model"
+                    func_code = serialize_function(_native_model_stage_passthrough)
+                    metadata = None
                 else:
-                    func_code = serialize_function(func)
-
-                # Extract per-stage task metadata
-                metadata = get_task_metadata(func)
+                    if hasattr(func, "__crowdio_original__"):
+                        func_code = serialize_function(func.__crowdio_original__)
+                    else:
+                        func_code = serialize_function(func)
+                    metadata = get_task_metadata(func)
 
                 # Pre-instrument with task control (pause/kill) at SDK level
                 stage_ckpt_vars = []
@@ -451,7 +472,9 @@ class CrowdComputeClient:
                             "pass_upstream_results", False
                         ),
                         "task_metadata": task_meta_dict,
-                        "name": stage_def.get("name", func.__name__),
+                        "name": stage_name,
+                        "execution_mode": execution_mode or "python",
+                        "model_partition_id": model_partition_id,
                     }
                 )
 
@@ -471,6 +494,7 @@ class CrowdComputeClient:
                 dependency_map=dependency_map,
                 task_metadata=global_meta,
                 dnn_config=dnn_config,
+                pipeline_mode=pipeline_mode,
             )
 
             self._submitted_jobs[job_id] = {
@@ -514,39 +538,198 @@ class CrowdComputeClient:
     async def dnn_pipeline(
         self,
         stages: List[Dict[str, Any]],
-        inference_graph_id: str,
-        topology_nodes: List[Dict[str, Any]],
-        topology_edges: List[Dict[str, Any]],
+        inference_graph_id: Optional[str] = None,
+        topology_nodes: Optional[List[Dict[str, Any]]] = None,
+        topology_edges: Optional[List[Dict[str, Any]]] = None,
+        model_paths: Optional[List[str]] = None,
+        model_partition_ids: Optional[List[str]] = None,
         model_version_id: Optional[str] = None,
         model_artifacts: Optional[List[Dict[str, Any]]] = None,
         aggregation_strategy: str = "average",
         dependency_map: Optional[Dict[str, List[str]]] = None,
+        pipeline_mode: str = "streaming",
         **kwargs,
     ) -> List[Any]:
         """
         Submit a topology-aware DNN pipeline job.
 
-        This wraps pipeline() and attaches dnn_config so foreman can route the
-        request through DNN-aware job creation and topology validation.
+        You can provide explicit topology metadata (topology_nodes/topology_edges)
+        or model paths (either model_paths=[...] or per-stage "model" fields),
+        in which case the SDK builds a linear topology from stage order
+        automatically.
         """
+        if not stages:
+            raise ValueError("stages must not be empty")
+
+        stage_model_paths: List[Optional[str]] = []
+        stage_model_count = 0
+        for stage in stages:
+            model_path = stage.get("model")
+            if model_path:
+                stage_model_paths.append(str(model_path))
+                stage_model_count += 1
+            else:
+                stage_model_paths.append(None)
+
+        if stage_model_count and stage_model_count != len(stages):
+            raise ValueError(
+                "When using per-stage model fields, every stage must include a model path"
+            )
+
+        resolved_model_paths = list(model_paths or [])
+        if not resolved_model_paths and stage_model_count:
+            resolved_model_paths = [p for p in stage_model_paths if p is not None]
+
+        if resolved_model_paths and stage_model_count:
+            explicit_stage_models = [p for p in stage_model_paths if p is not None]
+            if len(explicit_stage_models) != len(resolved_model_paths):
+                raise ValueError(
+                    "model_paths length must match the number of stage model entries"
+                )
+            for idx, (from_stage, from_arg) in enumerate(
+                zip(explicit_stage_models, resolved_model_paths)
+            ):
+                if from_stage != from_arg:
+                    raise ValueError(
+                        f"Conflicting model path at stage index {idx}: stage model '{from_stage}' != model_paths '{from_arg}'"
+                    )
+
+        normalized_stages: List[Dict[str, Any]] = []
+        used_stage_names = set()
+        for idx, stage in enumerate(stages):
+            stage_copy = dict(stage)
+            stage_name = stage_copy.get("name")
+            if not stage_name:
+                if idx < len(stage_model_paths) and stage_model_paths[idx]:
+                    stage_name = Path(stage_model_paths[idx]).stem
+                elif idx < len(resolved_model_paths):
+                    stage_name = Path(resolved_model_paths[idx]).stem
+                else:
+                    func = stage_copy.get("func")
+                    stage_name = getattr(func, "__name__", f"stage_{idx}")
+
+            base_name = str(stage_name)
+            unique_name = base_name
+            suffix = 1
+            while unique_name in used_stage_names:
+                unique_name = f"{base_name}_{suffix}"
+                suffix += 1
+
+            stage_copy["name"] = unique_name
+            stage_has_func = stage_copy.get("func") is not None
+            if not stage_has_func and idx < len(resolved_model_paths):
+                stage_copy["execution_mode"] = stage_copy.get(
+                    "execution_mode", "native_model"
+                )
+                stage_copy["model_partition_id"] = stage_copy.get(
+                    "model_partition_id", unique_name
+                )
+            stage_copy.pop("model", None)
+            used_stage_names.add(unique_name)
+            normalized_stages.append(stage_copy)
+
+        if resolved_model_paths and len(resolved_model_paths) != len(normalized_stages):
+            raise ValueError("model_paths length must match stages length")
+
+        resolved_partition_ids = list(model_partition_ids or [])
+        if resolved_partition_ids and not resolved_model_paths:
+            raise ValueError(
+                "model_partition_ids requires model paths (from model_paths or per-stage model)"
+            )
+
+        if resolved_partition_ids and len(resolved_partition_ids) != len(
+            normalized_stages
+        ):
+            raise ValueError("model_partition_ids length must match stages length")
+
+        if resolved_model_paths and not resolved_partition_ids:
+            # Keep partition IDs aligned with stage names for topology validation.
+            resolved_partition_ids = [stage["name"] for stage in normalized_stages]
+
+        resolved_topology_nodes = topology_nodes
+        resolved_topology_edges = topology_edges
+
+        if resolved_topology_nodes is None or resolved_topology_edges is None:
+            if not resolved_model_paths:
+                raise ValueError(
+                    "Provide topology_nodes/topology_edges or model_paths for auto-topology"
+                )
+
+            resolved_topology_nodes = []
+            for idx, stage in enumerate(normalized_stages):
+                if idx == 0:
+                    role = "source"
+                elif idx == len(normalized_stages) - 1:
+                    role = "sink"
+                else:
+                    role = "intermediate"
+
+                requirements = stage.get("requirements") or {}
+                if not isinstance(requirements, dict):
+                    requirements = {}
+
+                resolved_topology_nodes.append(
+                    {
+                        "node_id": stage["name"],
+                        "role": role,
+                        "model_partition_id": resolved_partition_ids[idx],
+                        "requirements": requirements,
+                    }
+                )
+
+            resolved_topology_edges = [
+                {
+                    "source": normalized_stages[idx]["name"],
+                    "target": normalized_stages[idx + 1]["name"],
+                    "metadata": {"kind": "pipeline"},
+                }
+                for idx in range(len(normalized_stages) - 1)
+            ]
+        else:
+            resolved_topology_nodes = list(resolved_topology_nodes)
+            resolved_topology_edges = list(resolved_topology_edges)
+
+        resolved_model_artifacts = model_artifacts
+        if resolved_model_artifacts is None and resolved_model_paths:
+            resolved_model_artifacts = []
+            for idx, model_path in enumerate(resolved_model_paths):
+                resolved_model_artifacts.append(
+                    build_partition_artifact(
+                        model_partition_id=resolved_partition_ids[idx],
+                        file_path=model_path,
+                        assigned_device_id=None,
+                    )
+                )
+        elif resolved_model_artifacts is None:
+            resolved_model_artifacts = []
+
+        resolved_inference_graph_id = (
+            inference_graph_id or f"dnn-graph-{uuid.uuid4().hex[:12]}"
+        )
+
+        resolved_model_version_id = model_version_id
+        if resolved_model_artifacts and not resolved_model_version_id:
+            resolved_model_version_id = f"dnn-model-{uuid.uuid4().hex[:12]}"
+
         validate_topology(
-            stages=stages,
-            topology_nodes=topology_nodes,
-            topology_edges=topology_edges,
+            stages=normalized_stages,
+            topology_nodes=resolved_topology_nodes,
+            topology_edges=resolved_topology_edges,
         )
 
         dnn_config = {
-            "inference_graph_id": inference_graph_id,
-            "topology_nodes": topology_nodes,
-            "topology_edges": topology_edges,
-            "model_version_id": model_version_id,
-            "model_artifacts": model_artifacts or [],
+            "inference_graph_id": resolved_inference_graph_id,
+            "topology_nodes": resolved_topology_nodes,
+            "topology_edges": resolved_topology_edges,
+            "model_version_id": resolved_model_version_id,
+            "model_artifacts": resolved_model_artifacts,
             "aggregation_strategy": aggregation_strategy,
         }
         return await self.pipeline(
-            stages=stages,
+            stages=normalized_stages,
             dependency_map=dependency_map,
             dnn_config=dnn_config,
+            pipeline_mode=pipeline_mode,
             **kwargs,
         )
 

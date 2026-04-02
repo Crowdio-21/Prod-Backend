@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import websockets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -6,9 +8,51 @@ from .db.base import init_db
 from .core.ws_manager import WebSocketManager
 from . import api
 
-
 # Global WebSocket manager
 ws_manager: WebSocketManager = None
+
+
+def _load_foreman_env() -> None:
+    """Load environment variables from foreman/.env if present.
+
+    Existing process environment variables take precedence.
+    """
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        print(f"Warning: failed to read {env_path}: {exc}")
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
+
+
+_load_foreman_env()
 
 
 @asynccontextmanager

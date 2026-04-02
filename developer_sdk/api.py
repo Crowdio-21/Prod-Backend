@@ -165,30 +165,41 @@ async def pipeline(
 
 async def dnn_pipeline(
     stages: List[Dict],
-    inference_graph_id: str,
-    topology_nodes: List[Dict],
-    topology_edges: List[Dict],
+    inference_graph_id: Optional[str] = None,
+    topology_nodes: Optional[List[Dict]] = None,
+    topology_edges: Optional[List[Dict]] = None,
+    model_paths: Optional[List[str]] = None,
+    model_partition_ids: Optional[List[str]] = None,
     model_version_id: Optional[str] = None,
     model_artifacts: Optional[List[Dict]] = None,
     aggregation_strategy: str = "average",
     dependency_map: Optional[Dict[str, List[str]]] = None,
+    pipeline_mode: str = "streaming",
     **kwargs,
 ) -> List[Any]:
     """
     Execute a topology-aware DNN pipeline on distributed workers.
 
-    This is the DNN-oriented variant of pipeline() and includes explicit
-    graph/topology metadata consumed by the foreman.
+    This is the DNN-oriented variant of pipeline().
+    You can pass explicit topology metadata, or provide model paths and let
+    the SDK generate linear topology metadata automatically.
+    Model paths can be supplied through model_paths=[...], or compactly as
+    stage-level entries: {"model": "cell_a.onnx", ...}.
+    For native runtimes (for example Kotlin Android ONNX runners), stages may
+    omit "func" and provide only name/model/args_list.
     """
     return await _client.dnn_pipeline(
         stages=stages,
         inference_graph_id=inference_graph_id,
         topology_nodes=topology_nodes,
         topology_edges=topology_edges,
+        model_paths=model_paths,
+        model_partition_ids=model_partition_ids,
         model_version_id=model_version_id,
         model_artifacts=model_artifacts,
         aggregation_strategy=aggregation_strategy,
         dependency_map=dependency_map,
+        pipeline_mode=pipeline_mode,
         **kwargs,
     )
 

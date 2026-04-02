@@ -129,15 +129,21 @@ class DependencyManager:
         stages: List[PipelineStage],
         dependency_map: Optional[Dict[str, List[str]]] = None,
         dnn_config: Optional[Dict[str, Any]] = None,
+        pipeline_mode: str = "barrier",
     ) -> int:
         """
         Create all tasks for a pipeline job and wire their dependencies.
 
-        Two dependency modes are supported:
+        Three dependency modes are supported:
 
-        **Sequential stages (default)** – every task in stage N depends on
-        *all* tasks in stage N-1.  Works like a barrier: stage N cannot
-        start until the entire previous stage is done.
+        **barrier (default)** – every task in stage N depends on *all*
+        tasks in stage N-1.  Works like a barrier: stage N cannot start
+        until the entire previous stage is done.
+
+        **streaming** – each input flows independently through stages.
+        Task ``(stage=S, input=i)`` depends only on task
+        ``(stage=S-1, input=i)``.  This enables pipeline parallelism:
+        input 2 can enter stage 0 while input 1 is in stage 1.
 
         **Custom dependency map** – a dict mapping ``task_id → [upstream_task_ids]``
         that lets callers express arbitrary DAGs (fan-in, fan-out, diamond, …).
@@ -148,6 +154,7 @@ class DependencyManager:
             dependency_map:  Optional explicit dependency mapping.
                              Keys are task IDs, values are lists of
                              task IDs they depend on.
+            pipeline_mode:  "barrier" (default) or "streaming".
 
         Returns:
             Total number of tasks created.
@@ -170,6 +177,7 @@ class DependencyManager:
         self._pipeline_metadata[job_id] = {
             "total_stages": len(stages),
             "stages": [s.to_dict() for s in stages],
+            "pipeline_mode": pipeline_mode,
         }
 
         # ----- create tasks with dependency wiring ----- #
@@ -223,26 +231,40 @@ class DependencyManager:
                     if dependency_map and task_id in dependency_map:
                         # Explicit dependency map
                         depends_on = dependency_map[task_id]
+                    elif stage_idx > 0 and pipeline_mode == "streaming":
+                        # Streaming: depend only on the same input index in
+                        # the previous stage.  If the previous stage has fewer
+                        # tasks, fall back to the last available task.
+                        prev_idx = min(
+                            task_local_idx,
+                            len(stage_task_ids[stage_idx - 1]) - 1,
+                        )
+                        depends_on = [stage_task_ids[stage_idx - 1][prev_idx]]
                     elif stage_idx > 0:
-                        # Default: depend on ALL tasks in previous stage
+                        # Default barrier: depend on ALL tasks in previous stage
                         depends_on = stage_task_ids[stage_idx - 1]
                     else:
                         depends_on = []
 
                     # Determine downstream dependents
-                    if stage_idx < len(stages) - 1:
-                        # Default: all tasks in next stage depend on me
-                        dependents = stage_task_ids[stage_idx + 1]
-                    else:
-                        dependents = []
-
-                    # Override dependents if explicit map provided
                     if dependency_map:
                         dependents = [
                             tid
                             for tid, deps in dependency_map.items()
                             if task_id in deps
                         ]
+                    elif stage_idx < len(stages) - 1 and pipeline_mode == "streaming":
+                        # Streaming: only the matching input in the next stage
+                        next_idx = min(
+                            task_local_idx,
+                            len(stage_task_ids[stage_idx + 1]) - 1,
+                        )
+                        dependents = [stage_task_ids[stage_idx + 1][next_idx]]
+                    elif stage_idx < len(stages) - 1:
+                        # Default barrier: all tasks in next stage depend on me
+                        dependents = stage_task_ids[stage_idx + 1]
+                    else:
+                        dependents = []
 
                     dependency_count = len(depends_on)
                     initial_status = "blocked" if dependency_count > 0 else "pending"

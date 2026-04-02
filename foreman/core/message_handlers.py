@@ -2,12 +2,18 @@
 Message handling logic separated by client type
 """
 
+import asyncio
 import json
+import os
+import re
+from typing import Any, Dict, List, Optional
 
 from websockets.server import WebSocketServerProtocol
 
 from .utils import (
     _create_worker_in_database,
+    _get_pending_tasks,
+    _get_assigned_tasks,
     _record_worker_failure,
     _update_worker_status,
     _update_worker_task_stats,
@@ -17,6 +23,7 @@ from common.protocol import (
     MessageType,
     create_job_accepted_message,
     create_load_model_message,
+    create_unload_model_message,
 )
 from common.serializer import get_runtime_info, bytes_to_hex, hex_to_bytes
 from .staged_results_manager.checkpoint_manager import CheckpointManager
@@ -33,7 +40,13 @@ class ClientMessageHandler:
     - Send job acknowledgments
     """
 
-    def __init__(self, connection_manager, job_manager, task_dispatcher):
+    def __init__(
+        self,
+        connection_manager,
+        job_manager,
+        task_dispatcher,
+        model_load_tracker=None,
+    ):
         """
         Initialize client message handler
 
@@ -41,10 +54,88 @@ class ClientMessageHandler:
             connection_manager: ConnectionManager instance
             job_manager: JobManager instance
             task_dispatcher: TaskDispatcher instance
+            model_load_tracker: Optional tracker for model load readiness
         """
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
+        self.model_load_tracker = model_load_tracker
+
+    @staticmethod
+    def _infer_public_host_for_worker(
+        worker_ws: WebSocketServerProtocol,
+    ) -> Optional[str]:
+        """Infer the foreman host a worker used to establish its WebSocket connection."""
+        try:
+            headers = getattr(worker_ws, "request_headers", None)
+            if headers is None:
+                return None
+            host_header = headers.get("Host")
+            if not host_header:
+                return None
+            return str(host_header)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _estimate_model_load_warmup_seconds(storage_path: Optional[str]) -> float:
+        """Estimate warmup wait based on artifact size and configured throughput."""
+
+        def _env_float(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        base_seconds = max(0.0, _env_float("MODEL_LOAD_BASE_SECONDS", 1.0))
+        min_warmup = max(0.0, _env_float("MODEL_LOAD_MIN_WARMUP_SECONDS", 5.0))
+        max_warmup = max(min_warmup, _env_float("MODEL_LOAD_MAX_WARMUP_SECONDS", 90.0))
+        min_mbps = max(0.25, _env_float("MODEL_LOAD_MIN_MBPS", 8.0))
+
+        size_bytes = 0
+        if storage_path:
+            try:
+                size_bytes = os.path.getsize(storage_path)
+            except OSError:
+                size_bytes = 0
+
+        size_mb = float(size_bytes) / (1024.0 * 1024.0)
+        estimated = base_seconds + (size_mb / min_mbps)
+        bounded = max(min_warmup, estimated)
+        return min(max_warmup, bounded)
+
+    @staticmethod
+    def _estimate_model_load_dispatch_delay_seconds(warmup_seconds: float) -> float:
+        """Estimate inter-message delay to avoid concurrent model loads on a worker."""
+
+        def _env_float(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        fixed_delay = max(0.0, _env_float("MODEL_LOAD_DISPATCH_DELAY_SECONDS", 0.0))
+        if fixed_delay > 0.0:
+            return fixed_delay
+
+        delay_fraction = max(0.0, _env_float("MODEL_LOAD_DISPATCH_DELAY_FRACTION", 1.0))
+        min_delay = max(0.0, _env_float("MODEL_LOAD_DISPATCH_MIN_DELAY_SECONDS", 1.0))
+        max_delay = max(
+            min_delay, _env_float("MODEL_LOAD_DISPATCH_MAX_DELAY_SECONDS", 30.0)
+        )
+
+        if warmup_seconds <= 0.0:
+            return 0.0
+
+        derived = warmup_seconds * delay_fraction
+        bounded = max(min_delay, derived)
+        return min(max_delay, bounded)
 
     async def _dispatch_load_model_instructions(
         self,
@@ -52,19 +143,70 @@ class ClientMessageHandler:
         model_version_id: str,
         topology_nodes,
         model_artifacts,
-    ):
-        """Persist model artifacts and send LOAD_MODEL messages to assigned workers."""
+        stages: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """Persist artifacts, dispatch stage-0 loads, and defer later-stage loads.
+
+        Returns:
+            True when at least one stage-0/source LOAD_MODEL was dispatched.
+        """
         if not model_artifacts:
-            return
+            return False
 
-        node_to_worker = {}
-        for node in topology_nodes or []:
+        stage_index_by_name: Dict[str, int] = {}
+        for stage_index, stage in enumerate(stages or []):
+            stage_name = stage.get("name")
+            if stage_name:
+                stage_index_by_name[str(stage_name)] = stage_index
+
+            stage_partition = stage.get("model_partition_id")
+            if stage_partition:
+                stage_index_by_name[str(stage_partition)] = stage_index
+
+        partition_meta: Dict[str, Dict[str, Any]] = {}
+        for node_index, node in enumerate(topology_nodes or []):
             partition_id = node.get("model_partition_id")
-            assigned_worker = node.get("assigned_device_id")
-            if partition_id and assigned_worker:
-                node_to_worker[partition_id] = assigned_worker
+            if not partition_id:
+                continue
 
-        for artifact in model_artifacts:
+            role = str(node.get("role", "intermediate")).lower()
+            node_id = node.get("node_id")
+            stage_index = None
+            if node_id in stage_index_by_name:
+                stage_index = stage_index_by_name[node_id]
+            elif partition_id in stage_index_by_name:
+                stage_index = stage_index_by_name[partition_id]
+            elif role == "source":
+                stage_index = 0
+
+            partition_meta[partition_id] = {
+                "role": role,
+                "assigned_device_id": node.get("assigned_device_id"),
+                "stage_index": stage_index,
+                "node_index": node_index,
+            }
+
+        ordered_index_artifacts = sorted(
+            enumerate(model_artifacts),
+            key=lambda item: (
+                partition_meta.get(item[1].get("model_partition_id"), {}).get(
+                    "stage_index", 999
+                ),
+                (
+                    0
+                    if partition_meta.get(item[1].get("model_partition_id"), {}).get(
+                        "role"
+                    )
+                    == "source"
+                    else 1
+                ),
+                item[0],
+            ),
+        )
+
+        stage0_load_dispatched = False
+
+        for ordered_index, (_, artifact) in enumerate(ordered_index_artifacts):
             partition_id = artifact.get("model_partition_id")
             content_b64 = artifact.get("content_b64")
             if not partition_id or not content_b64:
@@ -77,23 +219,157 @@ class ClientMessageHandler:
                 file_name=artifact.get("file_name"),
             )
 
-            assigned_worker = artifact.get("assigned_device_id") or node_to_worker.get(
-                partition_id
+            meta = partition_meta.get(partition_id, {})
+            role = str(meta.get("role", "intermediate")).lower()
+            stage_index = meta.get("stage_index")
+            if stage_index is None:
+                stage_index = ordered_index
+
+            assigned_worker = artifact.get("assigned_device_id") or meta.get(
+                "assigned_device_id"
             )
             if not assigned_worker:
-                print(
-                    f"ClientMessageHandler: No assigned worker found for partition {partition_id}; skipping LOAD_MODEL dispatch"
+                available_workers = sorted(self.connection_manager.get_all_worker_ids())
+                if not available_workers:
+                    print(
+                        f"ClientMessageHandler: No connected workers available for partition {partition_id}; skipping model dispatch"
+                    )
+                    continue
+
+                # Prefer a worker that already has this model resident or cached
+                best_worker = None
+                if self.model_load_tracker:
+                    resident = self.model_load_tracker.workers_with_model_resident(
+                        partition_id
+                    )
+                    if resident:
+                        best_worker = next(
+                            (w for w in resident if w in available_workers), None
+                        )
+                    if not best_worker:
+                        cached = self.model_load_tracker.workers_with_model_cached(
+                            partition_id
+                        )
+                        if cached:
+                            best_worker = next(
+                                (w for w in cached if w in available_workers), None
+                            )
+
+                if best_worker:
+                    assigned_worker = best_worker
+                    print(
+                        f"ClientMessageHandler: Affinity-assigned partition {partition_id} to worker {assigned_worker} (model already available)"
+                    )
+                else:
+                    # Pick the worker with fewest resident models to spread load
+                    worker_load = {
+                        w: len(
+                            self.model_load_tracker.workers_with_model_resident(w)
+                            if self.model_load_tracker
+                            else []
+                        )
+                        for w in available_workers
+                    }
+                    assigned_worker = min(
+                        available_workers, key=lambda w: worker_load.get(w, 0)
+                    )
+                    print(
+                        f"ClientMessageHandler: No affinity for partition {partition_id}; selected least-loaded worker {assigned_worker}"
+                    )
+
+            warmup_seconds = self._estimate_model_load_warmup_seconds(
+                stored.get("storage_path")
+            )
+
+            if self.model_load_tracker:
+                self.model_load_tracker.set_job_model_version(job_id, model_version_id)
+                self.model_load_tracker.set_stage_partition_id(
+                    job_id, stage_index, partition_id
                 )
+
+            # Stage-0 / source partitions: broadcast LOAD_MODEL to ALL workers
+            if stage_index == 0 or role == "source":
+                all_stage0_workers = sorted(
+                    self.connection_manager.get_all_worker_ids()
+                )
+                for target_wid in all_stage0_workers:
+                    target_ws = self.connection_manager.get_worker_websocket(target_wid)
+                    if not target_ws:
+                        continue
+                    host_hint = self._infer_public_host_for_worker(target_ws)
+                    target_model_url = build_model_artifact_url(
+                        model_version_id,
+                        stored["file_name"],
+                        host_override=host_hint,
+                    )
+                    use_cache = bool(
+                        self.model_load_tracker
+                        and (
+                            self.model_load_tracker.is_model_resident(
+                                target_wid, partition_id
+                            )
+                            or self.model_load_tracker.is_model_cached(
+                                target_wid, partition_id
+                            )
+                        )
+                    )
+                    load_msg = create_load_model_message(
+                        job_id=job_id,
+                        model_version_id=model_version_id,
+                        model_partition_id=partition_id,
+                        model_uri=target_model_url,
+                        checksum=stored["checksum"],
+                        from_cache=use_cache,
+                    )
+                    await target_ws.send(load_msg.to_json())
+                    if self.model_load_tracker:
+                        self.model_load_tracker.mark_dispatched(
+                            target_wid,
+                            partition_id,
+                            warmup_seconds=warmup_seconds,
+                        )
+                    print(
+                        f"ClientMessageHandler: Sent stage-0 LOAD_MODEL for "
+                        f"partition {partition_id} to worker {target_wid}"
+                    )
+
+                if self.model_load_tracker:
+                    self.model_load_tracker.set_loaded_stage(job_id, 0)
+                stage0_load_dispatched = True
                 continue
 
+            # For later stages, need the assigned worker's websocket
             worker_ws = self.connection_manager.get_worker_websocket(assigned_worker)
             if not worker_ws:
                 print(
-                    f"ClientMessageHandler: Assigned worker {assigned_worker} is not connected for partition {partition_id}"
+                    f"ClientMessageHandler: Worker {assigned_worker} unavailable for partition {partition_id}; skipping dispatch"
                 )
                 continue
 
-            model_url = build_model_artifact_url(model_version_id, stored["file_name"])
+            host_hint = self._infer_public_host_for_worker(worker_ws)
+            model_url = build_model_artifact_url(
+                model_version_id,
+                stored["file_name"],
+                host_override=host_hint,
+            )
+
+            if self.model_load_tracker:
+                self.model_load_tracker.store_deferred_load(
+                    job_id=job_id,
+                    stage_index=stage_index,
+                    partition_id=partition_id,
+                    worker_id=assigned_worker,
+                    model_url=model_url,
+                    model_version_id=model_version_id,
+                    checksum=stored.get("checksum"),
+                    warmup_seconds=warmup_seconds,
+                )
+                print(
+                    f"ClientMessageHandler: Deferred LOAD_MODEL for stage {stage_index} partition {partition_id} on worker {assigned_worker}"
+                )
+                continue
+
+            # Fallback path if tracker is unavailable: dispatch immediately.
             load_msg = create_load_model_message(
                 job_id=job_id,
                 model_version_id=model_version_id,
@@ -102,9 +378,137 @@ class ClientMessageHandler:
                 checksum=stored["checksum"],
             )
             await worker_ws.send(load_msg.to_json())
-            print(
-                f"ClientMessageHandler: Sent LOAD_MODEL for partition {partition_id} to worker {assigned_worker}"
+
+            dispatch_delay = self._estimate_model_load_dispatch_delay_seconds(
+                warmup_seconds
             )
+            if dispatch_delay > 0.0:
+                await asyncio.sleep(dispatch_delay)
+
+        return stage0_load_dispatched
+
+    async def dispatch_stage_model_load(self, job_id: str, stage_index: int) -> int:
+        """Dispatch deferred model loads for a newly unblocked pipeline stage."""
+        if not self.model_load_tracker:
+            return 0
+
+        deferred_loads = self.model_load_tracker.pop_deferred_loads_for_stage(
+            job_id, stage_index
+        )
+        if not deferred_loads:
+            return 0
+
+        previous_stage = self.model_load_tracker.get_loaded_stage(job_id)
+        previous_partition_id = None
+        if previous_stage is not None:
+            previous_partition_id = self.model_load_tracker.get_stage_partition_id(
+                job_id, previous_stage
+            )
+        if previous_partition_id is None and stage_index > 0:
+            previous_partition_id = self.model_load_tracker.get_stage_partition_id(
+                job_id, stage_index - 1
+            )
+
+        dispatched = 0
+        unload_sent_workers = set()
+
+        for load_info in deferred_loads:
+            partition_id = load_info.get("partition_id")
+            model_url = load_info.get("model_url")
+            model_version_id = load_info.get(
+                "model_version_id"
+            ) or self.model_load_tracker.get_job_model_version(job_id)
+            checksum = load_info.get("checksum")
+            warmup_seconds = load_info.get("warmup_seconds")
+
+            if not partition_id or not model_url or not model_version_id:
+                continue
+
+            worker_id = load_info.get("worker_id")
+            if not worker_id:
+                available_workers = sorted(self.connection_manager.get_all_worker_ids())
+                if not available_workers:
+                    print(
+                        f"ClientMessageHandler: No workers available to dispatch deferred stage load for partition {partition_id}"
+                    )
+                    continue
+                worker_id = available_workers[0]
+
+            worker_ws = self.connection_manager.get_worker_websocket(worker_id)
+            if not worker_ws:
+                print(
+                    f"ClientMessageHandler: Worker {worker_id} unavailable for deferred partition {partition_id}"
+                )
+                continue
+
+            # Smart skip: if the worker already has this partition loaded,
+            # skip both unload and load — zero cost.
+            if self.model_load_tracker.is_model_resident(worker_id, partition_id):
+                self.model_load_tracker.mark_ready(worker_id, partition_id)
+                self.model_load_tracker.set_stage_partition_id(
+                    job_id, stage_index, partition_id
+                )
+                dispatched += 1
+                print(
+                    f"ClientMessageHandler: Worker {worker_id} already has partition "
+                    f"{partition_id} resident — skipping unload/load"
+                )
+                continue
+
+            # Smart skip: if the worker has this partition cached on disk,
+            # send LOAD_MODEL with from_cache flag to skip HTTP download.
+            from_cache = self.model_load_tracker.is_model_cached(
+                worker_id, partition_id
+            )
+
+            if (
+                previous_partition_id
+                and worker_id not in unload_sent_workers
+                and model_version_id
+            ):
+                unload_msg = create_unload_model_message(
+                    job_id=job_id,
+                    model_version_id=model_version_id,
+                    model_partition_id=previous_partition_id,
+                )
+                await worker_ws.send(unload_msg.to_json())
+                unload_sent_workers.add(worker_id)
+                self.model_load_tracker.mark_model_unloaded(
+                    worker_id, previous_partition_id
+                )
+                print(
+                    f"ClientMessageHandler: Sent UNLOAD_MODEL for partition {previous_partition_id} to worker {worker_id}"
+                )
+
+            load_msg = create_load_model_message(
+                job_id=job_id,
+                model_version_id=model_version_id,
+                model_partition_id=partition_id,
+                model_uri=model_url,
+                checksum=checksum,
+                from_cache=from_cache,
+            )
+            await worker_ws.send(load_msg.to_json())
+            self.model_load_tracker.mark_dispatched(
+                worker_id,
+                partition_id,
+                warmup_seconds=warmup_seconds,
+            )
+            self.model_load_tracker.set_stage_partition_id(
+                job_id, stage_index, partition_id
+            )
+            dispatched += 1
+
+            cache_note = " (from cache)" if from_cache else ""
+            print(
+                f"ClientMessageHandler: Sent deferred LOAD_MODEL for stage {stage_index} "
+                f"partition {partition_id} to worker {worker_id}{cache_note}"
+            )
+
+        if dispatched > 0:
+            self.model_load_tracker.set_loaded_stage(job_id, stage_index)
+
+        return dispatched
 
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -227,6 +631,7 @@ class ClientMessageHandler:
             dependency_map = message.data.get("dependency_map")
             task_metadata = message.data.get("task_metadata")
             dnn_config = message.data.get("dnn_config")
+            pipeline_mode = message.data.get("pipeline_mode", "barrier")
 
             print(
                 f"ClientMessageHandler: Received pipeline job {job_id} "
@@ -249,6 +654,7 @@ class ClientMessageHandler:
 
             # Create pipeline job with dependency wiring.
             # If dnn_config is provided, route through DNN-aware creation.
+            stage0_load_dispatched = False
             if dnn_config:
                 inference_graph_id = dnn_config["inference_graph_id"]
                 topology_nodes = dnn_config["topology_nodes"]
@@ -267,30 +673,43 @@ class ClientMessageHandler:
                     aggregation_strategy=aggregation_strategy,
                     dependency_map=dependency_map,
                     task_metadata=task_metadata,
+                    pipeline_mode=pipeline_mode,
                 )
 
                 if model_version_id and model_artifacts:
-                    await self._dispatch_load_model_instructions(
-                        job_id=job_id,
-                        model_version_id=model_version_id,
-                        topology_nodes=topology_nodes,
-                        model_artifacts=model_artifacts,
+                    stage0_load_dispatched = (
+                        await self._dispatch_load_model_instructions(
+                            job_id=job_id,
+                            model_version_id=model_version_id,
+                            topology_nodes=topology_nodes,
+                            model_artifacts=model_artifacts,
+                            stages=stages,
+                        )
                     )
             else:
                 created = await self.job_manager.create_pipeline_job(
-                    job_id, stages, dependency_map, task_metadata
+                    job_id,
+                    stages,
+                    dependency_map,
+                    task_metadata,
+                    pipeline_mode=pipeline_mode,
                 )
 
-            # Dispatch Stage 0 tasks (they are "pending" from creation)
-            stage_0_func_code = stages[0]["func_code"]
-            assigned = await self.task_dispatcher.assign_tasks_for_job(
-                job_id, stage_0_func_code, stages[0]["args_list"]
-            )
+            if dnn_config and stage0_load_dispatched:
+                print(
+                    f"ClientMessageHandler: Pipeline job {job_id} — waiting for MODEL_LOADED before dispatching stage-0 tasks"
+                )
+            else:
+                # Dispatch Stage 0 tasks (they are "pending" from creation)
+                stage_0_func_code = stages[0]["func_code"]
+                assigned = await self.task_dispatcher.assign_tasks_for_job(
+                    job_id, stage_0_func_code, stages[0]["args_list"]
+                )
 
-            print(
-                f"ClientMessageHandler: Pipeline job {job_id} — "
-                f"Assigned {assigned} stage-0 tasks immediately"
-            )
+                print(
+                    f"ClientMessageHandler: Pipeline job {job_id} — "
+                    f"Assigned {assigned} stage-0 tasks immediately"
+                )
 
             # Send job accepted message
             response = create_job_accepted_message(job_id)
@@ -341,6 +760,8 @@ class WorkerMessageHandler:
         task_dispatcher,
         completion_handler,
         checkpoint_manager: CheckpointManager = None,
+        model_load_tracker=None,
+        client_handler=None,
     ):
         """
         Initialize worker message handler
@@ -351,12 +772,16 @@ class WorkerMessageHandler:
             task_dispatcher: TaskDispatcher instance
             completion_handler: JobCompletionHandler instance
             checkpoint_manager: CheckpointManager instance for checkpoint handling
+            model_load_tracker: Optional tracker for model readiness
+            client_handler: Optional client handler to dispatch stage model loads
         """
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
         self.completion_handler = completion_handler
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
+        self.model_load_tracker = model_load_tracker
+        self.client_handler = client_handler
 
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -379,6 +804,8 @@ class WorkerMessageHandler:
         elif message.type == MessageType.WORKER_HEARTBEAT:
             # Fallback for workers sending heartbeat instead of PONG
             await self._handle_pong(message, websocket)
+        elif message.type == MessageType.MODEL_LOADED:
+            await self._handle_model_loaded(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
         elif message.type == MessageType.INTERMEDIATE_FEATURE:
@@ -441,6 +868,66 @@ class WorkerMessageHandler:
             print(
                 f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}"
             )
+
+    @staticmethod
+    def _is_model_not_loaded_error(error: str) -> bool:
+        if not error:
+            return False
+        lowered = str(error).lower()
+        return "model partition" in lowered and "not loaded" in lowered
+
+    @staticmethod
+    def _extract_model_partition_id(error: str) -> Optional[str]:
+        if not error:
+            return None
+
+        match = re.search(
+            r"model partition\s+[\"']?([^\"'\s]+)[\"']?",
+            str(error),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _extract_stage_index_from_task_id(task_id: str) -> Optional[int]:
+        """Extract stage index from task IDs formatted as <job>_task_<stage>_<idx>."""
+        if not task_id:
+            return None
+
+        match = re.search(r"_task_(\d+)_\d+$", str(task_id))
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    async def _handle_model_loaded(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
+        """Mark a worker partition as ready and trigger assignment."""
+        worker_id = self.connection_manager.find_worker_by_websocket(websocket)
+        if not worker_id:
+            print("WorkerMessageHandler: Could not map websocket for MODEL_LOADED")
+            return
+
+        model_partition_id = message.data.get("model_partition_id")
+        if not model_partition_id:
+            print("WorkerMessageHandler: MODEL_LOADED missing model_partition_id field")
+            return
+
+        if self.model_load_tracker:
+            self.model_load_tracker.mark_ready(worker_id, model_partition_id)
+
+        print(
+            f"WorkerMessageHandler: Worker {worker_id} reported model partition ready: {model_partition_id}"
+        )
+
+        # Opportunistically assign work now that the partition is confirmed ready.
+        await self.task_dispatcher.assign_task_to_available_worker(worker_id)
 
     async def _handle_worker_ready(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -513,6 +1000,17 @@ class WorkerMessageHandler:
 
             # Update worker status in database
             await _update_worker_status(worker_id, "online")
+
+            # Register cached model partitions reported by the worker
+            cached_partitions = message.data.get("cached_model_partitions", [])
+            if cached_partitions and self.model_load_tracker:
+                self.model_load_tracker.register_cached_models(
+                    worker_id, cached_partitions
+                )
+                print(
+                    f"WorkerMessageHandler: Worker {worker_id} reports "
+                    f"{len(cached_partitions)} cached model partition(s): {cached_partitions}"
+                )
 
             # Assign any pending tasks to this worker
             assigned = await self.task_dispatcher.assign_task_to_available_worker(
@@ -644,17 +1142,83 @@ class WorkerMessageHandler:
                         f"[PIPELINE] 🚀 Stage barrier lifted! {len(newly_unblocked)} "
                         f"downstream tasks unblocked for job {job_id}"
                     )
-                    # Batch-dispatch ALL unblocked tasks to the best available
-                    # workers (including the current worker and any idle ones).
-                    func_code = self.job_manager.get_func_code(job_id)
-                    batch_assigned = await self.task_dispatcher.assign_tasks_for_job(
-                        job_id, func_code or "", []
+
+                    unblocked_stage_indexes = sorted(
+                        {
+                            stage_idx
+                            for stage_idx in (
+                                self._extract_stage_index_from_task_id(
+                                    unblocked_task_id
+                                )
+                                for unblocked_task_id in newly_unblocked
+                            )
+                            if stage_idx is not None
+                        }
                     )
-                    print(
-                        f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage "
-                        f"tasks across available workers"
-                    )
-                    pipeline_batch_dispatched = True
+
+                    deferred_stage_load_triggered = False
+                    if (
+                        self.model_load_tracker
+                        and self.client_handler
+                        and unblocked_stage_indexes
+                    ):
+                        for stage_idx in unblocked_stage_indexes:
+                            if not self.model_load_tracker.has_deferred_loads(
+                                job_id, stage_idx
+                            ):
+                                continue
+
+                            # Guard: don't unload the previous model until ALL
+                            # tasks for the previous stage are finished.  In
+                            # streaming mode, a single task completion can
+                            # unblock a downstream task, but we must not swap
+                            # models while sibling tasks still need the current
+                            # model.
+                            prev_stage = stage_idx - 1
+                            if prev_stage >= 0:
+                                prev_pending = await _get_pending_tasks(job_id)
+                                prev_assigned = await _get_assigned_tasks(job_id)
+                                prev_stage_busy = any(
+                                    self._extract_stage_index_from_task_id(t.id)
+                                    == prev_stage
+                                    for t in list(prev_pending) + list(prev_assigned)
+                                )
+                                if prev_stage_busy:
+                                    print(
+                                        f"[PIPELINE] Stage {prev_stage} still has "
+                                        f"pending/assigned tasks; deferring model "
+                                        f"load for stage {stage_idx}"
+                                    )
+                                    continue
+
+                            dispatched = (
+                                await self.client_handler.dispatch_stage_model_load(
+                                    job_id=job_id,
+                                    stage_index=stage_idx,
+                                )
+                            )
+                            if dispatched > 0:
+                                deferred_stage_load_triggered = True
+
+                    if deferred_stage_load_triggered:
+                        print(
+                            "[PIPELINE] Stage model loading dispatched; waiting for MODEL_LOADED before assigning newly unblocked tasks"
+                        )
+                        pipeline_batch_dispatched = True
+                    else:
+                        # Batch-dispatch ALL unblocked tasks to the best available
+                        # workers (including the current worker and any idle ones).
+                        func_code = self.job_manager.get_func_code(job_id)
+                        batch_assigned = (
+                            await self.task_dispatcher.assign_tasks_for_job(
+                                job_id, func_code or "", []
+                            )
+                        )
+                        print(
+                            f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage "
+                            f"tasks across available workers"
+                        )
+                        pipeline_batch_dispatched = True
 
             # Check if job is complete and handle completion
             if job_complete:
@@ -731,6 +1295,28 @@ class WorkerMessageHandler:
             # Mark worker as available again
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
+
+            if self._is_model_not_loaded_error(error):
+                partition_id = self._extract_model_partition_id(error)
+                retry_delay = 1.0
+
+                if self.model_load_tracker and partition_id:
+                    # Re-arm the warmup window if worker execution raced model loading.
+                    self.model_load_tracker.mark_dispatched(worker_id, partition_id)
+                    remaining = self.model_load_tracker.seconds_until_ready(
+                        worker_id, partition_id
+                    )
+                    if remaining is not None:
+                        retry_delay = max(0.25, float(remaining))
+
+                self.task_dispatcher.schedule_job_assignment_retry(
+                    job_id, delay_seconds=retry_delay
+                )
+                print(
+                    f"WorkerMessageHandler: Deferred reassignment for job {job_id} "
+                    f"after model-not-ready error (delay={retry_delay:.2f}s)"
+                )
+                return
 
             # Assign next task to this worker (the failed task will be retried by another worker)
             assigned = await self.task_dispatcher.assign_task_to_available_worker(

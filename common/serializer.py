@@ -121,12 +121,16 @@ def deserialize_function_for_PC(func_code: str):
 
 def serialize_data(data: Any) -> bytes:
     """Serialize arbitrary data using _"""
-    pass
+    raise NotImplementedError(
+        "serialize_data is not implemented; use explicit serializers for supported payload types"
+    )
 
 
 def deserialize_data(data_bytes: bytes) -> Any:
     """Deserialize arbitrary data using _"""
-    pass
+    raise NotImplementedError(
+        "deserialize_data is not implemented; use explicit deserializers for supported payload types"
+    )
 
 
 def hex_to_bytes(hex_str: str) -> bytes:

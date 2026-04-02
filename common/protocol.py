@@ -46,6 +46,8 @@ class MessageType(Enum):
 
     # DNN orchestration messages
     LOAD_MODEL = "load_model"
+    UNLOAD_MODEL = "unload_model"
+    MODEL_LOADED = "model_loaded"
     DEVICE_TOPOLOGY = "device_topology"
     TOPOLOGY_UPDATE = "topology_update"
     INTERMEDIATE_FEATURE = "intermediate_feature"
@@ -143,6 +145,7 @@ def create_submit_pipeline_job_message(
     dependency_map: Optional[Dict[str, List[str]]] = None,
     task_metadata: Optional[Dict[str, Any]] = None,
     dnn_config: Optional[Dict[str, Any]] = None,
+    pipeline_mode: str = "barrier",
 ) -> Message:
     """
     Create a pipeline job submission message.
@@ -178,6 +181,7 @@ def create_submit_pipeline_job_message(
             "dependency_map": dependency_map,
             "task_metadata": task_metadata,
             "dnn_config": dnn_config,
+            "pipeline_mode": pipeline_mode,
         },
         job_id=job_id,
     )
@@ -189,12 +193,20 @@ def create_job_accepted_message(job_id: str) -> Message:
 
 
 def create_assign_task_message(
-    func_code: str, task_args: List[Any], task_id: str, job_id: str
+    func_code: str,
+    task_args: List[Any],
+    task_id: str,
+    job_id: str,
+    execution_metadata: Optional[Dict[str, Any]] = None,
 ) -> Message:
     """Create a task assignment message"""
+    data = {"func_code": func_code, "task_args": task_args, "task_id": task_id}
+    if execution_metadata:
+        data["execution_metadata"] = execution_metadata
+
     return Message(
         msg_type=MessageType.ASSIGN_TASK,
-        data={"func_code": func_code, "task_args": task_args, "task_id": task_id},
+        data=data,
         job_id=job_id,
     )
 
@@ -305,6 +317,7 @@ def create_resume_task_message(
     task_kwargs: Dict[str, Any] = None,
     progress_percent: float = 0.0,
     checkpoint_count: int = 0,
+    execution_metadata: Optional[Dict[str, Any]] = None,
 ) -> Message:
     """Create a task resumption message from foreman to worker
 
@@ -321,17 +334,21 @@ def create_resume_task_message(
         progress_percent: Progress percentage at last checkpoint
         checkpoint_count: Total checkpoints available for this task
     """
+    data = {
+        "task_id": task_id,
+        "func_code": func_code,
+        "checkpoint_state": checkpoint_state,
+        "task_args": task_args or [],
+        "task_kwargs": task_kwargs or {},
+        "progress_percent": progress_percent,
+        "checkpoint_count": checkpoint_count,
+    }
+    if execution_metadata:
+        data["execution_metadata"] = execution_metadata
+
     return Message(
         msg_type=MessageType.RESUME_TASK,
-        data={
-            "task_id": task_id,
-            "func_code": func_code,
-            "checkpoint_state": checkpoint_state,
-            "task_args": task_args or [],
-            "task_kwargs": task_kwargs or {},
-            "progress_percent": progress_percent,
-            "checkpoint_count": checkpoint_count,
-        },
+        data=data,
         job_id=job_id,
     )
 
@@ -342,6 +359,7 @@ def create_assign_task_message_with_metadata(
     task_id: str,
     job_id: str,
     task_metadata: Optional[Dict[str, Any]] = None,
+    execution_metadata: Optional[Dict[str, Any]] = None,
 ) -> Message:
     """
     Create a task assignment message with checkpoint metadata
@@ -362,6 +380,8 @@ def create_assign_task_message_with_metadata(
 
     if task_metadata:
         data["task_metadata"] = task_metadata
+    if execution_metadata:
+        data["execution_metadata"] = execution_metadata
 
     return Message(msg_type=MessageType.ASSIGN_TASK, data=data, job_id=job_id)
 
@@ -379,6 +399,7 @@ def create_resume_task_message_with_metadata(
     recovery_status: str = "resumed",
     base_checkpoint_count: int = 0,
     delta_checkpoint_count: int = 0,
+    execution_metadata: Optional[Dict[str, Any]] = None,
 ) -> Message:
     """
     Create an extended task resumption message with full metadata
@@ -403,21 +424,25 @@ def create_resume_task_message_with_metadata(
     Returns:
         Message object for task resumption
     """
+    data = {
+        "task_id": task_id,
+        "func_code": func_code,
+        "checkpoint_state": checkpoint_state,
+        "task_args": task_args or [],
+        "task_kwargs": task_kwargs or {},
+        "task_metadata": task_metadata or {},
+        "progress_percent": progress_percent,
+        "checkpoint_count": checkpoint_count,
+        "recovery_status": recovery_status,
+        "base_checkpoint_count": base_checkpoint_count,
+        "delta_checkpoint_count": delta_checkpoint_count,
+    }
+    if execution_metadata:
+        data["execution_metadata"] = execution_metadata
+
     return Message(
         msg_type=MessageType.RESUME_TASK,
-        data={
-            "task_id": task_id,
-            "func_code": func_code,
-            "checkpoint_state": checkpoint_state,
-            "task_args": task_args or [],
-            "task_kwargs": task_kwargs or {},
-            "task_metadata": task_metadata or {},
-            "progress_percent": progress_percent,
-            "checkpoint_count": checkpoint_count,
-            "recovery_status": recovery_status,
-            "base_checkpoint_count": base_checkpoint_count,
-            "delta_checkpoint_count": delta_checkpoint_count,
-        },
+        data=data,
         job_id=job_id,
     )
 
@@ -545,16 +570,44 @@ def create_load_model_message(
     model_partition_id: str,
     model_uri: str,
     checksum: Optional[str] = None,
+    from_cache: bool = False,
 ) -> Message:
     """Create a model loading message for worker-side model/runtime preparation."""
+    data: Dict[str, Any] = {
+        "model_version_id": model_version_id,
+        "model_partition_id": model_partition_id,
+        "model_uri": model_uri,
+        "checksum": checksum,
+    }
+    if from_cache:
+        data["from_cache"] = True
     return Message(
         msg_type=MessageType.LOAD_MODEL,
-        data={
-            "model_version_id": model_version_id,
-            "model_partition_id": model_partition_id,
-            "model_uri": model_uri,
-            "checksum": checksum,
-        },
+        data=data,
+        job_id=job_id,
+    )
+
+
+def create_model_loaded_message(
+    job_id: Optional[str],
+    model_version_id: str,
+    model_partition_id: str,
+    local_path: Optional[str] = None,
+    checksum: Optional[str] = None,
+) -> Message:
+    """Create a worker acknowledgment that a model partition is ready."""
+    data: Dict[str, Any] = {
+        "model_version_id": model_version_id,
+        "model_partition_id": model_partition_id,
+    }
+    if local_path is not None:
+        data["local_path"] = local_path
+    if checksum is not None:
+        data["checksum"] = checksum
+
+    return Message(
+        msg_type=MessageType.MODEL_LOADED,
+        data=data,
         job_id=job_id,
     )
 
@@ -650,6 +703,26 @@ def create_fallback_decision_message(
             "task_id": task_id,
             "fallback_mode": fallback_mode,
             "reason": reason,
+        },
+        job_id=job_id,
+    )
+
+
+def create_unload_model_message(
+    job_id: str,
+    model_version_id: str,
+    model_partition_id: str,
+) -> Message:
+    """Create a model unload message instructing a worker to release a partition.
+
+    Workers should release the ONNX runtime session (or equivalent) for the
+    specified partition to free device memory before the next partition is loaded.
+    """
+    return Message(
+        msg_type=MessageType.UNLOAD_MODEL,
+        data={
+            "model_version_id": model_version_id,
+            "model_partition_id": model_partition_id,
         },
         job_id=job_id,
     )
