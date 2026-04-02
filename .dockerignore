@@ -1,0 +1,44 @@
+# Python cache artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyz
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv lock / pip internals
+uv.lock
+*.egg-info/
+dist/
+build/
+
+# IDE / editor configs
+.vscode/
+.idea/
+*.code-workspace
+
+# Runtime data (mounted as a volume in Docker)
+crowdio.db
+.checkpoints/
+.model_store/
+.payload_store/
+tensor_store/
+logs/
+
+# Test artefacts and temporary files
+tests/
+*.json
+*.csv
+*.log
+
+# Git history
+.git/
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db

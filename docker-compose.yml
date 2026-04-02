@@ -1,0 +1,61 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # Foreman: orchestrator + REST API + WebSocket
+  # ─────────────────────────────────────────────
+  foreman:
+    build:
+      context: .
+      dockerfile: Dockerfile.foreman
+    container_name: crowdio-foreman
+    ports:
+      - "8000:8000"   # REST API
+      - "9000:9000"   # WebSocket (workers & SDK clients)
+    volumes:
+      # Persist SQLite DB and checkpoints across container restarts
+      - crowdio_data:/data
+    restart: unless-stopped
+    networks:
+      - crowdio-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ─────────────────────────────────────────────
+  # Worker: task executor (scale as needed)
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: crowdio-worker
+    depends_on:
+      foreman:
+        condition: service_healthy
+    environment:
+      FOREMAN_URL: ws://foreman:9000
+      API_HOST: 0.0.0.0
+      API_PORT: "8001"
+      MAX_CONCURRENT_TASKS: "2"
+      HEARTBEAT_INTERVAL: "30"
+    ports:
+      - "8001:8001"   # Worker REST API (adjust per replica if scaling)
+    restart: unless-stopped
+    networks:
+      - crowdio-net
+
+  # ─────────────────────────────────────────────
+  # (Optional) Additional worker replicas
+  # Run: docker compose up --scale worker=4 -d
+  # ─────────────────────────────────────────────
+
+volumes:
+  crowdio_data:
+    driver: local
+
+networks:
+  crowdio-net:
+    driver: bridge
