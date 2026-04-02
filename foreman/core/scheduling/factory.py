@@ -84,34 +84,149 @@ def _get_default_mcdm_config(algorithm_name: str) -> dict:
             ],
         },
         # You can update other algorithms similarly if needed
+        # "edas": {
+        #     "criteria_weights": [0.34, 0.29, 0.24, 0.13],
+        #     "criteria_names": [
+        #         "cpu_cores",
+        #         "ram_available_mb",
+        #         "success_rate",
+        #         "avg_task_duration_sec",
+        #     ],
+        #     "criteria_types": [1, 1, 1, -1],
+        # },
+        # "mabac": {
+        #     "criteria_weights": [0.35, 0.30, 0.20, 0.15],
+        #     "criteria_names": [
+        #         "cpu_cores",
+        #         "cpu_frequency_mhz",
+        #         "ram_available_mb",
+        #         "success_rate",
+        #     ],
+        #     "criteria_types": [1, 1, 1, 1],
+        # },
+        # "wrr": {
+        #     "criteria_weights": [ 0, 0.8, 0.2],
+        #     "criteria_names": [ 
+        #         "ram_total_mb",
+        #         "cpu_frequency_mhz",
+        #         "success_rate",
+        #     ],
+        #     "criteria_types": [1, 1, 1],
+        # },
+
         "edas": {
-            "criteria_weights": [0.34, 0.29, 0.24, 0.13],
+            "criteria_weights": [
+                0.10,  # cpu_cores
+                0.10,  # ram_available_mb
+                0.10,  # battery_level
+                0.10,  # success_rate
+                0.10,  # avg_task_duration_sec
+                0.10,  # availability_score
+                0.10,  # recency_score
+                0.10,  # compute_power_score
+                0.10,  # task_efficiency
+                0.10   # load_score
+            ],
             "criteria_names": [
                 "cpu_cores",
                 "ram_available_mb",
+                "battery_level",
                 "success_rate",
                 "avg_task_duration_sec",
+                "availability_score",
+                "recency_score",
+                "compute_power_score",
+                "task_efficiency",
+                "load_score"
             ],
-            "criteria_types": [1, 1, 1, -1],
+            "criteria_types": [
+                1,  # cpu_cores (BENEFIT)
+                1,  # ram_available_mb (BENEFIT)
+                1,  # battery_level (BENEFIT)
+                1,  # success_rate (BENEFIT)
+               -1,  # avg_task_duration_sec (COST)
+                1,  # availability_score (BENEFIT)
+                1,  # recency_score (BENEFIT)
+                1,  # compute_power_score (BENEFIT)
+                1,  # task_efficiency (BENEFIT)
+               -1   # load_score (COST)
+            ],
         },
         "mabac": {
-            "criteria_weights": [0.35, 0.30, 0.20, 0.15],
+           "criteria_weights": [
+                0.10,  # cpu_cores
+                0.10,  # ram_available_mb
+                0.10,  # battery_level
+                0.10,  # success_rate
+                0.10,  # avg_task_duration_sec
+                0.10,  # availability_score
+                0.10,  # recency_score
+                0.10,  # compute_power_score
+                0.10,  # task_efficiency
+                0.10   # load_score
+            ],
             "criteria_names": [
                 "cpu_cores",
-                "cpu_frequency_mhz",
                 "ram_available_mb",
+                "battery_level",
                 "success_rate",
+                "avg_task_duration_sec",
+                "availability_score",
+                "recency_score",
+                "compute_power_score",
+                "task_efficiency",
+                "load_score"
             ],
-            "criteria_types": [1, 1, 1, 1],
+            "criteria_types": [
+                1,  # cpu_cores (BENEFIT)
+                1,  # ram_available_mb (BENEFIT)
+                1,  # battery_level (BENEFIT)
+                1,  # success_rate (BENEFIT)
+               -1,  # avg_task_duration_sec (COST)
+                1,  # availability_score (BENEFIT)
+                1,  # recency_score (BENEFIT)
+                1,  # compute_power_score (BENEFIT)
+                1,  # task_efficiency (BENEFIT)
+               -1   # load_score (COST)
+            ],
         },
         "wrr": {
-            "criteria_weights": [ 0, 0.8, 0.2],
-            "criteria_names": [ 
-                "ram_total_mb",
-                "cpu_frequency_mhz",
-                "success_rate",
+            "criteria_weights": [
+                0.10,  # cpu_cores
+                0.10,  # ram_available_mb
+                0.10,  # battery_level
+                0.10,  # success_rate
+                0.10,  # avg_task_duration_sec
+                0.10,  # availability_score
+                0.10,  # recency_score
+                0.10,  # compute_power_score
+                0.10,  # task_efficiency
+                0.10   # load_score
             ],
-            "criteria_types": [1, 1, 1],
+            "criteria_names": [
+                "cpu_cores",
+                "ram_available_mb",
+                "battery_level",
+                "success_rate",
+                "avg_task_duration_sec",
+                "availability_score",
+                "recency_score",
+                "compute_power_score",
+                "task_efficiency",
+                "load_score"
+            ],
+            "criteria_types": [
+                1,  # cpu_cores (BENEFIT)
+                1,  # ram_available_mb (BENEFIT)
+                1,  # battery_level (BENEFIT)
+                1,  # success_rate (BENEFIT)
+               -1,  # avg_task_duration_sec (COST)
+                1,  # availability_score (BENEFIT)
+                1,  # recency_score (BENEFIT)
+                1,  # compute_power_score (BENEFIT)
+                1,  # task_efficiency (BENEFIT)
+               -1   # load_score (COST)
+            ],
         },
     }
     return defaults.get(algorithm_name, defaults["aras"])
