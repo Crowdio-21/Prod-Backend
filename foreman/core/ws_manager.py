@@ -147,7 +147,11 @@ class WebSocketManager:
 
     def _determine_client_type(self, message: Message) -> str:
         """Determine if connection is from client or worker based on first message"""
-        if message.type in (MessageType.SUBMIT_JOB, MessageType.SUBMIT_PIPELINE_JOB):
+        if message.type in (
+            MessageType.SUBMIT_JOB,
+            MessageType.SUBMIT_BROADCAST_JOB,
+            MessageType.SUBMIT_PIPELINE_JOB,
+        ):
             return "client"
         elif message.type == MessageType.WORKER_READY:
             return "worker"

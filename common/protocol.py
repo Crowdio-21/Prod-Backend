@@ -16,6 +16,7 @@ class MessageType(Enum):
     """Message types for WebSocket communication"""
     # Client -> Foreman
     SUBMIT_JOB = "submit_job"
+    SUBMIT_BROADCAST_JOB = "submit_broadcast_job"
     SUBMIT_PIPELINE_JOB = "submit_pipeline_job"
     GET_RESULTS = "get_results"
     DISCONNECT = "disconnect"
@@ -100,6 +101,39 @@ def create_submit_job_message(func_code: str, args_list: List[Any], job_id: str)
             "total_tasks": len(args_list)
         },
         job_id=job_id
+    )
+
+
+def create_submit_broadcast_job_message(
+    func_code: str,
+    base_args: Any,
+    job_id: str,
+    target_workers: int,
+    task_metadata: Optional[Dict[str, Any]] = None,
+) -> Message:
+    """
+    Create a broadcast job submission message.
+
+    Broadcast semantics: run the same task payload once per target worker.
+    """
+    count = max(int(target_workers), 1)
+    args_list = [base_args for _ in range(count)]
+
+    data = {
+        "func_code": func_code,
+        "args_list": args_list,
+        "total_tasks": len(args_list),
+        "broadcast": True,
+        "target_workers": count,
+    }
+
+    if task_metadata:
+        data["task_metadata"] = task_metadata
+
+    return Message(
+        msg_type=MessageType.SUBMIT_BROADCAST_JOB,
+        data=data,
+        job_id=job_id,
     )
 
 

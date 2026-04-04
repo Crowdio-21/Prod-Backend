@@ -51,7 +51,7 @@ class ClientMessageHandler:
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        if message.type == MessageType.SUBMIT_JOB:
+        if message.type in (MessageType.SUBMIT_JOB, MessageType.SUBMIT_BROADCAST_JOB):
             await self._handle_job_submission(message, websocket)
         elif message.type == MessageType.SUBMIT_PIPELINE_JOB:
             await self._handle_pipeline_submission(message, websocket)
