@@ -244,6 +244,8 @@ pipeline_output/
 #tensor store
 tensor_store/
 
+tests/image_processing/child/
+
 # dnn test generated artifacts
 tests/dnn_crowdnet/models/
 tests/dnn_crowdnet/partitions/
