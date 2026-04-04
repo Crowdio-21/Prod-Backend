@@ -266,3 +266,6 @@ tests/dnn_crowdnet/partitions/
 
 #tensor store
 tensor_store/
+
+#image store
+tests/image_processing/child/
