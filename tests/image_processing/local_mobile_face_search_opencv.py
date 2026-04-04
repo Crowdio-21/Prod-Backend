@@ -5,6 +5,8 @@ import os
 import sys
 import time
 
+import requests
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from crowdio import (
@@ -14,6 +16,7 @@ from crowdio import (
     CROWDio_map,
     CROWDioConstant,
 )
+from common.protocol import create_submit_broadcast_job_message
 
 
 # =============================================================
@@ -46,6 +49,48 @@ SIGNATURE_GRID = 16
 CLIENT_OUTPUT_JSON = os.path.join(
     os.path.dirname(__file__), "pipeline_output", "face_search_result.json"
 )
+
+
+def get_connected_worker_count(host, port):
+    """Return number of online workers from foreman dashboard API."""
+    url = f"http://localhost:8000/api/workers"
+    try:
+        resp = requests.get(url, timeout=3)
+        resp.raise_for_status()
+        workers = resp.json()
+    except Exception as exc:
+        print(f"Warning: failed to fetch workers from {url} ({exc}); fallback to 1 task")
+        return 1
+
+    if not isinstance(workers, list):
+        return 1
+
+    online = 0
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        status = str(worker.get("status", "")).lower()
+        # Count only workers that can accept assignments.
+        if status in {"online", "idle", "available"}:
+            online += 1
+
+    return max(online, 1)
+
+
+async def CROWDio_broadcast(task_func, base_config, host, port):
+    """Best-effort broadcast to all connected workers using one task per worker."""
+    worker_count = get_connected_worker_count(host, port)
+    # Build protocol payload to lock test behavior to SUBMIT_BROADCAST_JOB contract.
+    _ = create_submit_broadcast_job_message(
+        func_code="<resolved-by-sdk>",
+        base_args=dict(base_config),
+        job_id="client-broadcast-preview",
+        target_workers=worker_count,
+    )
+    task_args = [dict(base_config) for _ in range(worker_count)]
+    print(f"broadcast_mode : one task per worker ({worker_count} task(s))")
+    results = await CROWDio_map(task_func, task_args)
+    return results, worker_count
 
 
 @CROWDio.task(
@@ -418,39 +463,76 @@ async def main():
     await crowdio_connect(HOST, PORT)
     try:
         started = time.time()
-        results = await CROWDio_map(face_search_on_device, [task_config])
+        results, broadcast_target_workers = await CROWDio_broadcast(
+            face_search_on_device, task_config, HOST, PORT
+        )
         wall = time.time() - started
 
-        result = results[0] if results else {}
-        print("\nResult")
+        normalized_results = [r for r in results if isinstance(r, dict)] if results else []
+
+        print("\nBroadcast Results")
         print("-" * 64)
-        print(f"device_id      : {result.get('device_id')}")
-        print(f"scanned_images : {result.get('scanned_images')}")
-        print(f"matches        : {len(result.get('matches', []))}")
-        print(f"errors         : {len(result.get('errors', []))}")
-        print(f"elapsed(worker): {result.get('elapsed')}s")
+        print(f"broadcast_target_devices : {broadcast_target_workers}")
+        print(f"worker_results : {len(normalized_results)}")
         print(f"wall_time      : {wall:.2f}s")
+
+        combined_matches = []
+        total_errors = 0
+        total_scanned = 0
+
+        for idx, result in enumerate(normalized_results, start=1):
+            worker_id = result.get("worker_id")
+            device_id = result.get("device_id") or f"unknown-device-{idx}"
+            source_id = worker_id or device_id
+            scanned = int(result.get("scanned_images") or 0)
+            matches = result.get("matches", [])
+            errors = result.get("errors", [])
+            elapsed = result.get("elapsed")
+
+            total_scanned += scanned
+            total_errors += len(errors)
+
+            print(
+                f"[{idx}] worker={worker_id} device={device_id} scanned={scanned} "
+                f"matches={len(matches)} errors={len(errors)} elapsed={elapsed}s"
+            )
+
+            for m in matches:
+                if not isinstance(m, dict):
+                    continue
+                enriched = dict(m)
+                enriched["source_device_id"] = source_id
+                enriched["source_worker_id"] = worker_id
+                combined_matches.append(enriched)
+
+        combined_matches.sort(key=lambda m: float(m.get("similarity", 0.0)), reverse=True)
+
+        payload = {
+            "wall_time": round(wall, 3),
+            "broadcast_target_devices": broadcast_target_workers,
+            "worker_results": len(normalized_results),
+            "total_scanned_images": total_scanned,
+            "total_errors": total_errors,
+            "results_by_device": normalized_results,
+            "combined_matches": combined_matches[:MAX_RESULTS],
+        }
 
         os.makedirs(os.path.dirname(CLIENT_OUTPUT_JSON), exist_ok=True)
         with open(CLIENT_OUTPUT_JSON, "w", encoding="utf-8") as fh:
-            json.dump(result, fh, indent=2)
+            json.dump(payload, fh, indent=2)
         print("-" * 64)
         print(f"Saved JSON -> {CLIENT_OUTPUT_JSON}")
 
-        # Print top matches
-        matches = result.get("matches", [])
-        if matches:
-            print("\nTop matches")
+        if combined_matches:
+            print("\nTop matches (with device)")
             print("-" * 64)
-            for m in matches[: min(10, len(matches))]:
-                print(f"{m.get('similarity'):>6}  {m.get('image')}")
+            for m in combined_matches[: min(10, len(combined_matches))]:
+                print(
+                    f"{m.get('similarity'):>6}  "
+                    f"[{m.get('source_device_id')}]  {m.get('image')}"
+                )
         else:
-            errs = result.get("errors", [])
-            if errs:
-                print("\nWorker errors")
-                print("-" * 64)
-                for e in errs[:10]:
-                    print(e)
+            print("\nNo matches returned by any worker.")
     finally:
         await crowdio_disconnect()
 
