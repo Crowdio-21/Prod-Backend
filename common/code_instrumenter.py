@@ -590,8 +590,9 @@ def generate_task_control_wrapper() -> str:
     Generate the task control wrapper code that must be prepended to instrumented functions
     
     This provides:
-    - _TaskControl (thread-local paused/killed flags)
+    - _TaskControl (cross-thread paused/killed flags via threading.Event)
     - pause(), resume(), kill() control functions
+    - Registers _TaskControl into builtins._crowdio_task_control for Kotlin access
     
     These flags are checked by the control checks injected by TaskControlInstrumenter.
     
@@ -605,35 +606,31 @@ import time
 import threading
 
 class _TaskControl:
-    """Thread-local task control flags for pause/kill."""
-    _local = threading.local()
-
-    @classmethod
-    def _ensure_state(cls):
-        if not hasattr(cls._local, 'paused'):
-            cls._local.paused = False
-        if not hasattr(cls._local, 'killed'):
-            cls._local.killed = False
-
-    @classmethod
-    def is_paused(cls):
-        cls._ensure_state()
-        return cls._local.paused
+    """Cross-thread task control flags for pause/kill using threading.Event."""
+    _killed_event = threading.Event()
+    _paused_event = threading.Event()
 
     @classmethod
     def is_killed(cls):
-        cls._ensure_state()
-        return cls._local.killed
+        return cls._killed_event.is_set()
 
     @classmethod
-    def set_paused(cls, value):
-        cls._ensure_state()
-        cls._local.paused = bool(value)
+    def is_paused(cls):
+        return cls._paused_event.is_set()
 
     @classmethod
     def set_killed(cls, value):
-        cls._ensure_state()
-        cls._local.killed = bool(value)
+        if value:
+            cls._killed_event.set()
+        else:
+            cls._killed_event.clear()
+
+    @classmethod
+    def set_paused(cls, value):
+        if value:
+            cls._paused_event.set()
+        else:
+            cls._paused_event.clear()
 
 
 def pause():
@@ -646,6 +643,11 @@ def resume():
 
 def kill():
     _TaskControl.set_killed(True)
+
+
+# Register in builtins so Kotlin can reach _TaskControl across exec() namespace boundaries
+import builtins as _builtins
+_builtins._crowdio_task_control = _TaskControl
 '''
 
 
