@@ -36,6 +36,7 @@ class MessageType(Enum):
     PONG = "pong"
     TASK_CHECKPOINT = "task_checkpoint"
     TASK_PROGRESS = "task_progress"
+    KILL_ACK = "kill_ack"
 
     # Foreman -> Client
     JOB_RESULTS = "job_results"
@@ -194,6 +195,13 @@ def create_kill_task_message(task_id: str, job_id: str) -> Message:
     """Create a kill task message (Foreman -> Worker)"""
     return Message(
         msg_type=MessageType.KILL_TASK, data={"task_id": task_id}, job_id=job_id
+    )
+
+
+def create_kill_ack_message(task_id: str, job_id: str) -> Message:
+    """Create a kill acknowledgement message (Worker -> Foreman)"""
+    return Message(
+        msg_type=MessageType.KILL_ACK, data={"task_id": task_id}, job_id=job_id
     )
 
 
