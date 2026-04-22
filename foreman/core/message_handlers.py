@@ -25,8 +25,11 @@ from .utils import (
     _create_worker_in_database,
     _get_assigned_tasks,
     _record_worker_failure,
+    _update_task_status,
     _update_worker_status,
     _update_worker_task_stats,
+    _update_assignment_status,
+    _get_active_assignments_for_task,
 )
 from common.protocol import Message, MessageType, create_job_accepted_message
 from common.serializer import get_runtime_info, bytes_to_hex, hex_to_bytes
@@ -88,20 +91,32 @@ class ClientMessageHandler:
             assigned = await self.task_dispatcher.assign_tasks_for_job(
                 job_id, func_code, args_list
             )
-            print(f"ClientMessageHandler: Assigned {assigned} tasks immediately for job {job_id}")
+            print(
+                f"ClientMessageHandler: Assigned {assigned} tasks immediately for job {job_id}"
+            )
 
             response = create_job_accepted_message(job_id)
             await websocket.send(response.to_json())
             print(f"ClientMessageHandler: Job {job_id} accepted and acknowledged")
 
         except KeyError as e:
-            print(f"ClientMessageHandler: Missing required field in job submission: {e}")
-            error_msg = Message(MessageType.JOB_ERROR, {"error": f"Missing required field: {e}"}, message.job_id)
+            print(
+                f"ClientMessageHandler: Missing required field in job submission: {e}"
+            )
+            error_msg = Message(
+                MessageType.JOB_ERROR,
+                {"error": f"Missing required field: {e}"},
+                message.job_id,
+            )
             await websocket.send(error_msg.to_json())
         except Exception as e:
             print(f"ClientMessageHandler: Error handling job submission: {e}")
-            import traceback; traceback.print_exc()
-            error_msg = Message(MessageType.JOB_ERROR, {"error": str(e)}, message.job_id)
+            import traceback
+
+            traceback.print_exc()
+            error_msg = Message(
+                MessageType.JOB_ERROR, {"error": str(e)}, message.job_id
+            )
             await websocket.send(error_msg.to_json())
 
     async def _handle_pipeline_submission(
@@ -131,26 +146,42 @@ class ClientMessageHandler:
                 )
 
             self.connection_manager.add_client(job_id, websocket)
-            await self.job_manager.create_pipeline_job(job_id, stages, dependency_map, task_metadata)
+            await self.job_manager.create_pipeline_job(
+                job_id, stages, dependency_map, task_metadata
+            )
 
             stage_0_func_code = stages[0]["func_code"]
             assigned = await self.task_dispatcher.assign_tasks_for_job(
                 job_id, stage_0_func_code, stages[0]["args_list"]
             )
-            print(f"ClientMessageHandler: Pipeline job {job_id} — Assigned {assigned} stage-0 tasks immediately")
+            print(
+                f"ClientMessageHandler: Pipeline job {job_id} — Assigned {assigned} stage-0 tasks immediately"
+            )
 
             response = create_job_accepted_message(job_id)
             await websocket.send(response.to_json())
-            print(f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged")
+            print(
+                f"ClientMessageHandler: Pipeline job {job_id} accepted and acknowledged"
+            )
 
         except KeyError as e:
-            print(f"ClientMessageHandler: Missing required field in pipeline submission: {e}")
-            error_msg = Message(MessageType.JOB_ERROR, {"error": f"Missing required field: {e}"}, message.job_id)
+            print(
+                f"ClientMessageHandler: Missing required field in pipeline submission: {e}"
+            )
+            error_msg = Message(
+                MessageType.JOB_ERROR,
+                {"error": f"Missing required field: {e}"},
+                message.job_id,
+            )
             await websocket.send(error_msg.to_json())
         except Exception as e:
             print(f"ClientMessageHandler: Error handling pipeline submission: {e}")
-            import traceback; traceback.print_exc()
-            error_msg = Message(MessageType.JOB_ERROR, {"error": str(e)}, message.job_id)
+            import traceback
+
+            traceback.print_exc()
+            error_msg = Message(
+                MessageType.JOB_ERROR, {"error": str(e)}, message.job_id
+            )
             await websocket.send(error_msg.to_json())
 
 
@@ -171,14 +202,16 @@ class WorkerMessageHandler:
         task_dispatcher,
         completion_handler,
         checkpoint_manager: CheckpointManager = None,
-        reconnection_handler=None,          # WorkerReconnectionHandler | None
+        reconnection_handler=None,  # WorkerReconnectionHandler | None
     ):
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
         self.completion_handler = completion_handler
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
-        self.reconnection_handler = reconnection_handler  # may be None if checkpointing unused
+        self.reconnection_handler = (
+            reconnection_handler  # may be None if checkpointing unused
+        )
 
     # ------------------------------------------------------------------
     # Disconnection entry-point  (NEW – wire this into your WS close path)
@@ -219,7 +252,9 @@ class WorkerMessageHandler:
                 if getattr(task, "worker_id", None) == worker_id:
                     return task.id, task.job_id
         except Exception as e:
-            print(f"WorkerMessageHandler: Error querying assigned task for {worker_id}: {e}")
+            print(
+                f"WorkerMessageHandler: Error querying assigned task for {worker_id}: {e}"
+            )
         return None, None
 
     # ------------------------------------------------------------------
@@ -241,6 +276,8 @@ class WorkerMessageHandler:
             await self._handle_pong(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
+        elif message.type == MessageType.KILL_ACK:
+            await self._handle_kill_ack(message, websocket)
         else:
             print(f"WorkerMessageHandler: Unknown message type: {message.type}")
 
@@ -253,7 +290,9 @@ class WorkerMessageHandler:
         if worker_id:
             await _update_worker_status(worker_id, "online")
             if "performance_metrics" in message.data:
-                await self._update_worker_performance_metrics(worker_id, message.data["performance_metrics"])
+                await self._update_worker_performance_metrics(
+                    worker_id, message.data["performance_metrics"]
+                )
 
     async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
         try:
@@ -279,7 +318,9 @@ class WorkerMessageHandler:
                 await session.execute(stmt)
                 await session.commit()
         except Exception as e:
-            print(f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}")
+            print(
+                f"WorkerMessageHandler: Error updating performance metrics for {worker_id}: {e}"
+            )
 
     async def _handle_worker_ready(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -321,10 +362,13 @@ class WorkerMessageHandler:
                 settrace_support = capabilities.get("supports_settrace", True)
                 frame_support = capabilities.get("supports_frame_introspection", True)
                 if not settrace_support or not frame_support:
-                    print(f"  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
+                    print(
+                        f"  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}"
+                    )
 
             # ---- Register worker in connection manager ----
             from .connection_manager import WorkerInfo
+
             worker_info = WorkerInfo.from_worker_ready_message(
                 worker_id=worker_id,
                 websocket=websocket,
@@ -337,14 +381,20 @@ class WorkerMessageHandler:
             # keep it busy and only update DB state.
             existing_ws = self.connection_manager.get_worker_websocket(worker_id)
             if existing_ws is not None and existing_ws is not websocket:
-                active_task_id, active_job_id = self.connection_manager.get_worker_active_task(worker_id)
+                active_task_id, active_job_id = (
+                    self.connection_manager.get_worker_active_task(worker_id)
+                )
                 print(
                     f"WorkerMessageHandler: Worker {worker_id} reconnected on a new socket "
                     f"\u2013 handing over connection without reassignment."
                 )
-                self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
+                self.connection_manager.add_worker(
+                    worker_id, websocket, worker_info=worker_info
+                )
                 if active_task_id and active_job_id:
-                    self.connection_manager.set_worker_active_task(worker_id, active_task_id, active_job_id)
+                    self.connection_manager.set_worker_active_task(
+                        worker_id, active_task_id, active_job_id
+                    )
                     self.connection_manager.mark_worker_busy(worker_id)
                 await _create_worker_in_database(worker_id, device_specs)
                 await _update_worker_status(
@@ -363,25 +413,39 @@ class WorkerMessageHandler:
                 print(
                     f"WorkerMessageHandler: Worker {worker_id} reconnected idle \u2013 proceeding with normal assignment."
                 )
-                assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id
+                )
                 if assigned:
-                    print(f"WorkerMessageHandler: Assigned task to reconnected worker {worker_id}")
+                    print(
+                        f"WorkerMessageHandler: Assigned task to reconnected worker {worker_id}"
+                    )
                 else:
-                    print(f"WorkerMessageHandler: No tasks available for reconnected worker {worker_id}")
+                    print(
+                        f"WorkerMessageHandler: No tasks available for reconnected worker {worker_id}"
+                    )
                 return
 
-            self.connection_manager.add_worker(worker_id, websocket, worker_info=worker_info)
+            self.connection_manager.add_worker(
+                worker_id, websocket, worker_info=worker_info
+            )
             await _create_worker_in_database(worker_id, device_specs)
             await _update_worker_status(worker_id, "online")
 
             # DB fallback for reconnect-after-cleanup cases:
             # if this worker already owns an assigned task in DB, keep it busy
             # and avoid assigning any new task.
-            db_task_id, db_job_id = await self._get_db_assigned_task_for_worker(worker_id)
+            db_task_id, db_job_id = await self._get_db_assigned_task_for_worker(
+                worker_id
+            )
             if db_task_id and db_job_id:
-                self.connection_manager.set_worker_active_task(worker_id, db_task_id, db_job_id)
+                self.connection_manager.set_worker_active_task(
+                    worker_id, db_task_id, db_job_id
+                )
                 self.connection_manager.mark_worker_busy(worker_id)
-                await _update_worker_status(worker_id, "busy", current_task_id=db_task_id)
+                await _update_worker_status(
+                    worker_id, "busy", current_task_id=db_task_id
+                )
                 print(
                     f"WorkerMessageHandler: Worker {worker_id} reconnected with DB-assigned task "
                     f"{db_task_id} (job {db_job_id}) \u2013 no new task assigned."
@@ -392,17 +456,25 @@ class WorkerMessageHandler:
             # on its own after reconnect and keeps sending checkpoints/results.
 
             # ---- Normal path: assign a pending task ----
-            assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+            assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                worker_id
+            )
             if assigned:
-                print(f"WorkerMessageHandler: Assigned task to newly connected worker {worker_id}")
+                print(
+                    f"WorkerMessageHandler: Assigned task to newly connected worker {worker_id}"
+                )
             else:
-                print(f"WorkerMessageHandler: No tasks available for worker {worker_id}")
+                print(
+                    f"WorkerMessageHandler: No tasks available for worker {worker_id}"
+                )
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in worker ready: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling worker ready: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
 
     async def _handle_task_result(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -414,10 +486,14 @@ class WorkerMessageHandler:
 
             worker_id = self.connection_manager.find_worker_by_websocket(websocket)
             if not worker_id:
-                print(f"[RESULT DEBUG] Could not find worker for task result – task_id={task_id}, job_id={job_id}")
+                print(
+                    f"[RESULT DEBUG] Could not find worker for task result – task_id={task_id}, job_id={job_id}"
+                )
                 return
 
-            print(f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}")
+            print(
+                f"[Task Result] Received from worker {worker_id} | Task: {task_id} | Job: {job_id}"
+            )
 
             # Normalise result payload
             normalized_result = result
@@ -427,6 +503,7 @@ class WorkerMessageHandler:
                 except Exception:
                     try:
                         import ast as _ast
+
                         normalized_result = _ast.literal_eval(normalized_result)
                     except Exception:
                         normalized_result = result
@@ -449,7 +526,9 @@ class WorkerMessageHandler:
             )
 
             if not accepted:
-                print(f"[RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}")
+                print(
+                    f"[RESULT DEBUG] Ignoring duplicate/stale completion for task {task_id} on worker {worker_id}"
+                )
                 self.connection_manager.clear_worker_active_task(worker_id)
                 self.connection_manager.mark_worker_available(worker_id)
                 await _update_worker_status(worker_id, "online", current_task_id=None)
@@ -460,33 +539,106 @@ class WorkerMessageHandler:
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
+            # Kill any remaining replicas that are still running this task
+            remaining_assignments = await _get_active_assignments_for_task(task_id)
+            for assignment in remaining_assignments:
+                if assignment.worker_id != worker_id:
+                    print(
+                        f"[Replicate] Task {task_id} won by {worker_id}, "
+                        f"killing replica on {assignment.worker_id}"
+                    )
+                    await self.task_dispatcher.send_kill_to_worker_by_assignment(
+                        task_id, assignment.worker_id
+                    )
+
             # Pipeline dependency resolution
             pipeline_batch_dispatched = False
             if self.job_manager.is_pipeline_job(job_id):
                 dep_mgr = self.job_manager.dependency_manager
-                newly_unblocked = await dep_mgr.on_task_completed(task_id, job_id, normalized_result)
+                newly_unblocked = await dep_mgr.on_task_completed(
+                    task_id, job_id, normalized_result
+                )
                 if newly_unblocked:
-                    print(f"[PIPELINE] Stage barrier lifted! {len(newly_unblocked)} downstream tasks unblocked for job {job_id}")
+                    print(
+                        f"[PIPELINE] Stage barrier lifted! {len(newly_unblocked)} downstream tasks unblocked for job {job_id}"
+                    )
                     func_code = self.job_manager.get_func_code(job_id)
-                    batch_assigned = await self.task_dispatcher.assign_tasks_for_job(job_id, func_code or "", [])
-                    print(f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage tasks across available workers")
+                    batch_assigned = await self.task_dispatcher.assign_tasks_for_job(
+                        job_id, func_code or "", []
+                    )
+                    print(
+                        f"[PIPELINE] Batch-dispatched {batch_assigned} next-stage tasks across available workers"
+                    )
                     pipeline_batch_dispatched = True
 
             if job_complete:
-                print(f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler")
+                print(
+                    f"[RESULT DEBUG] Job {job_id} completed, triggering completion handler"
+                )
                 await self.completion_handler.handle_job_completion(job_id)
 
             if not pipeline_batch_dispatched:
-                assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+                assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                    worker_id
+                )
                 if assigned:
                     print(f"[RESULT DEBUG] Assigned next task to worker {worker_id}")
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task result: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
         except Exception as e:
             print(f"[RESULT DEBUG] Error handling task result: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
+
+    async def _handle_kill_ack(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
+        try:
+            task_id = message.data["task_id"]
+            worker_id = self.connection_manager.find_worker_by_websocket(websocket)
+            if not worker_id:
+                print(
+                    f"[Kill] KILL_ACK for task {task_id} from unknown worker, ignoring"
+                )
+                return
+
+            print(f"[Kill] KILL_ACK from worker {worker_id} for task {task_id}")
+
+            # Mark this worker's assignment as killed
+            await _update_assignment_status(task_id, worker_id, "killed")
+
+            # Free the worker
+            self.connection_manager.clear_worker_active_task(worker_id)
+            self.connection_manager.mark_worker_available(worker_id)
+            await _update_worker_status(worker_id, "online", current_task_id=None)
+
+            # Check if any other workers are still running this task
+            remaining = await _get_active_assignments_for_task(task_id)
+            if not remaining:
+                # No one is running the task any more — reset to pending
+                print(
+                    f"[Kill] No remaining runners for task {task_id}, resetting to pending"
+                )
+                await _update_task_status(task_id, "pending")
+            else:
+                print(
+                    f"[Kill] Task {task_id} still has {len(remaining)} active replica(s), leaving as assigned"
+                )
+
+            await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+
+        except KeyError as e:
+            print(f"WorkerMessageHandler: Missing required field in kill ack: {e}")
+        except Exception as e:
+            print(f"WorkerMessageHandler: Error handling kill ack: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     async def _handle_task_error(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -501,7 +653,9 @@ class WorkerMessageHandler:
                 print("WorkerMessageHandler: Could not find worker for task error")
                 return
 
-            print(f"WorkerMessageHandler: Task {task_id} failed on worker {worker_id} for job {job_id}: {error}")
+            print(
+                f"WorkerMessageHandler: Task {task_id} failed on worker {worker_id} for job {job_id}: {error}"
+            )
 
             await self.job_manager.mark_task_failed(task_id, job_id, worker_id, error)
             await _update_worker_task_stats(worker_id, task_completed=False)
@@ -509,21 +663,29 @@ class WorkerMessageHandler:
             try:
                 await _record_worker_failure(worker_id, task_id, error, job_id)
             except Exception as ex:
-                print(f"WorkerMessageHandler: Error recording worker failure for {worker_id}/{task_id}: {ex}")
+                print(
+                    f"WorkerMessageHandler: Error recording worker failure for {worker_id}/{task_id}: {ex}"
+                )
 
             self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
-            assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
+            assigned = await self.task_dispatcher.assign_task_to_available_worker(
+                worker_id
+            )
             if assigned:
-                print(f"WorkerMessageHandler: Assigned next task to worker {worker_id} after failure")
+                print(
+                    f"WorkerMessageHandler: Assigned next task to worker {worker_id} after failure"
+                )
 
         except KeyError as e:
             print(f"WorkerMessageHandler: Missing required field in task error: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling task error: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
 
     async def _handle_task_checkpoint(
         self, message: Message, websocket: WebSocketServerProtocol
@@ -546,7 +708,11 @@ class WorkerMessageHandler:
                 return
 
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
-            state_vars_info = f", state_vars: {checkpoint_state_vars}" if checkpoint_state_vars else ""
+            state_vars_info = (
+                f", state_vars: {checkpoint_state_vars}"
+                if checkpoint_state_vars
+                else ""
+            )
 
             print(
                 f"WorkerMessageHandler: Received checkpoint {checkpoint_id} from worker {worker_id} "
@@ -555,6 +721,7 @@ class WorkerMessageHandler:
             )
 
             from foreman.db.base import get_db_session
+
             async with get_db_session() as session:
                 success = await self.checkpoint_manager.store_checkpoint(
                     session=session,
@@ -571,15 +738,24 @@ class WorkerMessageHandler:
                 )
 
             if success:
-                print(f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}")
+                print(
+                    f"WorkerMessageHandler: Checkpoint {checkpoint_id} stored for task {task_id}"
+                )
                 from common.protocol import create_checkpoint_ack_message
+
                 ack_msg = create_checkpoint_ack_message(task_id, job_id, checkpoint_id)
                 await websocket.send(ack_msg.to_json())
             else:
-                print(f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}")
+                print(
+                    f"WorkerMessageHandler: Failed to store checkpoint {checkpoint_id} for task {task_id}"
+                )
 
         except KeyError as e:
-            print(f"WorkerMessageHandler: Missing required field in checkpoint message: {e}")
+            print(
+                f"WorkerMessageHandler: Missing required field in checkpoint message: {e}"
+            )
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
