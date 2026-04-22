@@ -192,8 +192,14 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
         if task.status == "failed":
             failed_count += 1
 
-        # Get worker info
-        worker = workers.get(task.worker_id) if task.worker_id else None
+        # Get worker info (winner from task_assignments, or first still-running runner)
+        task_winner_id = next(
+            (a.worker_id for a in task.assignments if a.status == "completed"),
+            next(
+                (a.worker_id for a in task.assignments if a.status == "running"), None
+            ),
+        )
+        worker = workers.get(task_winner_id) if task_winner_id else None
         worker_status = worker.status if worker else None
 
         # Build timeline events
@@ -269,7 +275,7 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
         tasks_data.append(
             {
                 "task_id": task.id,
-                "worker_id": task.worker_id,
+                "worker_id": task_winner_id,
                 "worker_status": worker_status,
                 "status": task.status,
                 "progress_percent": task.progress_percent or 0,
@@ -461,7 +467,21 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
             task_assignments.append(
                 {
                     "task_id": task.id,
-                    "worker_id": task.worker_id,
+                    "worker_id": next(
+                        (
+                            a.worker_id
+                            for a in task.assignments
+                            if a.status == "completed"
+                        ),
+                        next(
+                            (
+                                a.worker_id
+                                for a in task.assignments
+                                if a.status == "running"
+                            ),
+                            None,
+                        ),
+                    ),
                     "status": task.status,
                     "assigned_at": (
                         task.assigned_at.isoformat() if task.assigned_at else None
@@ -621,7 +641,17 @@ async def get_pipeline_job_detail(job_id: str, db: AsyncSession = Depends(get_db
             {
                 "task_id": task.id,
                 "status": task.status,
-                "worker_id": task.worker_id,
+                "worker_id": next(
+                    (a.worker_id for a in task.assignments if a.status == "completed"),
+                    next(
+                        (
+                            a.worker_id
+                            for a in task.assignments
+                            if a.status == "running"
+                        ),
+                        None,
+                    ),
+                ),
                 "dependency_count": task.dependency_count or 0,
                 "depends_on": depends_on,
                 "dependents": dependents,
