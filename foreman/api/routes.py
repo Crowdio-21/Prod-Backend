@@ -219,6 +219,11 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
         -t['progress_percent']
     ))
     
+    checkpointing_enabled = bool(getattr(job, "supports_checkpointing", False))
+    if not checkpointing_enabled and total_checkpoints > 0:
+        # Legacy jobs may have checkpoint data but missing/incorrect job flag.
+        checkpointing_enabled = True
+
     return {
         'job_id': job_id,
         'job_status': job.status,
@@ -227,7 +232,7 @@ async def get_job_checkpoint_dashboard(job_id: str, db: AsyncSession = Depends(g
         'failed_tasks': failed_count,
         'resumed_tasks': resumed_count,
         'total_checkpoints': total_checkpoints,
-        'checkpointing_enabled': total_checkpoints > 0,
+        'checkpointing_enabled': checkpointing_enabled,
         'tasks': tasks_data
     }
 

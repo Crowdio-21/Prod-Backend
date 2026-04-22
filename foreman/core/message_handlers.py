@@ -18,6 +18,7 @@ All other behaviour is unchanged.
 """
 
 import json
+import gzip
 
 from websockets.server import WebSocketServerProtocol
 
@@ -241,6 +242,10 @@ class WorkerMessageHandler:
             await self._handle_pong(message, websocket)
         elif message.type == MessageType.TASK_CHECKPOINT:
             await self._handle_task_checkpoint(message, websocket)
+        elif message.type == MessageType.KILL_ACK:
+            await self._handle_kill_ack(message, websocket)
+        elif message.type == MessageType.TASK_PROGRESS:
+            await self._handle_task_progress(message, websocket)
         else:
             print(f"WorkerMessageHandler: Unknown message type: {message.type}")
 
@@ -582,4 +587,140 @@ class WorkerMessageHandler:
             print(f"WorkerMessageHandler: Missing required field in checkpoint message: {e}")
         except Exception as e:
             print(f"WorkerMessageHandler: Error handling checkpoint: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
+
+
+    async def _handle_task_progress(
+        self, message: Message, websocket: WebSocketServerProtocol
+    ):
+        """Handle lightweight progress updates and optional mobile checkpoint payloads."""
+        try:
+            task_id = message.data["task_id"]
+            progress_percent = float(message.data.get("progress_percent", 0.0))
+            progress_percent = max(0.0, min(100.0, progress_percent))
+            status = str(message.data.get("status", "running"))
+            job_id = message.job_id
+
+            worker_id = self.connection_manager.find_worker_by_websocket(websocket)
+            if not worker_id:
+                print("WorkerMessageHandler: Could not find worker for task progress")
+                return
+
+            # 1) Persist progress immediately so dashboard and DB stay in sync.
+            from foreman.db.base import get_db_session
+            from foreman.db.models import TaskModel, JobModel
+
+            task_job_id = job_id
+            previous_checkpoint_count = 0
+            checkpointing_enabled = False
+
+            async with get_db_session() as session:
+                task = await session.get(TaskModel, task_id)
+                if not task:
+                    print(f"WorkerMessageHandler: Progress received for unknown task {task_id}")
+                    return
+
+                task.progress_percent = progress_percent
+                task_job_id = task.job_id
+                previous_checkpoint_count = int(task.checkpoint_count or 0)
+
+                job = await session.get(JobModel, task.job_id)
+                checkpointing_enabled = bool(job and job.supports_checkpointing)
+                await session.commit()
+
+            # 2) Accept optional checkpoint payload carried by mobile progress updates.
+            delta_data_hex = message.data.get("delta_data_hex") or message.data.get("checkpoint_data_hex")
+            checkpoint_state = message.data.get("checkpoint_state")
+            checkpoint_state_json = message.data.get("checkpoint_state_json")
+
+            checkpoint_data_bytes = None
+            if isinstance(delta_data_hex, str) and delta_data_hex:
+                try:
+                    checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
+                except Exception as exc:
+                    print(f"WorkerMessageHandler: Invalid checkpoint hex in TASK_PROGRESS for {task_id}: {exc}")
+            elif checkpoint_state is not None or checkpoint_state_json is not None:
+                try:
+                    state_obj = checkpoint_state
+                    if state_obj is None:
+                        state_obj = checkpoint_state_json
+                        if isinstance(state_obj, str):
+                            state_obj = json.loads(state_obj)
+
+                    serialized_state = json.dumps(state_obj).encode("utf-8")
+                    # Match existing decode pipeline (double-gzip after storage).
+                    checkpoint_data_bytes = gzip.compress(serialized_state, compresslevel=6)
+                except Exception as exc:
+                    print(f"WorkerMessageHandler: Invalid checkpoint_state in TASK_PROGRESS for {task_id}: {exc}")
+
+            # 3) Fallback: for checkpoint-enabled jobs, persist coarse progress snapshots
+            #    when explicit checkpoint payload is absent.
+            if checkpoint_data_bytes is None and checkpointing_enabled and progress_percent > 0.0:
+                target_checkpoint_count = int(progress_percent // 5.0) + 1
+                if previous_checkpoint_count < target_checkpoint_count:
+                    fallback_state = {
+                        "progress_percent": progress_percent,
+                        "status": status,
+                        "worker_id": worker_id,
+                        "source": "task_progress_fallback",
+                    }
+                    serialized_state = json.dumps(fallback_state).encode("utf-8")
+                    checkpoint_data_bytes = gzip.compress(serialized_state, compresslevel=6)
+
+            if checkpoint_data_bytes is None:
+                print(
+                    f"WorkerMessageHandler: Progress update for task {task_id} from worker {worker_id} "
+                    f"(progress: {progress_percent:.2f}%, checkpoint payload: no)"
+                )
+                return
+
+            raw_checkpoint_id = message.data.get("checkpoint_id")
+            try:
+                checkpoint_id = int(raw_checkpoint_id) if raw_checkpoint_id is not None else (previous_checkpoint_count + 1)
+            except Exception:
+                checkpoint_id = previous_checkpoint_count + 1
+
+            is_base = bool(message.data.get("is_base", checkpoint_id <= 1))
+            checkpoint_type = message.data.get("checkpoint_type")
+            checkpoint_state_vars = message.data.get("checkpoint_state_vars")
+            state_size_bytes = message.data.get("state_size_bytes")
+            compression_type = message.data.get("compression_type", "gzip")
+
+            async with get_db_session() as session:
+                success = await self.checkpoint_manager.store_checkpoint(
+                    session=session,
+                    task_id=task_id,
+                    job_id=task_job_id,
+                    is_base=is_base,
+                    delta_data_bytes=checkpoint_data_bytes,
+                    progress_percent=progress_percent,
+                    checkpoint_id=checkpoint_id,
+                    compression_type=compression_type,
+                    checkpoint_type=checkpoint_type,
+                    checkpoint_state_vars=checkpoint_state_vars,
+                    state_size_bytes=state_size_bytes,
+                )
+
+            if success:
+                print(
+                    f"WorkerMessageHandler: Stored checkpoint from TASK_PROGRESS for task {task_id} "
+                    f"(checkpoint #{checkpoint_id}, progress: {progress_percent:.2f}%)"
+                )
+                # Ack only when worker provided an explicit checkpoint id.
+                if raw_checkpoint_id is not None:
+                    from common.protocol import create_checkpoint_ack_message
+
+                    ack_msg = create_checkpoint_ack_message(task_id, task_job_id, checkpoint_id)
+                    await websocket.send(ack_msg.to_json())
+            else:
+                print(f"WorkerMessageHandler: Failed to store TASK_PROGRESS checkpoint for task {task_id}")
+
+        except KeyError as e:
+            print(f"WorkerMessageHandler: Missing required field in task progress: {e}")
+        except Exception as e:
+            print(f"WorkerMessageHandler: Error handling task progress: {e}")
+            import traceback
+
+            traceback.print_exc()
