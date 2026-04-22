@@ -25,7 +25,7 @@ from .utils import (
 )
 from common.protocol import Message, MessageType, create_ping_message
 from foreman.db.base import db_session
-from foreman.db.models import TaskModel, TaskAssignmentModel
+from foreman.db.models import TaskModel
 
 
 class WebSocketManager:
@@ -136,7 +136,7 @@ class WebSocketManager:
 
                     traceback.print_exc()
                     # Don't break - continue listening for messages
-
+                    
         except websockets.exceptions.ConnectionClosed:
             print("WebSocket connection closed")
         finally:
@@ -174,51 +174,36 @@ class WebSocketManager:
                 print(
                     f"[CLEANUP DEBUG] Worker websocket not found in connection manager (already cleaned up?)"
                 )
-
+        
         elif client_type == "client":
             job_id = self.connection_manager.find_job_by_websocket(websocket)
             if job_id:
                 print(f"[CLEANUP DEBUG] Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
-
+    
     async def _record_worker_disconnection_failures(self, worker_id: str):
         """
         Record failures for all tasks assigned to a disconnected worker
-
+        
         Extracts and decodes the latest checkpoint data from delta_checkpoint_blobs
         and stores it in the worker_failures table.
-
+        
         Args:
             worker_id: ID of the disconnected worker
         """
         try:
-            # Get all assigned tasks whose running assignment belongs to this worker
+            # Get all assigned tasks
             assigned_tasks = await _get_assigned_tasks()
-            worker_tasks = []
-            async with db_session() as session:
-                for task in assigned_tasks:
-                    from sqlalchemy import select as sa_select, and_
-
-                    result = await session.execute(
-                        sa_select(TaskAssignmentModel).where(
-                            and_(
-                                TaskAssignmentModel.task_id == task.id,
-                                TaskAssignmentModel.worker_id == worker_id,
-                                TaskAssignmentModel.status == "running",
-                            )
-                        )
-                    )
-                    if result.scalar_one_or_none():
-                        worker_tasks.append(task)
-
+            
+            # Filter tasks assigned to this specific worker
+            worker_tasks = [t for t in assigned_tasks if t.worker_id == worker_id]
+            
             if not worker_tasks:
                 print(f"No tasks assigned to disconnected worker {worker_id}")
                 return
-
-            print(
-                f"Recording {len(worker_tasks)} failure(s) for disconnected worker {worker_id}"
-            )
-
+            
+            print(f"Recording {len(worker_tasks)} failure(s) for disconnected worker {worker_id}")
+            
             # Get full task data including checkpoint blobs
             async with db_session() as session:
                 for task in worker_tasks:
@@ -226,11 +211,11 @@ class WebSocketManager:
                     full_task = await session.get(TaskModel, task.id)
                     if not full_task:
                         continue
-
+                    
                     # Check if checkpoint data exists
                     checkpoint_available = bool(full_task.base_checkpoint_data)
                     latest_checkpoint_data = None
-
+                    
                     # Decode the latest delta checkpoint blob
                     if full_task.delta_checkpoint_blobs:
                         try:
@@ -239,30 +224,24 @@ class WebSocketManager:
                                 # Get the latest checkpoint (highest checkpoint_id)
                                 latest_checkpoint_id = max(delta_blobs.keys(), key=int)
                                 latest_blob = delta_blobs[latest_checkpoint_id]
-
+                                
                                 # Decode the blob
                                 decoded_state = _decode_checkpoint_blob(latest_blob)
-
+                                
                                 if decoded_state is not None:
                                     # Make it JSON serializable
-                                    serializable_state = _make_json_serializable(
-                                        decoded_state
-                                    )
-                                    latest_checkpoint_data = json.dumps(
-                                        {
-                                            "checkpoint_id": int(latest_checkpoint_id),
-                                            "progress_percent": full_task.progress_percent,
-                                            "checkpoint_count": full_task.checkpoint_count,
-                                            "state": serializable_state,
-                                        }
-                                    )
-                                    print(
-                                        f"  Task {task.id}: Decoded checkpoint #{latest_checkpoint_id} "
-                                        f"(progress: {full_task.progress_percent}%)"
-                                    )
+                                    serializable_state = _make_json_serializable(decoded_state)
+                                    latest_checkpoint_data = json.dumps({
+                                        "checkpoint_id": int(latest_checkpoint_id),
+                                        "progress_percent": full_task.progress_percent,
+                                        "checkpoint_count": full_task.checkpoint_count,
+                                        "state": serializable_state
+                                    })
+                                    print(f"  Task {task.id}: Decoded checkpoint #{latest_checkpoint_id} "
+                                          f"(progress: {full_task.progress_percent}%)")
                         except Exception as e:
                             print(f"  Task {task.id}: Error decoding checkpoint: {e}")
-
+                    
                     # Record the failure
                     await _record_worker_failure(
                         worker_id=worker_id,
@@ -270,20 +249,17 @@ class WebSocketManager:
                         error="Worker disconnected while task was assigned",
                         job_id=full_task.job_id,
                         checkpoint_available=checkpoint_available,
-                        latest_checkpoint_data=latest_checkpoint_data,
+                        latest_checkpoint_data=latest_checkpoint_data
                     )
-
-                    print(
-                        f"  Recorded failure for task {task.id} "
-                        f"(checkpoint: {'yes' if checkpoint_available else 'no'})"
-                    )
-
+                    
+                    print(f"  Recorded failure for task {task.id} "
+                          f"(checkpoint: {'yes' if checkpoint_available else 'no'})")
+                    
         except Exception as e:
             print(f"Error recording worker disconnection failures: {e}")
             import traceback
-
             traceback.print_exc()
-
+            
     async def _get_worker_pending_tasks(self, worker_id: str) -> list:
         """Get list of pending task IDs for a worker (for debugging)"""
         try:
@@ -294,11 +270,7 @@ class WebSocketManager:
             async with async_session() as session:
                 result = await session.execute(
                     select(TaskModel.id, TaskModel.status)
-                    .join(
-                        TaskAssignmentModel, TaskAssignmentModel.task_id == TaskModel.id
-                    )
-                    .where(TaskAssignmentModel.worker_id == worker_id)
-                    .where(TaskAssignmentModel.status == "running")
+                    .where(TaskModel.worker_id == worker_id)
                     .where(TaskModel.status == "assigned")
                 )
                 tasks = result.all()
@@ -306,16 +278,16 @@ class WebSocketManager:
         except Exception as e:
             print(f"⚠️ [CLEANUP DEBUG] Error getting pending tasks: {e}")
             return []
-
+    
     async def ping_workers(self):
         """Periodically ping workers to keep connections alive"""
         while True:
             try:
                 await asyncio.sleep(130)  # Ping every 30 seconds
-
+                
                 ping_message = create_ping_message()
                 worker_ids = self.connection_manager.get_all_worker_ids()
-
+                
                 for worker_id in worker_ids:
                     websocket = self.connection_manager.get_worker_websocket(worker_id)
                     if websocket:
@@ -324,12 +296,12 @@ class WebSocketManager:
                         except Exception:
                             # Worker connection is dead, will be cleaned up
                             pass
-
+                        
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Error in ping task: {e}")
-
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get current WebSocket manager stats"""
         return self.connection_manager.get_stats()

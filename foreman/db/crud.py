@@ -1,21 +1,20 @@
 from datetime import datetime
 from typing import Optional, List, Tuple
-from sqlalchemy import select, update, func, and_
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
-import uuid
 
 from foreman.schema.schema import JobStats, WorkerFailureStats
 from .models import *
 
 
 async def create_job(
-    session: AsyncSession,
-    job_id: str,
+    session: AsyncSession, 
+    job_id: str, 
     total_tasks: int,
-    supports_checkpointing: bool = False,
+    supports_checkpointing: bool = False
 ) -> JobModel:
     """Create a new job
-
+    
     Args:
         session: Database session
         job_id: Unique job identifier
@@ -23,9 +22,9 @@ async def create_job(
         supports_checkpointing: Whether this job supports declarative checkpointing
     """
     job = JobModel(
-        id=job_id,
+        id=job_id, 
         total_tasks=total_tasks,
-        supports_checkpointing=supports_checkpointing,
+        supports_checkpointing=supports_checkpointing
     )
     session.add(job)
     await session.commit()
@@ -42,40 +41,36 @@ async def create_task(session: AsyncSession, task_id: str, job_id: str) -> TaskM
     return task
 
 
-async def create_worker(
-    session: AsyncSession, worker_id: str, device_specs: dict = None
-) -> WorkerModel:
+async def create_worker(session: AsyncSession, worker_id: str, device_specs: dict = None) -> WorkerModel:
     """
     Create a new worker with optional device specifications
-
+    
     Args:
         session: Database session
         worker_id: Worker identifier
         device_specs: Optional dictionary with device specifications
     """
     worker_data = {"id": worker_id}
-
+    
     # Add device specs if provided
     if device_specs:
-        worker_data.update(
-            {
-                "device_type": device_specs.get("device_type"),
-                "os_type": device_specs.get("os_type"),
-                "os_version": device_specs.get("os_version"),
-                "cpu_model": device_specs.get("cpu_model"),
-                "cpu_cores": device_specs.get("cpu_cores"),
-                "cpu_threads": device_specs.get("cpu_threads"),
-                "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
-                "ram_total_mb": device_specs.get("ram_total_mb"),
-                "ram_available_mb": device_specs.get("ram_available_mb"),
-                "gpu_model": device_specs.get("gpu_model"),
-                "battery_level": device_specs.get("battery_level"),
-                "is_charging": device_specs.get("is_charging"),
-                "network_type": device_specs.get("network_type"),
-                "python_version": device_specs.get("python_version"),
-            }
-        )
-
+        worker_data.update({
+            "device_type": device_specs.get("device_type"),
+            "os_type": device_specs.get("os_type"),
+            "os_version": device_specs.get("os_version"),
+            "cpu_model": device_specs.get("cpu_model"),
+            "cpu_cores": device_specs.get("cpu_cores"),
+            "cpu_threads": device_specs.get("cpu_threads"),
+            "cpu_frequency_mhz": device_specs.get("cpu_frequency_mhz"),
+            "ram_total_mb": device_specs.get("ram_total_mb"),
+            "ram_available_mb": device_specs.get("ram_available_mb"),
+            "gpu_model": device_specs.get("gpu_model"),
+            "battery_level": device_specs.get("battery_level"),
+            "is_charging": device_specs.get("is_charging"),
+            "network_type": device_specs.get("network_type"),
+            "python_version": device_specs.get("python_version"),
+        })
+    
     worker = WorkerModel(**worker_data)
     session.add(worker)
     await session.commit()
@@ -83,12 +78,10 @@ async def create_worker(
     return worker
 
 
-async def update_worker_device_specs(
-    session: AsyncSession, worker_id: str, device_specs: dict
-):
+async def update_worker_device_specs(session: AsyncSession, worker_id: str, device_specs: dict):
     """
     Update worker device specifications
-
+    
     Args:
         session: Database session
         worker_id: Worker identifier
@@ -111,7 +104,7 @@ async def update_worker_device_specs(
         "python_version": device_specs.get("python_version"),
         "connected_at": datetime.now(),
     }
-
+    
     stmt = update(WorkerModel).where(WorkerModel.id == worker_id).values(**update_data)
     await session.execute(stmt)
     await session.commit()
@@ -153,20 +146,20 @@ async def delete_worker(session: AsyncSession, worker_id: str) -> bool:
 async def clear_database(session: AsyncSession) -> dict:
     """Clear all workers, jobs, tasks, and worker failures from the database"""
     from sqlalchemy import delete as sql_delete
-
+    
     # Delete in order to respect foreign key constraints
     worker_failures_result = await session.execute(sql_delete(WorkerFailureModel))
     tasks_result = await session.execute(sql_delete(TaskModel))
     jobs_result = await session.execute(sql_delete(JobModel))
     workers_result = await session.execute(sql_delete(WorkerModel))
-
+    
     await session.commit()
-
+    
     return {
         "workers_deleted": workers_result.rowcount,
         "jobs_deleted": jobs_result.rowcount,
         "tasks_deleted": tasks_result.rowcount,
-        "worker_failures_deleted": worker_failures_result.rowcount,
+        "worker_failures_deleted": worker_failures_result.rowcount
     }
 
 
@@ -189,11 +182,14 @@ async def update_task_status(
     session: AsyncSession,
     task_id: str,
     status: str,
+    worker_id: str = None,
     result: str = None,
     error: str = None,
 ):
     """Update task status"""
     update_data = {"status": status}
+    if worker_id:
+        update_data["worker_id"] = worker_id
     if result:
         update_data["result"] = result
     if error:
@@ -212,19 +208,13 @@ async def update_task_status(
 async def claim_task_for_worker(
     session: AsyncSession, task_id: str, worker_id: str
 ) -> Optional[str]:
-    """
-    Atomically claim a pending task for a worker.
-
-    Moves tasks.status from 'pending' -> 'assigned' and creates a
-    TaskAssignmentModel row tracking this (task, worker) pair.
-
-    Returns job_id if claimed, None if the task was already taken.
-    """
+    """Atomically claim a pending task for a worker. Returns job_id if claimed."""
     stmt = (
         update(TaskModel)
         .where(TaskModel.id == task_id, TaskModel.status == "pending")
         .values(
             status="assigned",
+            worker_id=worker_id,
             assigned_at=datetime.now(),
         )
         .returning(TaskModel.job_id)
@@ -236,15 +226,6 @@ async def claim_task_for_worker(
         await session.rollback()
         return None
 
-    # Record this assignment in task_assignments
-    assignment = TaskAssignmentModel(
-        id=str(uuid.uuid4()),
-        task_id=task_id,
-        worker_id=worker_id,
-        status="running",
-        is_replica=False,
-    )
-    session.add(assignment)
     await session.commit()
     return row[0]
 
@@ -283,10 +264,8 @@ async def update_worker_task_stats(
 
     await session.execute(stmt)
     await session.commit()
-
+    
     # New function: increment total_tasks_assigned
-
-
 async def update_worker_tasks_assigned(session: AsyncSession, worker_id: str):
     """Increment total_tasks_assigned for a worker when a task is assigned"""
     stmt = (
@@ -309,80 +288,6 @@ async def increment_job_completed_tasks(session: AsyncSession, job_id: str):
     await session.commit()
 
 
-async def create_task_assignment(
-    session: AsyncSession,
-    task_id: str,
-    worker_id: str,
-    is_replica: bool = False,
-) -> TaskAssignmentModel:
-    """Insert a new task_assignments row for a replica assignment."""
-    assignment = TaskAssignmentModel(
-        id=str(uuid.uuid4()),
-        task_id=task_id,
-        worker_id=worker_id,
-        status="running",
-        is_replica=is_replica,
-    )
-    session.add(assignment)
-    await session.commit()
-    await session.refresh(assignment)
-    return assignment
-
-
-async def get_active_assignments_for_task(
-    session: AsyncSession, task_id: str
-) -> List[TaskAssignmentModel]:
-    """Return all 'running' task_assignments rows for a task."""
-    result = await session.execute(
-        select(TaskAssignmentModel).where(
-            and_(
-                TaskAssignmentModel.task_id == task_id,
-                TaskAssignmentModel.status == "running",
-            )
-        )
-    )
-    return result.scalars().all()
-
-
-async def get_assignment(
-    session: AsyncSession, task_id: str, worker_id: str
-) -> Optional[TaskAssignmentModel]:
-    """Return the task_assignments row for a specific (task, worker) pair."""
-    result = await session.execute(
-        select(TaskAssignmentModel)
-        .where(
-            and_(
-                TaskAssignmentModel.task_id == task_id,
-                TaskAssignmentModel.worker_id == worker_id,
-            )
-        )
-        .order_by(TaskAssignmentModel.assigned_at.desc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
-async def update_assignment_status(
-    session: AsyncSession,
-    task_id: str,
-    worker_id: str,
-    status: str,
-) -> bool:
-    """
-    Set the status on the most-recent task_assignments row for (task, worker).
-    Returns True if a row was updated.
-    """
-    # Find the row id first (most recent)
-    assignment = await get_assignment(session, task_id, worker_id)
-    if not assignment:
-        return False
-    assignment.status = status
-    if status in ("completed", "killed", "failed"):
-        assignment.completed_at = datetime.now()
-    await session.commit()
-    return True
-
-
 async def complete_task_if_assigned(
     session: AsyncSession,
     task_id: str,
@@ -390,40 +295,30 @@ async def complete_task_if_assigned(
     result: str,
 ) -> Tuple[bool, Optional[str], Optional[int], Optional[int]]:
     """
-    Atomically mark a task as completed only if this worker's assignment is
-    still 'running' AND the task itself is still 'assigned'.
-
-    This is the deduplication gate for replicated tasks:
-    - First worker to call this wins (task moves to 'completed').
-    - Subsequent calls from losing replicas are rejected.
+    Atomically mark a task as completed only if it is currently assigned to this worker.
 
     Returns (accepted, job_id, completed_tasks, total_tasks).
     """
+
     task = await session.get(TaskModel, task_id)
     if not task:
         await session.rollback()
         return False, None, None, None
 
-    # Task already completed by another replica — reject
     if task.status != "assigned":
         await session.rollback()
         return False, task.job_id, None, None
 
-    # Check this worker's assignment row is still 'running'
-    assignment = await get_assignment(session, task_id, worker_id)
-    if not assignment or assignment.status != "running":
+    if task.worker_id and task.worker_id != worker_id:
         await session.rollback()
         return False, task.job_id, None, None
 
-    # Mark this worker's assignment as completed
-    assignment.status = "completed"
-    assignment.completed_at = datetime.now()
-
-    # Mark the task itself as completed (this worker wins)
     task.status = "completed"
     task.result = result
     task.completed_at = datetime.now()
-    task.progress_percent = 100.0
+    task.progress_percent = 100.0  # Task is complete, so progress is 100%
+    if not task.worker_id:
+        task.worker_id = worker_id
 
     job = await session.get(JobModel, task.job_id)
     if not job:
@@ -436,6 +331,7 @@ async def complete_task_if_assigned(
         job.completed_tasks = prev_completed + 1
 
     await session.commit()
+
     return True, job.id, job.completed_tasks, job.total_tasks
 
 
@@ -449,7 +345,7 @@ async def record_worker_failure(
     latest_checkpoint_data: Optional[str] = None,
 ) -> None:
     """Insert a worker failure record
-
+    
     Args:
         session: Database session
         worker_id: Worker identifier
@@ -526,14 +422,14 @@ async def get_latest_task_failure_with_checkpoint(
 ) -> Optional[WorkerFailureModel]:
     """
     Get the most recent failure record for a task that has checkpoint data.
-
+    
     This is used when reassigning orphaned tasks to determine if we can
     resume from a checkpoint instead of starting from scratch.
-
+    
     Args:
         session: Database session
         task_id: Task identifier
-
+        
     Returns:
         WorkerFailureModel with checkpoint data, or None if not found
     """
@@ -604,7 +500,7 @@ async def get_pending_tasks(
     query = select(TaskModel).where(TaskModel.status == "pending")
     if job_id:
         query = query.where(TaskModel.job_id == job_id)
-
+    
     # Order by task ID to ensure sequential processing
     query = query.order_by(TaskModel.id)
 
@@ -619,7 +515,7 @@ async def get_assigned_tasks(
     query = select(TaskModel).where(TaskModel.status == "assigned")
     if job_id:
         query = query.where(TaskModel.job_id == job_id)
-
+    
     query = query.order_by(TaskModel.id)
     result = await session.execute(query)
     return result.scalars().all()
@@ -631,7 +527,6 @@ async def get_job_by_id(session: AsyncSession, job_id: str) -> Optional[JobModel
 
 
 # ==================== Pipeline / Dependency Operations ====================
-
 
 async def create_pipeline_job(
     session: AsyncSession,
@@ -787,7 +682,9 @@ async def get_blocked_tasks(
     return result.scalars().all()
 
 
-async def update_task_args(session: AsyncSession, task_id: str, args: str) -> bool:
+async def update_task_args(
+    session: AsyncSession, task_id: str, args: str
+) -> bool:
     """Update task arguments (used to inject upstream results into downstream tasks)
 
     Args:

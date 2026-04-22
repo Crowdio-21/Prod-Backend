@@ -37,7 +37,7 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
     ):
         """
         Get checkpoint progress for all tasks in a job
-
+        
         Returns overall progress, per-task checkpoint info, and declarative
         checkpointing configuration if enabled.
         """
@@ -57,21 +57,7 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
                 task_info = {
                     "task_id": task.id,
                     "status": task.status,
-                    "worker_id": next(
-                        (
-                            a.worker_id
-                            for a in task.assignments
-                            if a.status == "completed"
-                        ),
-                        next(
-                            (
-                                a.worker_id
-                                for a in task.assignments
-                                if a.status == "running"
-                            ),
-                            None,
-                        ),
-                    ),
+                    "worker_id": task.worker_id,
                     "progress_percent": task.progress_percent or 0,
                     "checkpoint_count": task.checkpoint_count or 0,
                     "last_checkpoint_at": (
@@ -82,28 +68,25 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
                     "base_checkpoint_size": task.base_checkpoint_size or 0,
                     "has_checkpoint": bool(task.base_checkpoint_data),
                 }
-
+                
                 # Parse delta checkpoints for declarative info
                 import json
-
                 if task.delta_checkpoints:
                     try:
                         deltas = json.loads(task.delta_checkpoints)
                         task_info["delta_count"] = len(deltas)
                         # Extract state_vars from latest delta if present
                         if deltas and "state_vars" in deltas[-1]:
-                            task_info["checkpoint_state_vars"] = deltas[-1][
-                                "state_vars"
-                            ]
+                            task_info["checkpoint_state_vars"] = deltas[-1]["state_vars"]
                     except json.JSONDecodeError:
                         task_info["delta_count"] = 0
                 else:
                     task_info["delta_count"] = 0
-
+                
                 tasks_with_checkpoints.append(task_info)
                 total_progress += task.progress_percent or 0
                 checkpoint_count += task.checkpoint_count or 0
-
+                
                 # Track status counts
                 if task.status == "completed":
                     completed_count += 1
@@ -119,9 +102,7 @@ def create_checkpoint_routes(checkpoint_manager, checkpoint_recovery_manager):
                 "completed_tasks": completed_count,
                 "failed_tasks": failed_count,
                 "resumed_tasks": resumed_count,  # TODO: Track resumed tasks
-                "tasks_with_checkpoints": sum(
-                    1 for t in tasks_with_checkpoints if t["has_checkpoint"]
-                ),
+                "tasks_with_checkpoints": sum(1 for t in tasks_with_checkpoints if t["has_checkpoint"]),
                 "average_progress_percent": avg_progress,
                 "total_checkpoints": checkpoint_count,
                 "checkpointing_enabled": job.supports_checkpointing,
