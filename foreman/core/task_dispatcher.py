@@ -19,6 +19,9 @@ from .utils import (
     _update_worker_status,
     _claim_task_for_worker,
     _get_latest_task_failure_with_checkpoint,
+    _create_task_assignment,
+    _get_active_assignments_for_task,
+    _update_assignment_status,
 )
 from common.protocol import (
     create_assign_task_message,
@@ -167,14 +170,15 @@ class TaskDispatcher:
 
         recovered = 0
         for task in assigned_tasks:
-            # Check if the assigned worker is still connected
-            if task.worker_id and task.worker_id not in connected_workers:
-                # Worker is disconnected - reset task to pending for reassignment
-                await _update_task_status(task.id, "pending", worker_id=None)
+            # A task is orphaned only when ALL its running assignment workers are disconnected
+            active = await _get_active_assignments_for_task(task.id)
+            running_workers = {a.worker_id for a in active}
+            if not running_workers or running_workers.isdisjoint(connected_workers):
+                await _update_task_status(task.id, "pending")
                 recovered += 1
                 print(
                     f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} "
-                    f"from disconnected worker {task.worker_id}"
+                    f"(runners {running_workers or 'none'} all disconnected)"
                 )
 
         if recovered > 0:
@@ -353,6 +357,23 @@ class TaskDispatcher:
 
         if not pending_tasks:
             print(f"TaskDispatcher: No pending tasks available")
+            # --- Replication trigger ---
+            # All tasks are in 'assigned' state but idle workers exist.
+            # Replicate assigned tasks to idle workers so fast workers can race
+            # slow workers to completion.
+            available_workers = self.connection_manager.get_available_workers()
+            if available_workers:
+                assigned_tasks = await _get_assigned_tasks()
+                if assigned_tasks:
+                    print(
+                        f"TaskDispatcher: [Replicate] No pending tasks, "
+                        f"{len(assigned_tasks)} assigned task(s) remain and "
+                        f"{len(available_workers)} idle worker(s) available — "
+                        f"starting replication"
+                    )
+                    await self._replicate_assigned_tasks(
+                        assigned_tasks, available_workers
+                    )
             return False
 
         # Get unique job IDs from pending tasks
@@ -378,10 +399,60 @@ class TaskDispatcher:
 
     async def send_kill_to_worker(self, task_id: str) -> bool:
         """
-        Send a KILL_TASK message to the worker currently holding task_id.
+        Send KILL_TASK to all workers currently running task_id.
 
-        Returns True if the message was sent, False if the task is not assigned
-        or the worker is not reachable.
+        Returns True if at least one kill was sent.
+        """
+        from foreman.db.base import async_session
+        from foreman.db.crud import get_task_by_id, get_active_assignments_for_task
+
+        async with async_session() as session:
+            task = await get_task_by_id(session, task_id)
+            if not task:
+                print(f"TaskDispatcher: send_kill - task {task_id} not found")
+                return False
+            if task.status != "assigned":
+                print(
+                    f"TaskDispatcher: send_kill - task {task_id} is not assigned "
+                    f"(status={task.status})"
+                )
+                return False
+            active = await get_active_assignments_for_task(session, task_id)
+            job_id = task.job_id
+
+        if not active:
+            print(
+                f"TaskDispatcher: send_kill - no running assignments for task {task_id}"
+            )
+            return False
+
+        sent_any = False
+        for assignment in active:
+            websocket = self.connection_manager.get_worker_websocket(
+                assignment.worker_id
+            )
+            if not websocket:
+                print(
+                    f"TaskDispatcher: send_kill - no websocket for worker {assignment.worker_id}"
+                )
+                continue
+            message = create_kill_task_message(task_id=task_id, job_id=job_id)
+            await websocket.send(message.to_json())
+            print(
+                f"TaskDispatcher: Sent KILL_TASK for task {task_id} to worker {assignment.worker_id}"
+            )
+            sent_any = True
+
+        return sent_any
+
+    async def send_kill_to_worker_by_assignment(
+        self, task_id: str, worker_id: str
+    ) -> bool:
+        """
+        Send KILL_TASK to a specific worker for a replicated task.
+
+        Used by the winner/loser fanout: after one replica wins, this is
+        called for every other still-running replica worker.
         """
         from foreman.db.base import async_session
         from foreman.db.crud import get_task_by_id
@@ -389,33 +460,203 @@ class TaskDispatcher:
         async with async_session() as session:
             task = await get_task_by_id(session, task_id)
 
-        if not task:
-            print(f"TaskDispatcher: send_kill - task {task_id} not found")
-            return False
-
-        if task.status != "assigned":
-            print(
-                f"TaskDispatcher: send_kill - task {task_id} is not assigned "
-                f"(status={task.status})"
-            )
-            return False
-
-        worker_id = task.worker_id
-        job_id = task.job_id
+        job_id = task.job_id if task else None
 
         websocket = self.connection_manager.get_worker_websocket(worker_id)
         if not websocket:
             print(
-                f"TaskDispatcher: send_kill - no live websocket for worker {worker_id}"
+                f"TaskDispatcher: send_kill_by_assignment - no live websocket for "
+                f"replica worker {worker_id} (task {task_id}), marking killed directly"
             )
+            await _update_assignment_status(task_id, worker_id, "killed")
             return False
 
         message = create_kill_task_message(task_id=task_id, job_id=job_id)
         await websocket.send(message.to_json())
         print(
-            f"TaskDispatcher: Sent KILL_TASK for task {task_id} to worker {worker_id}"
+            f"TaskDispatcher: Sent KILL_TASK (replica fanout) for task {task_id} "
+            f"to loser worker {worker_id}"
         )
         return True
+
+    # ==================== Replication ====================
+
+    async def _replicate_assigned_tasks(
+        self,
+        assigned_tasks: list,
+        available_workers: set,
+    ) -> int:
+        """
+        Replicate currently-assigned tasks to idle workers.
+
+        Called when pending_tasks == 0 but idle workers exist.
+        Pairs each idle worker with an assigned task it is not already running,
+        respecting REPLICATION_MAX_REPLICAS (default 2).
+        """
+        MAX_REPLICAS = 2
+
+        if not assigned_tasks or not available_workers:
+            return 0
+
+        replicated = 0
+        idle_workers = list(available_workers)
+
+        for task in assigned_tasks:
+            if not idle_workers:
+                break
+
+            # Skip tasks that already reached the replica cap
+            active = await _get_active_assignments_for_task(task.id)
+            if len(active) >= MAX_REPLICAS:
+                continue
+
+            # Workers already running this task
+            already_running = {a.worker_id for a in active}
+
+            # Pick an idle worker not already on this task
+            chosen = next((w for w in idle_workers if w not in already_running), None)
+            if not chosen:
+                continue
+
+            func_code = self.job_manager.get_func_code(task.job_id)
+            if not func_code:
+                continue
+
+            args_text = resolve_text_ref(task.args)
+            task_args = json.loads(args_text) if args_text else []
+
+            success = await self._replicate_task_to_worker(
+                job_id=task.job_id,
+                task_id=task.id,
+                func_code=func_code,
+                task_args=task_args,
+                worker_id=chosen,
+            )
+            if success:
+                idle_workers.remove(chosen)
+                replicated += 1
+                print(
+                    f"TaskDispatcher: [Replicate] Replicated task {task.id} "
+                    f"to idle worker {chosen}"
+                )
+
+        if replicated:
+            print(
+                f"TaskDispatcher: [Replicate] Created {replicated} replica assignment(s)"
+            )
+        return replicated
+
+    async def _replicate_task_to_worker(
+        self,
+        job_id: str,
+        task_id: str,
+        func_code: str,
+        task_args: Any,
+        worker_id: str,
+    ) -> bool:
+        """
+        Assign an already-assigned task to an additional idle worker (replication).
+
+        Unlike _assign_task_to_worker, this does NOT require tasks.status == 'pending'
+        and does NOT change tasks.status. It only:
+          1. Inserts a new task_assignments row (is_replica=True).
+          2. Sends ASSIGN_TASK / RESUME_TASK to the worker.
+          3. Marks the worker busy in ConnectionManager.
+        """
+        try:
+            task_metadata = self.job_manager.get_task_metadata(job_id)
+            checkpoint_data = await _get_latest_task_failure_with_checkpoint(task_id)
+
+            checkpoint_state = None
+            is_resume = False
+            if checkpoint_data and checkpoint_data.get("state"):
+                is_resume = True
+                checkpoint_state = checkpoint_data.get("state", {})
+
+            prepared_code = self._prepare_code_for_worker(
+                func_code=func_code,
+                worker_id=worker_id,
+                task_metadata=task_metadata,
+                checkpoint_state=checkpoint_state,
+                is_resume=is_resume,
+            )
+
+            if is_resume:
+                if task_metadata:
+                    message = create_resume_task_message_with_metadata(
+                        task_id=task_id,
+                        job_id=job_id,
+                        func_code=prepared_code,
+                        checkpoint_state=checkpoint_data.get("state", {}),
+                        task_args=(
+                            [task_args]
+                            if not isinstance(task_args, list)
+                            else task_args
+                        ),
+                        task_kwargs={},
+                        progress_percent=checkpoint_data.get("progress_percent", 0),
+                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
+                        task_metadata=task_metadata,
+                    )
+                else:
+                    message = create_resume_task_message(
+                        task_id=task_id,
+                        job_id=job_id,
+                        func_code=prepared_code,
+                        checkpoint_state=checkpoint_data.get("state", {}),
+                        task_args=(
+                            [task_args]
+                            if not isinstance(task_args, list)
+                            else task_args
+                        ),
+                        task_kwargs={},
+                        progress_percent=checkpoint_data.get("progress_percent", 0),
+                        checkpoint_count=checkpoint_data.get("checkpoint_count", 0),
+                    )
+            else:
+                if task_metadata:
+                    message = create_assign_task_message_with_metadata(
+                        func_code=prepared_code,
+                        task_args=[task_args],
+                        task_id=task_id,
+                        job_id=job_id,
+                        task_metadata=task_metadata,
+                    )
+                else:
+                    message = create_assign_task_message(
+                        prepared_code, [task_args], task_id, job_id
+                    )
+
+            websocket = self.connection_manager.get_worker_websocket(worker_id)
+            if not websocket:
+                print(
+                    f"TaskDispatcher: [Replicate] No websocket for worker {worker_id}"
+                )
+                return False
+
+            # Record the replica assignment BEFORE sending
+            await _create_task_assignment(task_id, worker_id, is_replica=True)
+
+            await websocket.send(message.to_json())
+
+            self.connection_manager.set_worker_active_task(worker_id, task_id, job_id)
+            self.connection_manager.mark_worker_busy(worker_id)
+            await _update_worker_status(worker_id, "busy", current_task_id=task_id)
+
+            print(
+                f"TaskDispatcher: [Replicate] Replica sent task {task_id} "
+                f"to worker {worker_id}"
+            )
+            return True
+
+        except Exception as e:
+            print(
+                f"TaskDispatcher: [Replicate] Error replicating task {task_id} "
+                f"to worker {worker_id}: {e}"
+            )
+            self.connection_manager.clear_worker_active_task(worker_id)
+            self.connection_manager.mark_worker_available(worker_id)
+            return False
 
     async def _assign_task_to_worker(
         self, job_id: str, task_id: str, func_code: str, task_args: Any, worker_id: str
@@ -565,7 +806,7 @@ class TaskDispatcher:
 
             # If we had claimed the task, put it back to pending
             try:
-                await _update_task_status(task_id, "pending", worker_id=None)
+                await _update_task_status(task_id, "pending")
             except Exception as reset_error:
                 print(
                     f"TaskDispatcher: Error resetting task {task_id} after send failure: {reset_error}"

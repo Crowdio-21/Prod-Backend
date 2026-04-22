@@ -28,6 +28,8 @@ from .utils import (
     _update_task_status,
     _update_worker_status,
     _update_worker_task_stats,
+    _update_assignment_status,
+    _get_active_assignments_for_task,
 )
 from common.protocol import Message, MessageType, create_job_accepted_message
 from common.serializer import get_runtime_info, bytes_to_hex, hex_to_bytes
@@ -537,6 +539,18 @@ class WorkerMessageHandler:
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
 
+            # Kill any remaining replicas that are still running this task
+            remaining_assignments = await _get_active_assignments_for_task(task_id)
+            for assignment in remaining_assignments:
+                if assignment.worker_id != worker_id:
+                    print(
+                        f"[Replicate] Task {task_id} won by {worker_id}, "
+                        f"killing replica on {assignment.worker_id}"
+                    )
+                    await self.task_dispatcher.send_kill_to_worker_by_assignment(
+                        task_id, assignment.worker_id
+                    )
+
             # Pipeline dependency resolution
             pipeline_batch_dispatched = False
             if self.job_manager.is_pipeline_job(job_id):
@@ -593,13 +607,29 @@ class WorkerMessageHandler:
                 )
                 return
 
-            print(
-                f"[Kill] Task {task_id} acknowledged kill on worker {worker_id}, resetting to pending"
-            )
-            await _update_task_status(task_id, "pending", worker_id=None)
+            print(f"[Kill] KILL_ACK from worker {worker_id} for task {task_id}")
+
+            # Mark this worker's assignment as killed
+            await _update_assignment_status(task_id, worker_id, "killed")
+
+            # Free the worker
             self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
+
+            # Check if any other workers are still running this task
+            remaining = await _get_active_assignments_for_task(task_id)
+            if not remaining:
+                # No one is running the task any more — reset to pending
+                print(
+                    f"[Kill] No remaining runners for task {task_id}, resetting to pending"
+                )
+                await _update_task_status(task_id, "pending")
+            else:
+                print(
+                    f"[Kill] Task {task_id} still has {len(remaining)} active replica(s), leaving as assigned"
+                )
+
             await self.task_dispatcher.assign_task_to_available_worker(worker_id)
 
         except KeyError as e:

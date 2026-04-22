@@ -29,7 +29,9 @@ class JobModel(Base):
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     supports_checkpointing = Column(Boolean, default=False)
-    is_pipeline = Column(Boolean, default=False)  # Whether this is a pipeline job with dependent stages
+    is_pipeline = Column(
+        Boolean, default=False
+    )  # Whether this is a pipeline job with dependent stages
     total_stages = Column(Integer, default=1)  # Number of pipeline stages
     # serialized code could be added here if needed
     # arguments for the job could be added here if needed
@@ -45,7 +47,6 @@ class TaskModel(Base):
 
     id = Column(String, primary_key=True)
     job_id = Column(String, ForeignKey("jobs.id"))
-    worker_id = Column(String, nullable=True)
     status = Column(String, default="pending")  # pending, assigned, completed, failed
     args = Column(Text, nullable=True)  # Serialized task arguments
     result = Column(Text, nullable=True)
@@ -58,23 +59,73 @@ class TaskModel(Base):
         Text, nullable=True
     )  # Storage reference (fs_path or db_id)
     base_checkpoint_size = Column(Integer, default=0)  # Bytes of base checkpoint
-    base_checkpoint_blob = Column(LargeBinary, nullable=True)  # Small base checkpoint data (<1MB)
+    base_checkpoint_blob = Column(
+        LargeBinary, nullable=True
+    )  # Small base checkpoint data (<1MB)
     delta_checkpoints = Column(Text, nullable=True)  # JSON array of delta checkpoints
-    delta_checkpoint_blobs = Column(Text, nullable=True)  # JSON map of delta_id -> base64 encoded blob
+    delta_checkpoint_blobs = Column(
+        Text, nullable=True
+    )  # JSON map of delta_id -> base64 encoded blob
     last_checkpoint_at = Column(DateTime, nullable=True)
     progress_percent = Column(Float, default=0.0)  # Task progress 0-100
     checkpoint_count = Column(Integer, default=0)  # Number of checkpoints taken
-    checkpoint_storage_path = Column(String, nullable=True)  # Path if stored externally or 'db' if in blob
+    checkpoint_storage_path = Column(
+        String, nullable=True
+    )  # Path if stored externally or 'db' if in blob
 
     # Pipeline / Dependency fields
     stage = Column(Integer, default=0)  # Pipeline stage number (0 = first stage)
-    dependency_count = Column(Integer, default=0)  # Number of unmet upstream dependencies
-    depends_on = Column(Text, nullable=True)  # JSON list of task IDs this task depends on
-    dependents = Column(Text, nullable=True)  # JSON list of task IDs that depend on this task
-    stage_func_code = Column(Text, nullable=True)  # Per-stage function code (if different from job-level)
+    dependency_count = Column(
+        Integer, default=0
+    )  # Number of unmet upstream dependencies
+    depends_on = Column(
+        Text, nullable=True
+    )  # JSON list of task IDs this task depends on
+    dependents = Column(
+        Text, nullable=True
+    )  # JSON list of task IDs that depend on this task
+    stage_func_code = Column(
+        Text, nullable=True
+    )  # Per-stage function code (if different from job-level)
 
     # Relationships
     job = relationship("JobModel", back_populates="tasks")
+    assignments = relationship(
+        "TaskAssignmentModel",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class TaskAssignmentModel(Base):
+    """
+    Tracks every (task, worker) execution pair.
+
+    A task may have multiple rows here simultaneously (one per replica).
+    Exactly one row will reach status='completed'; all others will be
+    killed and reach status='killed'.
+
+    status values:
+      running   — worker has been sent ASSIGN_TASK / RESUME_TASK
+      completed — this worker was the winner and returned a valid result
+      killed    — a KILL_ACK was received from this worker (it lost the race)
+      failed    — worker sent TASK_ERROR for this assignment
+    """
+
+    __tablename__ = "task_assignments"
+
+    id = Column(String, primary_key=True)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False, index=True)
+    worker_id = Column(String, nullable=False, index=True)
+    status = Column(String, default="running")  # running | completed | killed | failed
+    assigned_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+    is_replica = Column(
+        Boolean, default=False
+    )  # True if this is a replicated assignment
+
+    task = relationship("TaskModel", back_populates="assignments")
 
 
 class WorkerModel(Base):
@@ -88,7 +139,9 @@ class WorkerModel(Base):
     current_task_id = Column(String, nullable=True)
     total_tasks_completed = Column(Integer, default=0)
     total_tasks_failed = Column(Integer, default=0)
-    total_tasks_assigned = Column(Integer, default=0)  # Total tasks assigned to this worker
+    total_tasks_assigned = Column(
+        Integer, default=0
+    )  # Total tasks assigned to this worker
 
     # Device specifications
     device_type = Column(String, nullable=True)  # PC or Android
