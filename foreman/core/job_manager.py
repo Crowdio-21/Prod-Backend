@@ -38,7 +38,7 @@ class JobManager:
 
         # Track job metadata: job_id -> metadata dict
         self._job_metadata: Dict[str, Dict[str, Any]] = {}
-
+        
         # Track task metadata for checkpointing: job_id -> task_metadata dict
         self._task_metadata_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -48,12 +48,12 @@ class JobManager:
     # ==================== Job Creation ====================
 
     async def create_job(
-        self,
-        job_id: str,
-        func_code: str,
-        args_list: List[Any],
+        self, 
+        job_id: str, 
+        func_code: str, 
+        args_list: List[Any], 
         total_tasks: int,
-        task_metadata: Optional[Dict[str, Any]] = None,
+        task_metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Create a new job with tasks
@@ -72,26 +72,22 @@ class JobManager:
         checkpoint_enabled = False
         checkpoint_interval = 10.0
         checkpoint_state_vars = []
-
+        
         if task_metadata:
             checkpoint_enabled = task_metadata.get("checkpoint_enabled", False)
             checkpoint_interval = task_metadata.get("checkpoint_interval", 10.0)
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
-
+        
         checkpoint_info = ""
         if checkpoint_enabled:
-            vars_str = (
-                ", ".join(checkpoint_state_vars) if checkpoint_state_vars else "all"
-            )
+            vars_str = ", ".join(checkpoint_state_vars) if checkpoint_state_vars else "all"
             checkpoint_info = f" | Checkpoint: enabled (interval={checkpoint_interval}s, vars={vars_str})"
-
-        print(
-            f"JobManager: Creating job {job_id} with {total_tasks} tasks{checkpoint_info}"
-        )
+        
+        print(f"JobManager: Creating job {job_id} with {total_tasks} tasks{checkpoint_info}")
 
         # Store func_code in cache for quick access
         self._job_cache[job_id] = func_code
-
+        
         # Store task metadata for checkpoint-aware dispatching
         if task_metadata:
             self._task_metadata_cache[job_id] = task_metadata
@@ -104,13 +100,11 @@ class JobManager:
             "created_at": None,  # Will be set by database
             "checkpoint_enabled": checkpoint_enabled,
             "checkpoint_interval": checkpoint_interval,
-            "checkpoint_state": checkpoint_state_vars,
+            "checkpoint_state": checkpoint_state_vars
         }
 
         # Create job in database (with checkpoint support flag)
-        await _create_job_in_database(
-            job_id, total_tasks, supports_checkpointing=checkpoint_enabled
-        )
+        await _create_job_in_database(job_id, total_tasks, supports_checkpointing=checkpoint_enabled)
 
         # Create tasks in database
         await _create_tasks_for_job(job_id, args_list)
@@ -190,10 +184,7 @@ class JobManager:
 
         async with db_session() as session:
             await db_create_pipeline_job(
-                session,
-                job_id,
-                total_tasks,
-                total_stages,
+                session, job_id, total_tasks, total_stages,
                 supports_checkpointing=checkpoint_enabled,
             )
 
@@ -205,18 +196,16 @@ class JobManager:
         # Set job to running
         await _update_job_status(job_id, "running")
 
-        print(
-            f"JobManager: Pipeline job {job_id} created successfully ({created} tasks)"
-        )
+        print(f"JobManager: Pipeline job {job_id} created successfully ({created} tasks)")
         return created
 
     def get_stage_func_code(self, job_id: str, stage: int) -> Optional[str]:
         """Get function code for a specific pipeline stage.
-
+        
         Args:
             job_id: Job identifier
             stage: Stage index (0-based)
-
+        
         Returns:
             Function code string or None
         """
@@ -242,10 +231,10 @@ class JobManager:
     def get_task_metadata(self, job_id: str) -> Optional[Dict[str, Any]]:
         """
         Get cached task metadata for a job
-
+        
         Args:
             job_id: Job identifier
-
+            
         Returns:
             Task metadata dictionary or None if not found
         """
@@ -330,7 +319,7 @@ class JobManager:
 
         # Update task status back to pending for retry
         # Set worker_id to None so it can be reassigned
-        await _update_task_status(task_id, "pending", error=error)
+        await _update_task_status(task_id, "pending", worker_id=None, error=error)
 
         # Update local metadata
         if job_id in self._job_metadata:
@@ -346,11 +335,10 @@ class JobManager:
             task_id: Task identifier
             worker_id: Worker assigned to the task
         """
-        await _update_task_status(task_id, "assigned")
+        await _update_task_status(task_id, "assigned", worker_id=worker_id)
         # Increment total_tasks_assigned for this worker
         from foreman.db.base import async_session
         from foreman.db.crud import update_worker_tasks_assigned
-
         async with async_session() as session:
             await update_worker_tasks_assigned(session, worker_id)
 

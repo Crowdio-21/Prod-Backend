@@ -27,7 +27,7 @@ from crowdio import crowdio_connect, crowdio_map, crowdio_disconnect, CROWDio
 
 
 @CROWDio.task(
-    checkpoint=False,
+    checkpoint=True,
     checkpoint_interval=2.0,  # Checkpoint every 5 seconds
     checkpoint_state=["trials_completed", "total_count", "estimated_e", "progress_percent"]
 )
@@ -286,7 +286,7 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 5000000  # Default: 100 million trials (reduced for faster testing)
+    total_trials = 500000  # Default: 100 million trials (reduced for faster testing)
     num_workers = 2  # Default: 6 workers
     foreman_host = "localhost"
     
