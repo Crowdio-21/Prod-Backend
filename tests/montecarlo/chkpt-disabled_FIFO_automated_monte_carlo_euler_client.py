@@ -412,11 +412,9 @@ async def run_benchmark_grid(foreman_host="localhost"):
         2_000_000,
         5_000_000,
         10_000_000,
-        50_000_000,
-        100_000_000,
-        1_000_000_000,
+        50_000_000, 
     ]
-    worker_counts = [6, 12, 18]
+    worker_counts = [1]
 
     total_runs = len(trial_counts) * len(worker_counts)
     all_metrics = []

@@ -245,15 +245,38 @@ class WorkerMessageHandler:
             return None, None
 
     async def _get_db_assigned_task_for_worker(self, worker_id: str):
-        """Return (task_id, job_id) if DB still has an assigned task for this worker."""
+        """Return (task_id, job_id) if DB still has a running assignment for this worker.
+
+        NOTE: tasks.worker_id was removed when the replication feature was added.
+        We now query task_assignments directly.
+        """
         try:
-            assigned_tasks = await _get_assigned_tasks()
-            for task in assigned_tasks:
-                if getattr(task, "worker_id", None) == worker_id:
+            from foreman.db.base import async_session
+            from foreman.db.crud import get_active_assignments_for_task
+            from foreman.db.models import TaskAssignmentModel, TaskModel
+            from sqlalchemy import select, and_
+
+            async with async_session() as session:
+                result = await session.execute(
+                    select(TaskAssignmentModel, TaskModel)
+                    .join(TaskModel, TaskAssignmentModel.task_id == TaskModel.id)
+                    .where(
+                        and_(
+                            TaskAssignmentModel.worker_id == worker_id,
+                            TaskAssignmentModel.status == "running",
+                            TaskModel.status == "assigned",
+                        )
+                    )
+                    .order_by(TaskAssignmentModel.assigned_at.desc())
+                    .limit(1)
+                )
+                row = result.first()
+                if row:
+                    assignment, task = row
                     return task.id, task.job_id
         except Exception as e:
             print(
-                f"WorkerMessageHandler: Error querying assigned task for {worker_id}: {e}"
+                f"WorkerMessageHandler: Error querying running assignment for {worker_id}: {e}"
             )
         return None, None
 
@@ -532,6 +555,10 @@ class WorkerMessageHandler:
                 self.connection_manager.clear_worker_active_task(worker_id)
                 self.connection_manager.mark_worker_available(worker_id)
                 await _update_worker_status(worker_id, "online", current_task_id=None)
+                # Worker is now free — still needs to be dispatched a new task.
+                # Without this call the loser sits idle permanently (no further
+                # event would trigger assignment for it).
+                await self.task_dispatcher.assign_task_to_available_worker(worker_id)
                 return
 
             await _update_worker_task_stats(worker_id, task_completed=True)
@@ -620,11 +647,25 @@ class WorkerMessageHandler:
             # Check if any other workers are still running this task
             remaining = await _get_active_assignments_for_task(task_id)
             if not remaining:
-                # No one is running the task any more — reset to pending
-                print(
-                    f"[Kill] No remaining runners for task {task_id}, resetting to pending"
-                )
-                await _update_task_status(task_id, "pending")
+                # No running assignments left.  Only reset to pending if the task
+                # has not already been completed by a winner.  Without this guard,
+                # the loser's KILL_ACK could arrive after the winner set the task
+                # to 'completed', and we would incorrectly re-queue it.
+                from foreman.db.base import async_session
+                from foreman.db.crud import get_task_by_id
+
+                async with async_session() as session:
+                    task_row = await get_task_by_id(session, task_id)
+                if task_row and task_row.status != "completed":
+                    print(
+                        f"[Kill] No remaining runners for task {task_id}, resetting to pending"
+                    )
+                    await _update_task_status(task_id, "pending")
+                else:
+                    print(
+                        f"[Kill] No remaining runners for task {task_id}, "
+                        f"but task is already '{getattr(task_row, 'status', 'unknown')}' — skipping reset"
+                    )
             else:
                 print(
                     f"[Kill] Task {task_id} still has {len(remaining)} active replica(s), leaving as assigned"

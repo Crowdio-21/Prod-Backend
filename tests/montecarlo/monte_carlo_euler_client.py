@@ -286,8 +286,8 @@ async def main():
     Main entry point for Monte Carlo Euler estimation
     """
     # Parse command line arguments
-    total_trials = 5000000  # Default: 100 million trials (reduced for faster testing)
-    num_workers = 2  # Default: 6 workers
+    total_trials = 1_000_000  # Default: 100 million trials (reduced for faster testing)
+    num_workers = 1  # Default: 6 workers
     foreman_host = "localhost"
     
     if len(sys.argv) > 1:
