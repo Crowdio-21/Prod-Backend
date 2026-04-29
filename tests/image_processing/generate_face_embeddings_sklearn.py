@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-r"""Generate OpenCV face signatures from one or more reference images.
+r"""Generate LBP face embeddings for sklearn-based face search.
 
 This script produces embeddings compatible with:
-tests/image_processing/local_mobile_face_search_opencv.py
+tests/image_processing/local_mobile_face_search_sklearn.py
 
 Method:
 - Detect faces with OpenCV Haar cascade.
-- Build a normalized LBP signature from the detected face ROI.
+- Build a normalized LBP signature from each selected face ROI.
 - Save signatures as list[list[float]] JSON.
 
 Output format by default:
@@ -14,9 +14,9 @@ Output format by default:
 
 Example:
   c:\Users\User\Prod-Backend\.venv\Scripts\python.exe \
-        tests\image_processing\generate_face_embeddings_opencv.py \
+        tests\image_processing\generate_face_embeddings_sklearn.py \
         --images-dir "C:\Users\User\Prod-Backend\tests\image_processing\child" \
-    --output "C:\Users\User\Prod-Backend\tests\image_processing\pipeline_output\child_embeddings.json"
+        --output "C:\Users\User\Prod-Backend\tests\image_processing\pipeline_output\child_embeddings_sklearn.json"
 """
 
 from __future__ import annotations
@@ -32,22 +32,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate OpenCV face-signature embeddings for child reference images."
+        description="Generate LBP embeddings for sklearn face search from reference images."
     )
+    parser.add_argument("--image", default=None, help="Path to one reference image.")
     parser.add_argument(
-        "--image",
-        default=None,
-        help="Path to one reference image.",
-    )
-    parser.add_argument(
-        "--images-dir",
-        default=None,
-        help="Path to a directory of reference images.",
+        "--images-dir", default=None, help="Path to a directory of reference images."
     )
     parser.add_argument(
         "--output",
         required=True,
-        help="Output JSON file path. The file will contain a list[list[float]].",
+        help="Output JSON file path. The file will contain list[list[float]].",
     )
     parser.add_argument(
         "--recursive",
@@ -64,7 +58,13 @@ def parse_args() -> argparse.Namespace:
         "--signature-face-size",
         type=int,
         default=64,
-        help="Face ROI size before DCT signature extraction.",
+        help="Face ROI size before LBP extraction.",
+    )
+    parser.add_argument(
+        "--lbp-grid",
+        type=int,
+        default=8,
+        help="LBP cell grid size. Embedding length = grid * grid * 32.",
     )
     parser.add_argument(
         "--all-faces",
@@ -80,13 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-metadata",
         action="store_true",
-        help="Write a metadata object instead of plain list output.",
-    )
-    parser.add_argument(
-        "--lbp-grid",
-        type=int,
-        default=8,
-        help="LBP cell grid size. Embedding length = grid * grid * 32.",
+        help="Write metadata object instead of plain list output.",
     )
     return parser.parse_args()
 
@@ -118,14 +112,14 @@ def imread_unicode(path: str, cv2: Any, np: Any) -> Any:
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
-def extract_face_signature(
+def extract_face_signature_lbp(
     gray_image: Any,
     x: int,
     y: int,
     w: int,
     h: int,
     face_size: int,
-    grid: int,
+    lbp_grid: int,
     cv2: Any,
     np: Any,
 ) -> list[float] | None:
@@ -136,28 +130,33 @@ def extract_face_signature(
     face = cv2.resize(roi, (face_size, face_size), interpolation=cv2.INTER_AREA)
     face = cv2.equalizeHist(face)
 
-    # Compute LBP
+    # Compute 8-neighbor LBP code per pixel.
     lbp = np.zeros_like(face, dtype=np.uint8)
     for i in range(1, face_size - 1):
         for j in range(1, face_size - 1):
             center = face[i, j]
             neighbors = [
-                face[i-1,j-1], face[i-1,j], face[i-1,j+1],
-                face[i,  j+1], face[i+1,j+1], face[i+1,j],
-                face[i+1,j-1], face[i,  j-1],
+                face[i - 1, j - 1],
+                face[i - 1, j],
+                face[i - 1, j + 1],
+                face[i, j + 1],
+                face[i + 1, j + 1],
+                face[i + 1, j],
+                face[i + 1, j - 1],
+                face[i, j - 1],
             ]
             code = 0
             for k, n in enumerate(neighbors):
                 if n >= center:
-                    code |= (1 << k)
+                    code |= 1 << k
             lbp[i, j] = code
 
-    # Grid-cell histograms
-    cell_h, cell_w = face_size // grid, face_size // grid
+    # Build per-cell histograms and concatenate.
+    cell_h, cell_w = face_size // lbp_grid, face_size // lbp_grid
     hist_parts = []
-    for r in range(grid):
-        for c in range(grid):
-            cell = lbp[r*cell_h:(r+1)*cell_h, c*cell_w:(c+1)*cell_w]
+    for r in range(lbp_grid):
+        for c in range(lbp_grid):
+            cell = lbp[r * cell_h : (r + 1) * cell_h, c * cell_w : (c + 1) * cell_w]
             hist, _ = np.histogram(cell, bins=32, range=(0, 256))
             h_vec = hist.astype(np.float32)
             n = np.linalg.norm(h_vec)
@@ -228,7 +227,7 @@ def main() -> None:
             selected = [(idx, faces_sorted[idx])]
 
         for face_id, (x, y, w, h) in selected:
-            signature = extract_face_signature(
+            signature = extract_face_signature_lbp(
                 gray,
                 x,
                 y,
@@ -254,13 +253,15 @@ def main() -> None:
     if not embeddings:
         raise SystemExit("No usable face signatures generated from the provided images")
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    output_dir = os.path.dirname(args.output)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     expected_dim = args.lbp_grid * args.lbp_grid * 32
 
     if args.include_metadata:
         payload = {
-            "method": "opencv_haar_lbp",
+            "method": "opencv_haar_lbp_sklearn",
             "images_input_count": len(image_paths),
             "face_count": len(embeddings),
             "embedding_dim": expected_dim,
@@ -277,7 +278,7 @@ def main() -> None:
         json.dump(payload, fh, indent=2)
 
     print(f"Saved {len(embeddings)} embedding(s) -> {args.output}")
-    print("method=opencv_haar_lbp")
+    print("method=opencv_haar_lbp_sklearn")
     print(f"embedding_dim={expected_dim}")
     print(f"images_scanned={len(image_paths)}")
 

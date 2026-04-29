@@ -1,4 +1,14 @@
-import sys
+MAX_RESULTS = 20
+TOP_K_NEIGHBORS = 3
+RECURSIVE = True
+SUPPORTED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif"]
+MIN_FACE_SIZE = 10
+MAX_FACE_SIZE = 3000          # FIX 3: Reject implausibly large detections (0 = no limit)
+SIGNATURE_FACE_SIZE = 64
+LBP_GRID = 8
+SIGNATURE_DIM = LBP_GRID * LBP_GRID * 32
+NMS_OVERLAP_THRESHOLD = 0.3  # FIX 2: IoU threshold for Non-Maximum Suppression
+BEST_MATCH_PER_IMAGE = True  # FIX 4: Return only best-scoring face per imageimport sys
 import os
 import asyncio
 import time
