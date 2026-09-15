@@ -53,6 +53,7 @@ class PipelineStage:
         pass_upstream_results: bool = False,
         task_metadata: Optional[Dict[str, Any]] = None,
         name: Optional[str] = None,
+        streaming: bool = False,
     ):
         """
         Args:
@@ -73,6 +74,7 @@ class PipelineStage:
         self.pass_upstream_results = pass_upstream_results
         self.task_metadata = task_metadata
         self.name = name
+        self.streaming = streaming
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +83,7 @@ class PipelineStage:
             "pass_upstream_results": self.pass_upstream_results,
             "task_metadata": self.task_metadata,
             "name": self.name,
+            "streaming": self.streaming,
         }
 
     @classmethod
@@ -91,6 +94,7 @@ class PipelineStage:
             pass_upstream_results=data.get("pass_upstream_results", False),
             task_metadata=data.get("task_metadata"),
             name=data.get("name"),
+            streaming=data.get("streaming", False),
         )
 
 
@@ -181,15 +185,43 @@ class DependencyManager:
                         # Explicit dependency map
                         depends_on = dependency_map[task_id]
                     elif stage_idx > 0:
-                        # Default: depend on ALL tasks in previous stage
-                        depends_on = stage_task_ids[stage_idx - 1]
+                        previous_stage_ids = stage_task_ids[stage_idx - 1]
+                        previous_stage = stages[stage_idx - 1]
+                        current_stage_is_streaming = (
+                            stage.streaming
+                            or previous_stage.streaming
+                            or stage.pass_upstream_results
+                        )
+
+                        if (
+                            current_stage_is_streaming
+                            and len(previous_stage_ids) == len(stage.args_list)
+                        ):
+                            # Streaming pipeline: input i only waits for input i
+                            # from the preceding stage.
+                            depends_on = [previous_stage_ids[task_local_idx]]
+                        else:
+                            # Barrier/fan-in pipeline: wait for every upstream task.
+                            depends_on = previous_stage_ids
                     else:
                         depends_on = []
 
                     # Determine downstream dependents
                     if stage_idx < len(stages) - 1:
-                        # Default: all tasks in next stage depend on me
-                        dependents = stage_task_ids[stage_idx + 1]
+                        next_stage_ids = stage_task_ids[stage_idx + 1]
+                        next_stage = stages[stage_idx + 1]
+                        next_stage_is_streaming = (
+                            stage.streaming
+                            or next_stage.streaming
+                            or next_stage.pass_upstream_results
+                        )
+                        if (
+                            next_stage_is_streaming
+                            and len(next_stage_ids) == len(stage.args_list)
+                        ):
+                            dependents = [next_stage_ids[task_local_idx]]
+                        else:
+                            dependents = next_stage_ids
                     else:
                         dependents = []
 

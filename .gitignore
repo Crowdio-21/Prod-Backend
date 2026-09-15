@@ -199,6 +199,12 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Generated ONNX sentiment pipeline artifacts
+tools/onnx_partitions_sentiment/*.onnx
+tools/onnx_partitions_sentiment/*.npy
+tools/onnx_partitions_sentiment/partition_metadata.json
+tools/onnx_partitions_sentiment/tokenizer*
+
 # PyPI configuration file
 .pypirc
 
