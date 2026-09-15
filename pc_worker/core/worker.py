@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import types
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -14,7 +15,7 @@ import websockets
 from fastapi import WebSocketDisconnect
 
 from common.protocol import Message, MessageType
-from common.serializer import deserialize_function_for_PC, get_runtime_info
+from common.serializer import get_runtime_info
 from ..config import WorkerConfig
 from ..schema.models import TaskResult
 from .app import create_app
@@ -39,7 +40,7 @@ class FastAPIWorker:
             "started_at": datetime.now(),
             "task_durations": [],  # Track individual task durations for MCDM
         }
-        
+
         # Initialize checkpoint handler with 5 second intervals
         self.checkpoint_handler = CheckpointHandler(checkpoint_interval=5.0)
 
@@ -220,17 +221,17 @@ class FastAPIWorker:
             job_id = message.job_id
             func_code = message.data["func_code"]
             task_args = message.data["task_args"]
-            
+
             # Extract task metadata for declarative checkpointing
             task_metadata = message.data.get("task_metadata", {})
             checkpoint_enabled = task_metadata.get("checkpoint_enabled", True)
             checkpoint_interval = task_metadata.get("checkpoint_interval", 5.0)
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
-            
+
             print(
                 f"📋 Received task {task_id} for job {job_id} | worker_runtime={get_runtime_info()}"
             )
-            
+
             if task_metadata:
                 print(f"   Checkpoint: {'enabled' if checkpoint_enabled else 'disabled'} | "
                       f"Interval: {checkpoint_interval}s | "
@@ -238,7 +239,7 @@ class FastAPIWorker:
 
             # Set current task
             self.current_task = {
-                "task_id": task_id, 
+                "task_id": task_id,
                 "job_id": job_id,
                 "task_metadata": task_metadata
             }
@@ -261,7 +262,7 @@ class FastAPIWorker:
                 job_id=job_id,
             )
             await self.websocket.send(result_message.to_json())
-            
+
             # Small delay to ensure message is transmitted
             await asyncio.sleep(0.1)
 
@@ -287,7 +288,7 @@ class FastAPIWorker:
     async def _handle_task_resume(self, message: Message):
         """
         Handle a task resumption from foreman.
-        
+
         This is similar to task assignment but restores the checkpoint state
         so the worker can continue from where the previous worker left off.
         """
@@ -298,7 +299,7 @@ class FastAPIWorker:
             checkpoint_state = message.data.get("checkpoint_state", {})
             progress_percent = message.data.get("progress_percent", 0)
             checkpoint_count = message.data.get("checkpoint_count", 0)
-            
+
             # Extract task metadata for declarative checkpointing
             task_metadata = message.data.get("task_metadata", {})
             recovery_status = message.data.get("recovery_status", "resumed")
@@ -308,7 +309,7 @@ class FastAPIWorker:
                 f"(progress: {progress_percent:.1f}%, checkpoints: {checkpoint_count}, "
                 f"status: {recovery_status}) | worker_runtime={get_runtime_info()}"
             )
-            
+
             # Log checkpoint state contents
             if checkpoint_state:
                 print(f"Checkpoint state keys: {list(checkpoint_state.keys())}")
@@ -324,8 +325,8 @@ class FastAPIWorker:
 
             # Set current task
             self.current_task = {
-                "task_id": task_id, 
-                "job_id": job_id, 
+                "task_id": task_id,
+                "job_id": job_id,
                 "is_resume": True,
                 "task_metadata": task_metadata
             }
@@ -350,7 +351,7 @@ class FastAPIWorker:
                 job_id=job_id,
             )
             await self.websocket.send(result_message.to_json())
-            
+
             # Small delay to ensure message is transmitted
             await asyncio.sleep(0.1)
 
@@ -376,17 +377,51 @@ class FastAPIWorker:
             self.current_task = None
 
     # ---------- Task execution ----------
+    @staticmethod
+    def _deserialize_task_function(
+        func_code: str,
+        task_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Deserialize the user task instead of a prepended runtime helper."""
+        preferred_name = (task_metadata or {}).get("_func_name")
+        namespace: Dict[str, Any] = {"__builtins__": __builtins__}
+        exec(func_code, namespace)
+
+        if preferred_name:
+            preferred = namespace.get(preferred_name)
+            if isinstance(preferred, types.FunctionType):
+                return preferred
+
+        internal_names = {
+            "pause",
+            "resume",
+            "kill",
+            "_ckpt_update",
+            "_TaskControl",
+        }
+        candidates = [
+            value
+            for name, value in namespace.items()
+            if isinstance(value, types.FunctionType) and name not in internal_names
+        ]
+        if not candidates:
+            raise ValueError("No user task function could be deserialized")
+
+        # Runtime wrappers are prepended; the task function is the last
+        # top-level function in legacy messages without task metadata.
+        return candidates[-1]
+
     async def _execute_task(
-        self, 
-        func_code: str, 
-        task_args: List[Any], 
-        task_id: str, 
+        self,
+        func_code: str,
+        task_args: List[Any],
+        task_id: str,
         job_id: str,
         task_metadata: Optional[Dict[str, Any]] = None
     ) -> Any:
         """
         Execute a task in a safe environment with declarative checkpointing support
-        
+
         Args:
             func_code: Serialized function code
             task_args: Arguments for the task
@@ -395,52 +430,52 @@ class FastAPIWorker:
             task_metadata: Checkpoint configuration from @task decorator
         """
         start_time = datetime.now()
-        
+
         # Extract checkpoint configuration
         checkpoint_enabled = True
         checkpoint_interval = 5.0
         checkpoint_state_vars = []
-        
+
         if task_metadata:
             checkpoint_enabled = task_metadata.get("checkpoint_enabled", True)
             checkpoint_interval = task_metadata.get("checkpoint_interval", 5.0)
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
-            
+
             # Update checkpoint handler interval
             self.checkpoint_handler.checkpoint_interval = checkpoint_interval
-        
+
         # Shared state container for frame introspection
         # This will be updated by the execution wrapper
         _captured_locals = {"_locals": {}, "_frame": None}
-        
+
         # Define state getter that uses frame introspection
         def get_task_state() -> Dict[str, Any]:
             """Get current task state by inspecting captured locals"""
             try:
                 import sys
                 import ctypes
-                
+
                 # Try to get locals from the captured frame
                 frame = _captured_locals.get("_frame")
                 if frame is not None:
                     try:
                         # Get current local variables from the frame
                         locals_dict = frame.f_locals
-                        
+
                         # Filter to only declared checkpoint variables
                         state = {}
                         for var in checkpoint_state_vars:
                             if var in locals_dict:
                                 state[var] = locals_dict[var]
-                        
+
                         # Always include progress_percent if available
                         if "progress_percent" in locals_dict:
                             state["progress_percent"] = locals_dict["progress_percent"]
-                        
+
                         return state if state else {"progress_percent": 0.0}
                     except Exception as e:
                         pass
-                
+
                 # Fallback to captured locals snapshot
                 locals_snapshot = _captured_locals.get("_locals", {})
                 if locals_snapshot:
@@ -451,40 +486,40 @@ class FastAPIWorker:
                     if "progress_percent" in locals_snapshot:
                         state["progress_percent"] = locals_snapshot["progress_percent"]
                     return state if state else {"progress_percent": 0.0}
-                
+
                 return {"progress_percent": 0.0}
             except Exception as e:
                 print(f"[warning] Could not get checkpoint state: {e}")
                 return {"progress_percent": 0.0}
-        
+
         # Get reference to the main event loop for cross-thread communication
         main_loop = asyncio.get_event_loop()
-        
+
         # Define checkpoint sender
         def send_checkpoint(checkpoint_msg: Dict[str, Any]) -> None:
             """Send checkpoint to foreman (thread-safe for cross-thread calls)"""
             try:
                 from common.protocol import create_task_checkpoint_message
-                
+
                 message = create_task_checkpoint_message(
                     task_id=task_id,
                     job_id=job_id,
                     **checkpoint_msg
                 )
-                
+
                 if self.websocket and not self.websocket.closed:
                     future = asyncio.run_coroutine_threadsafe(
                         self.websocket.send(message.to_json()),
                         main_loop
                     )
                     future.result(timeout=5.0)
-                    
+
                     checkpoint_id = checkpoint_msg.get("checkpoint_id", 0)
                     progress = checkpoint_msg.get("progress_percent", 0)
                     is_base = checkpoint_msg.get("is_base", False)
                     checkpoint_type = "BASE" if is_base else "DELTA"
-                    
-                    print(f"[Checkpoint] Resumed task {task_id} | {checkpoint_type} #{checkpoint_id} | "
+
+                    print(f"[Checkpoint] Task {task_id} | {checkpoint_type} #{checkpoint_id} | "
                           f"Progress: {progress:.1f}%")
             except Exception as e:
                 print(f"[Error] Error sending checkpoint: {e}")
@@ -496,9 +531,9 @@ class FastAPIWorker:
                 print(f"   Checkpoint config: enabled={checkpoint_enabled}, interval={checkpoint_interval}s, vars={vars_info}")
 
             # Deserialize the function
-            func = deserialize_function_for_PC(func_code)
+            func = self._deserialize_task_function(func_code, task_metadata)
             func_name = func.__name__
-            
+
             # Start checkpoint monitoring in background (if enabled)
             if checkpoint_enabled:
                 await self.checkpoint_handler.start_checkpoint_monitoring(
@@ -513,10 +548,10 @@ class FastAPIWorker:
 
             # Create wrapper that uses trace function to capture locals
             import sys
-            
+
             def execute_with_trace(func, args):
                 """Execute function with trace to capture local variables"""
-                
+
                 def trace_calls(frame, event, arg):
                     """Trace function that captures locals from the task function"""
                     # Only trace the task function, not all calls
@@ -525,23 +560,33 @@ class FastAPIWorker:
                             # Capture current locals
                             _captured_locals["_locals"] = dict(frame.f_locals)
                     return trace_calls
-                
+
                 # Set trace and execute
                 old_trace = sys.gettrace()
                 try:
                     sys.settrace(trace_calls)
-                    
+
                     # Execute the actual function
+                    # NOTE: task_args as received over the wire may be:
+                    #   - a list with a single positional arg: [num_trials]
+                    #   - a list with [args_list, kwargs_dict]: [[1,2], {"k": "v"}]
+                    #   - a list of multiple positional args: [a, b, c]
+                    #   - a bare scalar (int/float/str/dict/etc.) when the caller
+                    #     passed a single non-list argument (e.g. crowdio_map with
+                    #     a plain list of ints as task inputs)
                     if isinstance(args, list) and len(args) == 1:
                         return func(args[0])
                     elif isinstance(args, list) and len(args) == 2 and isinstance(args[1], dict):
                         a, kw = args
                         return func(*a, **kw)
-                    else:
+                    elif isinstance(args, list):
                         return func(*args)
+                    else:
+                        # Single scalar argument - call directly, do NOT unpack
+                        return func(args)
                 finally:
                     sys.settrace(old_trace)
-            
+
             # Execute the function with trace-based capture
             result = await asyncio.to_thread(execute_with_trace, func, task_args)
 
@@ -558,7 +603,7 @@ class FastAPIWorker:
 
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Resumed task execution failed: {e}"
+            error_msg = f"Task execution failed: {e}"
 
             print(f"[Error] Task failed: {error_msg}")
 
@@ -566,13 +611,13 @@ class FastAPIWorker:
             self.stats["total_execution_time"] += execution_time
 
             raise Exception(error_msg)
-        
+
         finally:
             # Stop checkpoint monitoring
             if checkpoint_enabled:
                 await self.checkpoint_handler.stop_checkpoint_monitoring()
                 print(f"[Info] Checkpoint monitoring stopped for task {task_id}")
-            
+
             # Clean up captured frame reference
             _captured_locals["_frame"] = None
             _captured_locals["_locals"] = {}
@@ -585,75 +630,75 @@ class FastAPIWorker:
     ) -> str:
         """
         Transform function code to resume from checkpoint by modifying AST.
-        
+
         This makes checkpoint resume COMPLETELY TRANSPARENT to the user.
         The user writes pure logic, and the framework handles resume automatically.
-        
+
         Transformations applied:
         1. Replace initial variable assignments with checkpoint values
         2. Adjust for-loop ranges to start from checkpointed position
-        
+
         Args:
             func_code: Original function source code
             checkpoint_state: Dictionary with saved checkpoint state
             checkpoint_state_vars: List of variable names being checkpointed
-            
+
         Returns:
             Transformed function code that will resume from checkpoint
         """
         import ast
         import re
-        
+
         try:
             # Parse the function code
             tree = ast.parse(func_code)
-            
+
             # Find the function definition
             func_def = None
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef):
                     func_def = node
                     break
-            
+
             if not func_def:
                 print(f"[Resume] Could not find function definition, using original code")
                 return func_code
-            
+
             # Track which variables we've modified and their checkpoint values
             vars_to_inject = {}
             for var in checkpoint_state_vars:
                 if var in checkpoint_state:
                     vars_to_inject[var] = checkpoint_state[var]
-            
+
             # Also check for progress_percent
             if "progress_percent" in checkpoint_state:
                 vars_to_inject["progress_percent"] = checkpoint_state["progress_percent"]
-            
+
             print(f"[Resume] Injecting checkpoint values: {list(vars_to_inject.keys())}")
-            
+
             # Determine the loop index variable and its start value
             # We use progress_percent to calculate where to resume
             progress = checkpoint_state.get("progress_percent", 0)
-            
+
             # Create a code transformer
             class ResumeTransformer(ast.NodeTransformer):
                 def __init__(self):
                     self.in_function = False
                     self.modified_vars = set()
                     self.found_main_loop = False
-                    
+
                 def visit_FunctionDef(self, node):
                     if node.name == func_def.name:
                         self.in_function = True
                         self.generic_visit(node)
                         self.in_function = False
                     return node
-                
+
                 def visit_Assign(self, node):
                     """Replace initial variable assignments with checkpoint values"""
                     if not self.in_function:
                         return node
-                    
+
                     # Check if this is a simple assignment to a checkpointed variable
                     if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                         var_name = node.targets[0].id
@@ -665,14 +710,14 @@ class FastAPIWorker:
                                 node.value = new_value
                                 self.modified_vars.add(var_name)
                                 print(f"[Resume] Injected {var_name} = {repr(value)[:50]}")
-                    
+
                     return node
-                
+
                 def visit_For(self, node):
                     """Adjust for-loop range to start from checkpoint position"""
                     if not self.in_function or self.found_main_loop:
                         return node
-                    
+
                     # Check if this is a for loop with range()
                     if isinstance(node.iter, ast.Call):
                         func = node.iter.func
@@ -680,23 +725,23 @@ class FastAPIWorker:
                             # Calculate start position from progress
                             # We need to find the total (end of range)
                             args = node.iter.args
-                            
+
                             if len(args) >= 1:
                                 # Get the loop variable name
                                 if isinstance(node.target, ast.Name):
                                     loop_var = node.target.id
-                                    
+
                                     # Calculate start position based on progress
                                     # progress_percent = (completed / total) * 100
                                     # completed = progress_percent * total / 100
-                                    
+
                                     # We'll inject a calculation at the start
                                     self.found_main_loop = True
-                                    
+
                                     # Modify the range to include a start value
                                     # range(n) -> range(_resume_start, n)
                                     # range(start, end) -> range(max(start, _resume_start), end)
-                                    
+
                                     if len(args) == 1:
                                         # range(n) -> range(_resume_start_, n)
                                         end_arg = args[0]
@@ -716,7 +761,7 @@ class FastAPIWorker:
                                         )
                                         node.iter.args = [start_expr, end_arg]
                                         print(f"[Resume] Modified range() to start from {progress:.1f}%")
-                                    
+
                                     elif len(args) == 2:
                                         # range(start, end) -> range(max(start, calculated), end)
                                         orig_start, end_arg = args
@@ -742,10 +787,10 @@ class FastAPIWorker:
                                         )
                                         node.iter.args = [start_expr, end_arg]
                                         print(f"[Resume] Modified range(start, end) to resume from {progress:.1f}%")
-                    
+
                     self.generic_visit(node)
                     return node
-                
+
                 def _create_ast_value(self, value):
                     """Create an AST node for a Python value"""
                     if isinstance(value, (int, float, str, bool, type(None))):
@@ -769,24 +814,24 @@ class FastAPIWorker:
                         # For complex objects, we can't easily inject them
                         # Return None to skip injection
                         return None
-            
+
             # Apply transformations
             transformer = ResumeTransformer()
             transformed_tree = transformer.visit(tree)
-            
+
             # Fix missing line numbers
             ast.fix_missing_locations(transformed_tree)
-            
+
             # Convert back to code using ast.unparse (Python 3.9+)
             try:
                 transformed_code = ast.unparse(transformed_tree)
             except AttributeError:
                 print(f"[Resume] Could not convert AST back to code (requires Python 3.9+), using original")
                 return func_code
-            
+
             print(f"[Resume] Code transformation successful")
             return transformed_code
-            
+
         except Exception as e:
             print(f"[Resume] Code transformation failed: {e}, using original code")
             import traceback
@@ -794,73 +839,73 @@ class FastAPIWorker:
             return func_code
 
     async def _execute_resumed_task(
-        self, 
-        func_code: str, 
-        checkpoint_state: dict, 
-        task_id: str, 
+        self,
+        func_code: str,
+        checkpoint_state: dict,
+        task_id: str,
         job_id: str,
         task_metadata: Optional[Dict[str, Any]] = None
     ) -> Any:
         """
         Execute a resumed task, continuing from checkpoint state.
-        
+
         Uses trace-based capture to automatically capture local variables,
         just like _execute_task, but pre-loads the checkpoint state.
-        
+
         Args:
             func_code: Serialized function code
             checkpoint_state: Dictionary with saved state from last checkpoint
             task_id: Task identifier
             job_id: Job identifier
             task_metadata: Checkpoint configuration from @task decorator
-            
+
         Returns:
             Task result
         """
         start_time = datetime.now()
-        
+
         # Extract checkpoint configuration
         checkpoint_enabled = True
         checkpoint_interval = 5.0
         checkpoint_state_vars = []
-        
+
         if task_metadata:
             checkpoint_enabled = task_metadata.get("checkpoint_enabled", True)
             checkpoint_interval = task_metadata.get("checkpoint_interval", 5.0)
             checkpoint_state_vars = task_metadata.get("checkpoint_state", [])
             self.checkpoint_handler.checkpoint_interval = checkpoint_interval
-        
+
         # Shared state container for frame introspection (same as _execute_task)
         _captured_locals = {"_locals": {}, "_frame": None}
-        
+
         # Define state getter that uses frame introspection (same as _execute_task)
         def get_task_state() -> Dict[str, Any]:
             """Get current task state by inspecting captured locals"""
             try:
                 import sys
                 import ctypes
-                
+
                 # Try to get locals from the captured frame
                 frame = _captured_locals.get("_frame")
                 if frame is not None:
                     try:
                         # Get current local variables from the frame
                         locals_dict = frame.f_locals
-                        
+
                         # Filter to only declared checkpoint variables
                         state = {}
                         for var in checkpoint_state_vars:
                             if var in locals_dict:
                                 state[var] = locals_dict[var]
-                        
+
                         # Always include progress_percent if available
                         if "progress_percent" in locals_dict:
                             state["progress_percent"] = locals_dict["progress_percent"]
-                        
+
                         return state if state else {"progress_percent": 0.0}
                     except Exception as e:
                         pass
-                
+
                 # Fallback to captured locals snapshot
                 locals_snapshot = _captured_locals.get("_locals", {})
                 if locals_snapshot:
@@ -871,39 +916,39 @@ class FastAPIWorker:
                     if "progress_percent" in locals_snapshot:
                         state["progress_percent"] = locals_snapshot["progress_percent"]
                     return state if state else {"progress_percent": 0.0}
-                
+
                 return {"progress_percent": 0.0}
             except Exception as e:
                 print(f"⚠️ Could not get checkpoint state: {e}")
                 return {"progress_percent": 0.0}
-        
+
         # Get reference to the main event loop for cross-thread communication
         main_loop = asyncio.get_event_loop()
-        
+
         # Define checkpoint sender
         def send_checkpoint(checkpoint_msg: Dict[str, Any]) -> None:
             """Send checkpoint to foreman (thread-safe for cross-thread calls)"""
             try:
                 from common.protocol import create_task_checkpoint_message
-                
+
                 message = create_task_checkpoint_message(
                     task_id=task_id,
                     job_id=job_id,
                     **checkpoint_msg
                 )
-                
+
                 if self.websocket and not self.websocket.closed:
                     future = asyncio.run_coroutine_threadsafe(
                         self.websocket.send(message.to_json()),
                         main_loop
                     )
                     future.result(timeout=5.0)
-                    
+
                     checkpoint_id = checkpoint_msg.get("checkpoint_id", 0)
                     progress = checkpoint_msg.get("progress_percent", 0)
                     is_base = checkpoint_msg.get("is_base", False)
                     checkpoint_type = "BASE" if is_base else "DELTA"
-                    
+
                     print(f"[Checkpoint] Resumed task {task_id} | {checkpoint_type} #{checkpoint_id} | "
                           f"Progress: {progress:.1f}%")
             except Exception as e:
@@ -920,16 +965,16 @@ class FastAPIWorker:
             # The user's code is automatically modified to resume from checkpoint
             # No manual resume logic needed in user code!
             # ================================================================
-            
+
             # Transform the function code to inject checkpoint values
             transformed_code = self._transform_code_for_resume(
                 func_code, checkpoint_state, checkpoint_state_vars
             )
-            
+
             # Deserialize the transformed function
-            func = deserialize_function_for_PC(transformed_code)
+            func = self._deserialize_task_function(transformed_code, task_metadata)
             func_name = func.__name__
-            
+
             # Start checkpoint monitoring in background (if enabled)
             if checkpoint_enabled:
                 await self.checkpoint_handler.start_checkpoint_monitoring(
@@ -944,7 +989,7 @@ class FastAPIWorker:
 
             # Get original task args from checkpoint or message
             original_task_args = checkpoint_state.get("_original_task_args")
-            
+
             # For backwards compatibility, try to get num_trials or other common arg names
             if original_task_args is None:
                 # Try to find the original argument from checkpoint state
@@ -953,18 +998,18 @@ class FastAPIWorker:
                     # Calculate from progress_percent if we have total info
                     # Default fallback
                     num_trials = 125000
-                original_task_args = [num_trials]
-            
+                original_task_args = num_trials
+
             progress = checkpoint_state.get('progress_percent', 0)
             print(f"[Resume] Resuming from {progress:.1f}% progress")
             print(f"[Resume] Original args: {original_task_args}")
 
             # Create wrapper that uses trace function to capture locals (same as _execute_task)
             import sys
-            
+
             def execute_with_trace(func, args):
                 """Execute function with trace to capture local variables"""
-                
+
                 def trace_calls(frame, event, arg):
                     """Trace function that captures locals from the task function"""
                     # Only trace the task function, not all calls
@@ -973,20 +1018,23 @@ class FastAPIWorker:
                             # Capture current locals
                             _captured_locals["_locals"] = dict(frame.f_locals)
                     return trace_calls
-                
+
                 # Set trace and execute
                 old_trace = sys.gettrace()
                 try:
                     sys.settrace(trace_calls)
-                    
+
                     # Execute the actual function
                     if isinstance(args, list) and len(args) == 1:
                         return func(args[0])
                     elif isinstance(args, list) and len(args) == 2 and isinstance(args[1], dict):
                         a, kw = args
                         return func(*a, **kw)
-                    else:
+                    elif isinstance(args, list):
                         return func(*args)
+                    else:
+                        # Single scalar argument - call directly, do NOT unpack
+                        return func(args)
                 finally:
                     sys.settrace(old_trace)
 
@@ -1017,13 +1065,13 @@ class FastAPIWorker:
             self.stats["total_execution_time"] += execution_time
 
             raise Exception(error_msg)
-        
+
         finally:
             # Stop checkpoint monitoring
             if checkpoint_enabled:
                 await self.checkpoint_handler.stop_checkpoint_monitoring()
                 print(f"Checkpoint monitoring stopped for resumed task {task_id}")
-            
+
             # Clean up captured frame reference
             _captured_locals["_frame"] = None
             _captured_locals["_locals"] = {}
@@ -1083,7 +1131,7 @@ class FastAPIWorker:
                 print("WebSocket closed during heartbeat, reconnecting...")
                 self.is_connected = False
                 break
-            except Exception as e: 
+            except Exception as e:
                 print(f"Error sending heartbeat: {e}")
                 await asyncio.sleep(self.config.heartbeat_interval)
                 break
