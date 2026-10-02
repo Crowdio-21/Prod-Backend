@@ -7,6 +7,7 @@ import asyncio
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -104,11 +105,19 @@ def extract_tensor_payload(node: Any) -> Optional[dict]:
     return None
 
 
+@CROWDio.task(
+    checkpoint=True,
+    checkpoint_interval=5.0,
+    checkpoint_state=["model_path", "execution_stage", "progress_percent"],
+)
 def run_onnx_partition(stage_input: dict) -> dict:
     """Execute one ONNX partition on a worker and return a tensor payload."""
     import numpy as np
     import onnxruntime as ort
     from common.serializer import deserialize_tensor, serialize_tensor
+
+    execution_stage = "received"
+    progress_percent = 0.0
 
     def find_payload(node):
         if isinstance(node, dict):
@@ -132,6 +141,8 @@ def run_onnx_partition(stage_input: dict) -> dict:
         raise RuntimeError("Pipeline stage arguments must be a dictionary")
 
     model_path = original_args["model_path"]
+    execution_stage = "input_resolved"
+    progress_percent = 25.0
     payload = original_args.get("tensor_payload")
     if payload is None:
         upstream = stage_input.get("upstream_results", {})
@@ -141,10 +152,16 @@ def run_onnx_partition(stage_input: dict) -> dict:
     if payload is None:
         raise RuntimeError("Could not find upstream tensor payload")
 
+    execution_stage = "tensor_decoded"
+    progress_percent = 50.0
     tensor = deserialize_tensor(payload)
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    execution_stage = "session_created"
+    progress_percent = 75.0
     input_name = session.get_inputs()[0].name
     output = session.run(None, {input_name: np.asarray(tensor)})[0]
+    execution_stage = "completed"
+    progress_percent = 100.0
     return {
         "transport": "tensor_transport",
         "tensor_payload": serialize_tensor(np.asarray(output), compression="zlib"),
@@ -167,13 +184,18 @@ def classify_result(result: Any, text: str, index: int) -> None:
     print(f'  Input {index}: {sentiment} (neg={probabilities[0]:.4f}, pos={probabilities[1]:.4f}) "{text[:50]}..."')
 
 
-async def run(host: str, port: int, models: list[str], tokenizer_dir: str, max_length: int, texts: list[str]) -> None:
+async def run(host: str, port: int, models: list[str], tokenizer_dir: str, max_length: int, texts: list[str], model_base_url: str | None = None) -> None:
+    model_names = [Path(model).name for model in models]
+    model_urls = {
+        name: f"{model_base_url.rstrip('/')}/{name}"
+        for name in model_names
+    } if model_base_url else {}
     stage0_inputs = [
-        {"model_path": models[0], "tensor_payload": item["tensor_payload"]}
+        {"model_path": model_names[0], "model_url": model_urls.get(model_names[0]), "tensor_payload": item["tensor_payload"]}
         for item in tokenize_texts(texts, tokenizer_dir, max_length)
     ]
-    stage1_inputs = [{"model_path": models[1]} for _ in texts]
-    stage2_inputs = [{"model_path": models[2]} for _ in texts]
+    stage1_inputs = [{"model_path": model_names[1], "model_url": model_urls.get(model_names[1])} for _ in texts]
+    stage2_inputs = [{"model_path": model_names[2], "model_url": model_urls.get(model_names[2])} for _ in texts]
     await crowdio_connect(host, port)
     try:
         started = time.perf_counter()
@@ -201,6 +223,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--max-length", type=int, default=64)
+    parser.add_argument(
+        "--model-base-url",
+        default=os.getenv("CROWDIO_MODEL_BASE_URL"),
+        help="Foreman URL reachable by workers, e.g. http://192.168.1.7:8000/api/models",
+    )
     return parser.parse_args()
 
 
@@ -208,4 +235,4 @@ if __name__ == "__main__":
     args = parse_args()
     dataset_texts = load_texts(args.dataset, args.text_column, args.limit)
     print(f"Loaded {len(dataset_texts)} sentences from {Path(args.dataset).resolve()}")
-    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts))
+    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts, args.model_base_url))

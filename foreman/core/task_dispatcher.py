@@ -31,6 +31,7 @@ from common.code_instrumenter import (
     instrument_for_mobile,
     prepare_code_for_mobile_resume,
     generate_mobile_checkpoint_wrapper,
+    WorkerType,
 )
 
 
@@ -57,6 +58,34 @@ class TaskDispatcher:
         self.scheduler = scheduler
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+
+    @staticmethod
+    def _requires_desktop_worker(func_code: Optional[str]) -> bool:
+        """Return whether a task needs a desktop Python runtime."""
+        if not func_code:
+            return False
+        normalized = func_code.lower()
+        return (
+            "onnxruntime" in normalized
+            or "def partition_model" in normalized
+        )
+
+    def _is_onnx_worker(self, worker_id: str) -> bool:
+        """Return whether a worker can execute ONNX through a supported runtime."""
+        worker_info = self.connection_manager.get_worker_info(worker_id)
+        if worker_info is None:
+            return True
+        return worker_info.worker_type in {
+            WorkerType.PC_PYTHON,
+            WorkerType.ANDROID_KOTLIN,
+        }
+
+    def _onnx_workers(self, worker_ids) -> set:
+        return {
+            worker_id
+            for worker_id in worker_ids
+            if self._is_onnx_worker(worker_id)
+        }
 
     # ==================== Code Preparation for Mobile Workers ====================
 
@@ -210,6 +239,19 @@ class TaskDispatcher:
             )
             return 0
 
+        task_codes = [
+            getattr(task, "stage_func_code", None) or func_code
+            for task in pending_tasks
+        ]
+        if any(self._requires_desktop_worker(code) for code in task_codes):
+            available_workers = self._onnx_workers(available_workers)
+            if not available_workers:
+                print(
+                    f"TaskDispatcher: ONNX/partition_model tasks for job {job_id} "
+                    "are waiting for a desktop worker"
+                )
+                return 0
+
         # Get worker objects for scheduler
         all_workers = await self._get_all_workers()
 
@@ -320,7 +362,18 @@ class TaskDispatcher:
 
             args_text = resolve_text_ref(task.args)
             task_args = json.loads(args_text) if args_text else []
-            success = await self._assign_task_to_worker(job_id, task.id, func_code, task_args, worker_id)
+            target_worker_id = worker_id
+            if self._requires_desktop_worker(func_code):
+                onnx_workers = self._onnx_workers(available_workers)
+                if not onnx_workers:
+                    print(
+                        f"TaskDispatcher: Task {task.id} is waiting for a desktop worker"
+                    )
+                    return False
+                target_worker_id = next(iter(onnx_workers))
+            success = await self._assign_task_to_worker(
+                job_id, task.id, func_code, task_args, target_worker_id
+            )
             return success
 
         # Enough workers available - trigger batch assignment for all jobs

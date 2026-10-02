@@ -1,6 +1,6 @@
 
 from fastapi import  Depends, HTTPException, APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from foreman.db.base import get_db
@@ -12,12 +12,21 @@ from foreman.db.models import JobModel, TaskModel, WorkerModel, WorkerFailureMod
 from foreman.schema.schema import ( 
     JobResponse, WorkerResponse, JobStats, WorkerFailureResponse, WorkerFailureStats
 )
+from pathlib import Path
+import os
 
 
 # Create an APIRouter instance
 router = APIRouter(
     prefix=""
 )
+
+MODEL_ROOT = Path(
+    os.getenv(
+        "CROWDIO_MODEL_DIR",
+        Path(__file__).resolve().parents[2] / "tools" / "onnx_partitions_sentiment",
+    )
+).resolve()
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -31,6 +40,19 @@ async def dashboard():
     with open(dashboard_path, "r", encoding="utf-8") as f:
         html_content = f.read()
     return html_content
+
+
+@router.get("/api/models/{model_name}")
+async def download_model(model_name: str):
+    """Serve an exported ONNX model to workers on the local network."""
+    if Path(model_name).name != model_name or not model_name.endswith(".onnx"):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+
+    model_path = (MODEL_ROOT / model_name).resolve()
+    if MODEL_ROOT not in model_path.parents or not model_path.is_file():
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    return FileResponse(model_path, media_type="application/octet-stream")
 
 
 # REST API endpoints
