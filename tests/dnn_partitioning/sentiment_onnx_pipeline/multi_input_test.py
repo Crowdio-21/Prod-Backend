@@ -5,16 +5,61 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import base64
 import csv
 import json
+import io
 import os
+import tempfile
 import time
+import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 
-from common.serializer import deserialize_tensor, serialize_tensor
+try:
+    from common.serializer import deserialize_tensor, serialize_tensor
+except ImportError:
+    def serialize_tensor(tensor, compression=None):
+        buffer = io.BytesIO()
+        np.save(buffer, np.asarray(tensor), allow_pickle=False)
+        raw = buffer.getvalue()
+        if compression == "zlib":
+            raw = zlib.compress(raw)
+        return {
+            "format": "npy",
+            "dtype": str(np.asarray(tensor).dtype),
+            "shape": list(np.asarray(tensor).shape),
+            "compression": compression,
+            "data_b64": base64.b64encode(raw).decode("ascii"),
+        }
+
+    def deserialize_tensor(payload):
+        if not isinstance(payload, dict):
+            return np.asarray(payload)
+        data_b64 = payload.get("data_b64")
+        if data_b64 is not None:
+            raw = base64.b64decode(data_b64)
+            if payload.get("compression") in {"zlib", "deflate"}:
+                raw = zlib.decompress(raw)
+            return np.load(io.BytesIO(raw), allow_pickle=False)
+        payload_b64 = payload.get("payload_b64")
+        if payload_b64 is not None:
+            raw = base64.b64decode(payload_b64)
+            if payload.get("compression") in {"zlib", "deflate"}:
+                raw = zlib.decompress(raw)
+            tensor = np.frombuffer(raw, dtype=np.dtype(payload["dtype"]))
+            return tensor.reshape(tuple(payload["shape"]))
+        if "data" in payload:
+            data = payload["data"]
+            if isinstance(data, dict):
+                return deserialize_tensor(data)
+            return np.asarray(data)
+        raise ValueError(
+            f"Unsupported tensor payload format; keys={sorted(payload.keys())}"
+        )
 try:
     from crowdio import CROWDio, crowdio_connect, crowdio_disconnect, crowdio_pipeline
 except ImportError:
@@ -113,8 +158,51 @@ def extract_tensor_payload(node: Any) -> Optional[dict]:
 def run_onnx_partition(stage_input: dict) -> dict:
     """Execute one ONNX partition on a worker and return a tensor payload."""
     import numpy as np
+    import os
     import onnxruntime as ort
-    from common.serializer import deserialize_tensor, serialize_tensor
+    import tempfile
+    import urllib.request
+    try:
+        from common.serializer import deserialize_tensor, serialize_tensor
+    except ImportError:
+        import base64
+        import io
+        import zlib
+
+        def serialize_tensor(tensor, compression=None):
+            buffer = io.BytesIO()
+            np.save(buffer, np.asarray(tensor), allow_pickle=False)
+            raw = buffer.getvalue()
+            if compression == "zlib":
+                raw = zlib.compress(raw)
+            return {
+                "format": "npy",
+                "dtype": str(np.asarray(tensor).dtype),
+                "shape": list(np.asarray(tensor).shape),
+                "compression": compression,
+                "data_b64": base64.b64encode(raw).decode("ascii"),
+            }
+
+        def deserialize_tensor(payload):
+            data_b64 = payload.get("data_b64")
+            if data_b64 is not None:
+                raw = base64.b64decode(data_b64)
+                if payload.get("compression") in {"zlib", "deflate"}:
+                    raw = zlib.decompress(raw)
+                return np.load(io.BytesIO(raw), allow_pickle=False)
+            payload_b64 = payload.get("payload_b64")
+            if payload_b64 is not None:
+                raw = base64.b64decode(payload_b64)
+                if payload.get("compression") in {"zlib", "deflate"}:
+                    raw = zlib.decompress(raw)
+                tensor = np.frombuffer(raw, dtype=np.dtype(payload["dtype"]))
+                return tensor.reshape(tuple(payload["shape"]))
+            if data_b64 is None:
+                if "data" in payload:
+                    return np.asarray(payload["data"])
+                raise ValueError(
+                    f"Unsupported tensor payload format; keys={sorted(payload.keys())}"
+                )
 
     execution_stage = "received"
     progress_percent = 0.0
@@ -141,6 +229,20 @@ def run_onnx_partition(stage_input: dict) -> dict:
         raise RuntimeError("Pipeline stage arguments must be a dictionary")
 
     model_path = original_args["model_path"]
+    model_url = original_args.get("model_url")
+    if not os.path.isfile(model_path):
+        if not model_url:
+            raise FileNotFoundError(
+                f"Model {model_path!r} is not available and no model_url was provided"
+            )
+        cache_dir = os.path.join(tempfile.gettempdir(), "crowdio-models")
+        os.makedirs(cache_dir, exist_ok=True)
+        cached_path = os.path.join(cache_dir, os.path.basename(model_path))
+        if not os.path.isfile(cached_path):
+            temporary_path = f"{cached_path}.{os.getpid()}.part"
+            urllib.request.urlretrieve(model_url, temporary_path)
+            os.replace(temporary_path, cached_path)
+        model_path = cached_path
     execution_stage = "input_resolved"
     progress_percent = 25.0
     payload = original_args.get("tensor_payload")
@@ -235,4 +337,5 @@ if __name__ == "__main__":
     args = parse_args()
     dataset_texts = load_texts(args.dataset, args.text_column, args.limit)
     print(f"Loaded {len(dataset_texts)} sentences from {Path(args.dataset).resolve()}")
-    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts, args.model_base_url))
+    model_base_url = args.model_base_url or f"http://{args.host}:8000/api/models"
+    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts, model_base_url))
