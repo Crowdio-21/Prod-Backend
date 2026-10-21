@@ -27,6 +27,9 @@ def test_onnx_tasks_only_use_desktop_workers():
         "android-kotlin",
         "desktop",
     }
+    assert dispatcher._desktop_workers({"android", "android-kotlin", "desktop"}) == {
+        "desktop",
+    }
 
 
 def test_regular_tasks_keep_android_workers_eligible():
