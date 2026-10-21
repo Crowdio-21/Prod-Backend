@@ -4,6 +4,7 @@ WebSocket manager for CrowdCompute Foreman - Refactored
 
 import asyncio
 import json
+import time
 import websockets
 from typing import Any, Dict
 from websockets.server import WebSocketServerProtocol
@@ -26,6 +27,8 @@ from .utils import (
 from common.protocol import Message, MessageType, create_ping_message
 from foreman.db.base import db_session
 from foreman.db.models import TaskModel
+from .reconfiguration import ForemanCoordinator
+from .reconfiguration_protocol import ReconfigurationMessage, PREFETCH_DONE, LOAD_COMPLETE, VERIFY_RESULT
 
 
 class WebSocketManager:
@@ -56,6 +59,7 @@ class WebSocketManager:
         """
         # Core components
         self.connection_manager = ConnectionManager()
+        self.reconfiguration = ForemanCoordinator(self.connection_manager)
         self.job_manager = JobManager()
 
         # Scheduler
@@ -98,6 +102,7 @@ class WebSocketManager:
             completion_handler=self.completion_handler,
             checkpoint_manager=self.checkpoint_manager,
             reconnection_handler=self.reconnection_handler,
+            reconfiguration=self.reconfiguration,
         )
 
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
@@ -108,7 +113,12 @@ class WebSocketManager:
         try:
             async for message in websocket:
                 try:
-                    msg = Message.from_json(message)
+                    raw = json.loads(message)
+                    reconfiguration = ReconfigurationMessage.from_dict(raw)
+                    if reconfiguration is not None:
+                        self._handle_reconfiguration_message(reconfiguration, websocket)
+                        continue
+                    msg = Message.from_dict(raw)
 
                     if client_type is None:
                         # First message determines client type
@@ -145,13 +155,31 @@ class WebSocketManager:
             )
             await self._cleanup_connection(websocket, client_type)
 
+    def _handle_reconfiguration_message(self, message, websocket) -> None:
+        worker_id = self.connection_manager.find_worker_by_websocket(websocket)
+        if worker_id is None:
+            return
+        if message.type == PREFETCH_DONE:
+            info = self.connection_manager.get_worker_info(worker_id)
+            if info is not None:
+                info.device_specs["last_prefetch"] = dict(message.data)
+        elif message.type == LOAD_COMPLETE:
+            info = self.connection_manager.get_worker_info(worker_id)
+            if info is not None:
+                info.device_specs["last_load"] = dict(message.data)
+        elif message.type == VERIFY_RESULT and not message.data.get("ok", False):
+            print(f"Reconfiguration verification failed on worker {worker_id}")
+
     def _determine_client_type(self, message: Message) -> str:
         """Determine if connection is from client or worker based on first message"""
-        if message.type in (
+        job_message_types = {
             MessageType.SUBMIT_JOB,
-            MessageType.SUBMIT_BROADCAST_JOB,
             MessageType.SUBMIT_PIPELINE_JOB,
-        ):
+        }
+        broadcast_job_type = getattr(MessageType, "SUBMIT_BROADCAST_JOB", None)
+        if broadcast_job_type is not None:
+            job_message_types.add(broadcast_job_type)
+        if message.type in job_message_types:
             return "client"
         elif message.type == MessageType.WORKER_READY:
             return "worker"

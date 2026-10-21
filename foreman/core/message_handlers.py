@@ -52,7 +52,11 @@ class ClientMessageHandler:
     async def handle_message(
         self, message: Message, websocket: WebSocketServerProtocol
     ):
-        if message.type in (MessageType.SUBMIT_JOB, MessageType.SUBMIT_BROADCAST_JOB):
+        job_message_types = {MessageType.SUBMIT_JOB}
+        broadcast_job_type = getattr(MessageType, "SUBMIT_BROADCAST_JOB", None)
+        if broadcast_job_type is not None:
+            job_message_types.add(broadcast_job_type)
+        if message.type in job_message_types:
             await self._handle_job_submission(message, websocket)
         elif message.type == MessageType.SUBMIT_PIPELINE_JOB:
             await self._handle_pipeline_submission(message, websocket)
@@ -173,6 +177,7 @@ class WorkerMessageHandler:
         completion_handler,
         checkpoint_manager: CheckpointManager = None,
         reconnection_handler=None,          # WorkerReconnectionHandler | None
+        reconfiguration=None,
     ):
         self.connection_manager = connection_manager
         self.job_manager = job_manager
@@ -180,6 +185,7 @@ class WorkerMessageHandler:
         self.completion_handler = completion_handler
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         self.reconnection_handler = reconnection_handler  # may be None if checkpointing unused
+        self.reconfiguration = reconfiguration
 
     # ------------------------------------------------------------------
     # Disconnection entry-point  (NEW – wire this into your WS close path)
@@ -259,6 +265,15 @@ class WorkerMessageHandler:
             await _update_worker_status(worker_id, "online")
             if "performance_metrics" in message.data:
                 await self._update_worker_performance_metrics(worker_id, message.data["performance_metrics"])
+                if self.reconfiguration is not None:
+                    from .foreman_policy import WorkerTelemetry
+                    metrics = message.data["performance_metrics"]
+                    self.reconfiguration.record_heartbeat(WorkerTelemetry(
+                        worker_id=worker_id,
+                        device_class=str(metrics.get("device_class", "unknown")),
+                        bandwidth_mean=float(metrics.get("network_speed_mbps", 10.0)) * 125000,
+                        rtt_seconds=float(metrics.get("rtt_seconds", 0.05)),
+                    ))
 
     async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
         try:

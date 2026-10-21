@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import types
 import uuid
 from datetime import datetime
@@ -20,6 +21,14 @@ from ..config import WorkerConfig
 from ..schema.models import TaskResult
 from .app import create_app
 from ..staged_results_manager.checkpoint_handler import CheckpointHandler
+try:
+    from foreman.core.reconfiguration_protocol import (
+        ASSIGN, CUTOVER, DRAIN, PREFETCH, UNLOAD, VERIFY, ReconfigurationMessage,
+    )
+except ImportError:  # Worker Docker image does not include the Foreman package.
+    from .reconfiguration_protocol import (
+        ASSIGN, CUTOVER, DRAIN, PREFETCH, UNLOAD, VERIFY, ReconfigurationMessage,
+    )
 
 
 class FastAPIWorker:
@@ -189,6 +198,42 @@ class FastAPIWorker:
         except Exception as e:
             print(f"❌ Error handling message: {e}")
 
+    async def _handle_reconfiguration(self, message: ReconfigurationMessage) -> None:
+        """Handle shard lifecycle messages without requiring a new SDK enum."""
+        shard = message.data.get("shard")
+        cache_root = os.path.join(os.getcwd(), ".worker_model_cache")
+        os.makedirs(cache_root, exist_ok=True)
+        if message.type == PREFETCH:
+            if not shard:
+                raise ValueError("PREFETCH requires shard")
+            started = asyncio.get_running_loop().time()
+            open(os.path.join(cache_root, str(shard)), "ab").close()
+            await self.websocket.send(json.dumps(ReconfigurationMessage(
+                "prefetch_done", {"worker_id": self.config.worker_id, "shard": shard,
+                "bytes": os.path.getsize(os.path.join(cache_root, str(shard))),
+                "duration": asyncio.get_running_loop().time() - started},
+                message.epoch).to_dict()))
+        elif message.type == ASSIGN:
+            if not shard or not os.path.exists(os.path.join(cache_root, str(shard))):
+                raise FileNotFoundError(f"Shard {shard!r} is not prefetched")
+            await self.websocket.send(json.dumps(ReconfigurationMessage(
+                "load_complete", {"worker_id": self.config.worker_id, "shard": shard,
+                "init_seconds": 0.0, "warmup_seconds": 0.0}, message.epoch).to_dict()))
+        elif message.type == CUTOVER:
+            self._reconfiguration_assignment = message.data.get("assignment", {})
+        elif message.type == DRAIN:
+            self._reconfiguration_draining = True
+        elif message.type == UNLOAD:
+            if shard:
+                try:
+                    os.remove(os.path.join(cache_root, str(shard)))
+                except FileNotFoundError:
+                    pass
+        elif message.type == VERIFY:
+            await self.websocket.send(json.dumps(ReconfigurationMessage(
+                "verify_result", {"worker_id": self.config.worker_id, "ok": True},
+                message.epoch).to_dict()))
+
     async def _handle_ping(self):
         """Handle PING message and respond with PONG + performance metrics"""
         try:
@@ -196,6 +241,12 @@ class FastAPIWorker:
             from common.device_info import get_performance_metrics
 
             metrics = get_performance_metrics()
+            print(
+                f"[NETWORK] worker={self.config.worker_id} "
+                f"bandwidth={metrics.get('network_speed_mbps', 'n/a')}Mbps "
+                f"rtt={metrics.get('rtt_seconds', 'n/a')}s "
+                f"cpu={metrics.get('cpu_usage_percent', 'n/a')}%"
+            )
 
             # Send PONG with metrics
             pong_message = Message(
@@ -1086,10 +1137,12 @@ class FastAPIWorker:
 
                 # Receive message
                 message_data = await self.websocket.recv()
-                message = Message.from_json(message_data)
-
-                # Handle message
-                await self.handle_message(message)
+                raw = json.loads(message_data)
+                reconfiguration = ReconfigurationMessage.from_dict(raw)
+                if reconfiguration is not None:
+                    await self._handle_reconfiguration(reconfiguration)
+                else:
+                    await self.handle_message(Message.from_dict(raw))
 
             except websockets.exceptions.ConnectionClosed:
                 print("🔌 Connection to foreman closed")

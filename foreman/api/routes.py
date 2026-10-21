@@ -62,6 +62,30 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     return await get_job_stats(db)
 
 
+@router.get("/api/dnn/observability")
+async def get_dnn_observability():
+    """Return live DNN desktop-routing decisions for the dashboard."""
+    from foreman.core.dnn_observability import snapshot
+    from foreman.main import ws_manager
+
+    workers = []
+    if ws_manager is not None:
+        for worker_id in sorted(ws_manager.connection_manager.get_all_worker_ids()):
+            info = ws_manager.connection_manager.get_worker_info(worker_id)
+            workers.append({
+                "worker_id": worker_id,
+                "available": ws_manager.connection_manager.is_worker_available(worker_id),
+                "worker_type": info.worker_type.value if info else "unknown",
+                "platform": info.platform if info else "unknown",
+                "runtime": info.runtime if info else "unknown",
+                "supports_onnx": worker_id in ws_manager.task_dispatcher._onnx_workers({worker_id}),
+                "supports_dnn_partition": worker_id in ws_manager.task_dispatcher._desktop_workers({worker_id}),
+            })
+    data = snapshot()
+    data["workers"] = workers
+    return data
+
+
 @router.get("/api/jobs", response_model=list[JobResponse])
 async def list_jobs(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
     """List all jobs"""

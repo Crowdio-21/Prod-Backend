@@ -1,3 +1,4 @@
+import sys
 import websockets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -5,6 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from .db.base import init_db
 from .core.ws_manager import WebSocketManager
 from . import api
+
+
+# Keep direct Uvicorn launches working on Windows consoles that use cp1252.
+if sys.platform == "win32":
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
 
 
 # Global WebSocket manager
@@ -25,6 +32,7 @@ async def lifespan(app: FastAPI):
     # Initialize WebSocket manager
     global ws_manager
     ws_manager = WebSocketManager()
+    await ws_manager.reconfiguration.start()
 
     # Set ws_manager in api.websockets module
     api.websockets.set_ws_manager(ws_manager)
@@ -74,6 +82,7 @@ async def lifespan(app: FastAPI):
         await websocket_task
     except asyncio.CancelledError:
         pass
+    await ws_manager.reconfiguration.stop()
 
 
 # Create FastAPI app
