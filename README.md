@@ -121,6 +121,60 @@ Important Foreman internals:
 - `foreman/core/completion_handler.py`: final result assembly
 - `foreman/core/staged_results_manager/`: checkpoint storage and recovery
 - `foreman/core/scheduling/`: FIFO, round-robin, least-loaded, performance, priority, MCDM
+- `foreman/core/foreman_policy.py`: pure shard assignment policy, telemetry registry,
+  cost model, exhaustive candidate generation, and shared reconfiguration executor
+- `foreman/core/reconfiguration_protocol.py`: versioned shard lifecycle envelope
+- `foreman/core/reconfiguration.py`: live coordinator, WebSocket transport, and metrics
+
+### Foreman shard policy
+
+`foreman.core.foreman_policy` provides the simulator/live shared policy surface.
+`SystemState` contains worker heartbeats and telemetry, the current assignment and
+epoch, stage profiles, workload regime parameters, and the lower-bound move-cost
+model. `BreakEvenPolicy.decide(state)` returns `Stay` or a cost-aware `Reassign`
+decision. Latency is the default objective; pipelined throughput is selected with
+`Objective.PIPELINED_THROUGHPUT`.
+
+The policy enumerates injective assignments, applies conservative latency bounds,
+accounts for the critical path of concurrent downloads, and gates moves with
+cooldown and persistence. `ReconfigurationExecutor` implements prefetch, init,
+cutover, drain, unload, and verification with epochs and load timeouts. It uses
+make-before-break for idle targets and break-before-make for targets already
+serving a shard. A transport implementation owns atomic routing rollback.
+
+Reconfiguration messages use the `crowdio.reconfiguration` envelope (version 1)
+so older SDK `MessageType` enums remain compatible. The worker accepts these
+messages before legacy task messages and maintains a local shard cache. The
+Foreman WebSocket manager records prefetch/load/verify acknowledgements and
+feeds heartbeat telemetry into the coordinator. Start-up creates the periodic
+coordinator tick; call `WebSocketManager.reconfiguration.configure(...)` with
+stage profiles and an initial assignment to activate a job's shard policy.
+
+### DNN desktop offload verification
+
+The `partition_model` stage is restricted to `PC_PYTHON` workers. The Foreman
+prints `[DNN ROUTING]` lines showing available workers, desktop-eligible
+workers, and each selected target. Worker heartbeats print `[NETWORK]` lines
+with the measured bandwidth and CPU usage. The dashboard overview includes a
+**DNN Desktop Offload Monitor** backed by `GET /api/dnn/observability`.
+
+After restarting the Foreman and worker to load these changes, run a small
+distributed DNN smoke test:
+
+```powershell
+Set-Location "C:\Users\DELL\Desktop\Path\CROWDio-Research\Prod-Backend"
+$env:PYTHONIOENCODING = "utf-8"
+& ".\.venv\Scripts\python.exe" `
+  "tests\dnn_partitioning\pipeline_dnn_partitioning.py" `
+  --model resnet --input-size 32 --num-partitions 2 `
+  --host localhost --port 9000
+```
+
+Confirm that the terminal shows `desktop-only=True` and a `PC_PYTHON` worker,
+and that the dashboard reports a nonzero **DNN Jobs Seen** and
+**Desktop Tasks Assigned**. If no PC worker is connected, the job remains
+queued and the monitor reports **Waiting for Desktop** rather than sending the
+TensorFlow partition builder to a mobile worker.
 
 ## 4. Protocol and Data Flow
 

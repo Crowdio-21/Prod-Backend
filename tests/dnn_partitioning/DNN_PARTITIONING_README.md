@@ -198,11 +198,41 @@ The current SDK uses stage barriers: stage B starts after stage A completes,
 and stage C starts after stage B completes. The worker pool still parallelizes
 tasks within each stage.
 
-## 9. Important deployment detail
+## 9. Model downloads for workers
 
-The model path sent to a worker must exist on that worker. For eight physical
-PCs, copy the generated directory to the same path on every PC, or configure
-the client to send paths that are valid on each worker.
+The pipeline sends each worker a model URL. If the model is not available
+locally, the worker downloads it from the Foreman and caches it under the
+operating system temporary directory (`crowdio-models`).
+
+For a local Foreman and local workers:
+
+```powershell
+python tests\dnn_partitioning\sentiment_onnx_pipeline\multi_input_test.py `
+  --dataset data\sentences.csv `
+  --limit 10 `
+  --model-base-url http://localhost:8000/api/models
+```
+
+For workers on other PCs, use the Foreman's LAN address. `localhost` would
+refer to each worker itself, not the Foreman:
+
+```powershell
+python tests\dnn_partitioning\sentiment_onnx_pipeline\multi_input_test.py `
+  --dataset data\sentences.csv `
+  --limit 700 `
+  --host 192.168.1.100 `
+  --port 9000 `
+  --model-base-url http://192.168.1.100:8000/api/models
+```
+
+The worker must be able to reach the Foreman HTTP port (`8000`) in addition
+to the WebSocket port (`9000`). Windows Firewall must allow both ports.
+
+The download endpoint can be checked directly:
+
+```powershell
+Invoke-WebRequest http://localhost:8000/api/models/cell_a.onnx -Method Head
+```
 
 A shared network path can also be used if every worker has access:
 
@@ -210,8 +240,7 @@ A shared network path can also be used if every worker has access:
 \\FOREMAN-PC\crowdio-models\onnx_partitions_sentiment\cell_a.onnx
 ```
 
-Using a local copy on each PC is generally faster and avoids repeated network
-file access during inference.
+Using the worker cache avoids repeated network downloads during inference.
 
 ## 10. Common log messages
 
