@@ -33,6 +33,7 @@ from common.code_instrumenter import (
     generate_mobile_checkpoint_wrapper,
     WorkerType,
 )
+from .dnn_observability import increment, record_event
 
 
 class TaskDispatcher:
@@ -85,6 +86,16 @@ class TaskDispatcher:
             worker_id
             for worker_id in worker_ids
             if self._is_onnx_worker(worker_id)
+        }
+
+    def _desktop_workers(self, worker_ids) -> set:
+        """Return PC Python workers required for TensorFlow partition creation."""
+        return {
+            worker_id
+            for worker_id in worker_ids
+            if self.connection_manager.get_worker_info(worker_id) is None
+            or self.connection_manager.get_worker_info(worker_id).worker_type
+            == WorkerType.PC_PYTHON
         }
 
     # ==================== Code Preparation for Mobile Workers ====================
@@ -243,9 +254,30 @@ class TaskDispatcher:
             getattr(task, "stage_func_code", None) or func_code
             for task in pending_tasks
         ]
-        if any(self._requires_desktop_worker(code) for code in task_codes):
-            available_workers = self._onnx_workers(available_workers)
+        requires_desktop = any(self._requires_desktop_worker(code) for code in task_codes)
+        if requires_desktop:
+            increment("dnn_jobs_seen")
+            desktop_only = any("def partition_model" in (code or "").lower() for code in task_codes)
+            eligible = self._desktop_workers(available_workers) if desktop_only else self._onnx_workers(available_workers)
+            print(
+                f"[DNN ROUTING] job={job_id} desktop-only={desktop_only} "
+                f"available={sorted(available_workers)} eligible_desktop={sorted(eligible)}"
+            )
+            record_event(
+                "desktop_filter",
+                job_id=job_id,
+                available_workers=sorted(available_workers),
+                eligible_workers=sorted(eligible),
+                reason="onnxruntime or partition_model stage",
+            )
+            available_workers = (
+                self._desktop_workers(available_workers)
+                if desktop_only
+                else self._onnx_workers(available_workers)
+            )
             if not available_workers:
+                increment("waiting_for_desktop_worker")
+                record_event("waiting_for_desktop_worker", job_id=job_id)
                 print(
                     f"TaskDispatcher: ONNX/partition_model tasks for job {job_id} "
                     "are waiting for a desktop worker"
@@ -289,6 +321,18 @@ class TaskDispatcher:
             )
             if success:
                 tasks_assigned += 1
+                if requires_desktop:
+                    increment("desktop_tasks_assigned")
+                    print(
+                        f"[DNN ROUTING] assigned job={job_id} task={scheduler_task.id} "
+                        f"worker={worker_id} desktop=True"
+                    )
+                    record_event(
+                        "desktop_task_assigned",
+                        job_id=job_id,
+                        task_id=scheduler_task.id,
+                        worker_id=worker_id,
+                    )
 
         print(f"TaskDispatcher: Assigned {tasks_assigned} tasks for job {job_id}")
         return tasks_assigned
@@ -364,13 +408,34 @@ class TaskDispatcher:
             task_args = json.loads(args_text) if args_text else []
             target_worker_id = worker_id
             if self._requires_desktop_worker(func_code):
-                onnx_workers = self._onnx_workers(available_workers)
+                partition_builder = "def partition_model" in func_code.lower()
+                onnx_workers = (
+                    self._desktop_workers(available_workers)
+                    if partition_builder
+                    else self._onnx_workers(available_workers)
+                )
+                print(
+                    f"[DNN ROUTING] single-task desktop-only={partition_builder} "
+                    f"requested_worker={worker_id} eligible_desktop={sorted(onnx_workers)}"
+                )
                 if not onnx_workers:
+                    increment("waiting_for_desktop_worker")
+                    record_event("waiting_for_desktop_worker", job_id=job_id, task_id=task.id)
                     print(
                         f"TaskDispatcher: Task {task.id} is waiting for a desktop worker"
                     )
                     return False
                 target_worker_id = next(iter(onnx_workers))
+                increment("desktop_tasks_assigned")
+                record_event(
+                    "desktop_task_assigned",
+                    job_id=job_id,
+                    task_id=task.id,
+                    worker_id=target_worker_id,
+                )
+                print(
+                    f"[DNN ROUTING] assigned task={task.id} worker={target_worker_id} desktop=True"
+                )
             success = await self._assign_task_to_worker(
                 job_id, task.id, func_code, task_args, target_worker_id
             )
