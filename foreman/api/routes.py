@@ -64,7 +64,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
 @router.get("/api/dnn/observability")
 async def get_dnn_observability():
-    """Return live DNN desktop-routing decisions for the dashboard."""
+    """Return live DNN routing decisions (scope: mobile by default) for the dashboard."""
     from foreman.core.dnn_observability import snapshot
     from foreman.main import ws_manager
 
@@ -78,8 +78,8 @@ async def get_dnn_observability():
                 "worker_type": info.worker_type.value if info else "unknown",
                 "platform": info.platform if info else "unknown",
                 "runtime": info.runtime if info else "unknown",
-                "supports_onnx": worker_id in ws_manager.task_dispatcher._onnx_workers({worker_id}),
-                "supports_dnn_partition": worker_id in ws_manager.task_dispatcher._desktop_workers({worker_id}),
+                "kind": ws_manager.task_dispatcher._worker_kind(worker_id),
+                "dnn_eligible": worker_id in ws_manager.task_dispatcher._dnn_workers({worker_id}),
             })
     data = snapshot()
     data["workers"] = workers

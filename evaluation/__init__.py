@@ -19,7 +19,6 @@ Experimental Scenarios:
 - Energy-constrained devices
 """
 
-from .metrics_collector import MetricsCollector, TaskMetrics, JobMetrics, SystemMetrics
 from .energy_tracker import EnergyTracker, EnergyProfile, DeviceEnergyState
 from .load_balancing import LoadBalancingAnalyzer, LoadDistribution
 from .failure_recovery import FailureRecoveryTracker, RecoveryMetrics
@@ -36,11 +35,6 @@ from .real_runner import (
 )
 
 __all__ = [
-    # Metrics Collection (Simulated)
-    "MetricsCollector",
-    "TaskMetrics",
-    "JobMetrics", 
-    "SystemMetrics",
     # Real Metrics Collection
     "RealMetricsCollector",
     "RealTaskMetrics",

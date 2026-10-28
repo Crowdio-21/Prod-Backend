@@ -33,6 +33,8 @@ async def lifespan(app: FastAPI):
     global ws_manager
     ws_manager = WebSocketManager()
     await ws_manager.reconfiguration.start()
+    if ws_manager.plan_coordinator is not None:
+        await ws_manager.plan_coordinator.start()
 
     # Set ws_manager in api.websockets module
     api.websockets.set_ws_manager(ws_manager)
@@ -68,6 +70,8 @@ async def lifespan(app: FastAPI):
     import asyncio
 
     websocket_task = asyncio.create_task(start_websocket_server())
+    # PING replies carry each worker's live metrics (battery, RAM, CPU, network).
+    ping_task = asyncio.create_task(ws_manager.ping_workers())
 
     print("FastAPI Foreman started!")
     print("REST API: http://localhost:8000")
@@ -77,12 +81,15 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("Shutting down FastAPI Foreman...")
-    websocket_task.cancel()
-    try:
-        await websocket_task
-    except asyncio.CancelledError:
-        pass
+    for task in (ping_task, websocket_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await ws_manager.reconfiguration.stop()
+    if ws_manager.plan_coordinator is not None:
+        await ws_manager.plan_coordinator.stop()
 
 
 # Create FastAPI app
@@ -107,6 +114,7 @@ app.include_router(api.routes.router)
 app.include_router(api.websockets.router)
 app.include_router(api.scheduler_routes.router)
 app.include_router(api.checkpoint_routes.router)
+app.include_router(api.shard_routes.router)
 
 # Include evaluation routes
 from .api import evaluation_routes

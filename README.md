@@ -6,8 +6,9 @@ CROWDio is a distributed compute backend for running Python workloads across het
 - **PC Worker**: task executor that connects to the Foreman over WebSocket
 - **Checkpointing and recovery** for long-running tasks (base + delta checkpoints)
 - **Pipeline jobs** with stage dependencies and upstream-result injection
-- **DNN partitioning support**: desktop-only routing, shard reassignment policy and a live reconfiguration protocol
-- **Evaluation** modules for metrics collection, experiments and charts
+- **DNN partitioning support**: DNN tasks run on mobile workers (PC workers only when validating partitions), plus ONNX model serving
+- **Reconfiguration-aware planning** (behind feature flags, off by default): the Foreman chooses where each shard runs and where the model is cut from live telemetry, prices the cost of switching under single residency, and switches only when the gain beats that cost
+- **Evaluation**: legacy metrics modules, plus a trace-driven simulator and experiment harness for the planner
 
 The client SDK (`crowdio`) and the shared protocol/serialization package (`common`) are **not** in this repository. They ship in the `crowdio-sdk` package (source: the sibling `CROWDio-SDK` repository) and are installed as a dependency.
 
@@ -24,12 +25,13 @@ The client SDK (`crowdio`) and the shared protocol/serialization package (`commo
 - [10. Checkpointing and Recovery](#10-checkpointing-and-recovery)
 - [11. Scheduling](#11-scheduling)
 - [12. DNN Partitioning and Shard Reconfiguration](#12-dnn-partitioning-and-shard-reconfiguration)
-- [13. REST API Reference](#13-rest-api-reference)
-- [14. Evaluation and Experiments](#14-evaluation-and-experiments)
-- [15. Tests and Utility Scripts](#15-tests-and-utility-scripts)
-- [16. Configuration and Runtime Files](#16-configuration-and-runtime-files)
-- [17. Troubleshooting](#17-troubleshooting)
-- [18. Known Gaps](#18-known-gaps)
+- [13. Reconfiguration-Aware Planning](#13-reconfiguration-aware-planning)
+- [14. REST API Reference](#14-rest-api-reference)
+- [15. Evaluation and Experiments](#15-evaluation-and-experiments)
+- [16. Tests and Utility Scripts](#16-tests-and-utility-scripts)
+- [17. Configuration and Runtime Files](#17-configuration-and-runtime-files)
+- [18. Troubleshooting](#18-troubleshooting)
+- [19. Known Gaps](#19-known-gaps)
 
 ## 1. Architecture Overview
 
@@ -69,7 +71,7 @@ Entry point: `foreman/main.py` (FastAPI app `foreman.main:app`)
 
 On startup it:
 - Initializes and seeds the database (`foreman/db/seed.py`), including default MCDM scheduler configs
-- Creates the `WebSocketManager` and starts the shard reconfiguration coordinator
+- Creates the `WebSocketManager`. When `adaptive_planning` is on, it also builds and starts the plan coordinator ([section 13](#13-reconfiguration-aware-planning)) and prints the feature flags (`[FLAGS] ...`)
 - Starts the WebSocket server on `0.0.0.0:9000` with `max_size=None` (no message size cap) and application-level ping/pong
 
 Responsibilities:
@@ -87,7 +89,7 @@ Responsibilities:
 - Connect to the Foreman WebSocket, register (`worker_ready`) and send heartbeats with bandwidth/CPU telemetry
 - Execute serialized task functions, with checkpoint-aware wrapping for `@CROWDio.task(checkpoint=True)` tasks
 - Report results, errors, progress and checkpoints (framework-aware deltas for PyTorch/TensorFlow/NumPy)
-- Handle reconfiguration messages (prefetch/load/verify shards) and keep a local shard cache
+- Handle protocol-v1 reconfiguration messages (prefetch/assign/unload/verify) and keep a local shard cache. It does **not** speak protocol v2 yet, and it creates a new ONNX session per task
 - Serve a small status API and dashboard
 
 CLI options:
@@ -127,23 +129,39 @@ foreman/                    Orchestrator service
     evaluation_routes.py    /api/evaluation/*
     checkpoint_routes.py    Checkpoint route factory
     websockets.py           /api/websocket-stats, /ws
+    shard_routes.py         /api/shards/* (range + sha256), /api/probe, /api/plan/status
     dashboard.html          Web dashboard (temp_dashboard.html is the fallback)
   core/
     ws_manager.py           Central runtime coordinator
     connection_manager.py   Worker/client connections, worker capabilities (PC/mobile)
     message_handlers.py     Client and worker message handling
     job_manager.py          Job/task lifecycle
-    task_dispatcher.py      Scheduler-driven assignment, desktop-only DNN routing
+    task_dispatcher.py      Scheduler-driven assignment; DNN tasks filtered by worker scope
+    dnn_placement.py        DNN worker scope (mobile by default) and DNN task detection
     dependency_manager.py   Pipeline dependency counters (blocked -> pending)
     completion_handler.py   Final result assembly
     worker_reconnection_handler.py  Requeue or checkpoint-resume on disconnect
     payload_store.py        File-backed storage for large args/results
     dnn_observability.py    DNN routing feed for the dashboard
-    foreman_policy.py       Shard assignment policy, cost model, reconfiguration executor
-    reconfiguration.py      Live coordinator, WebSocket transport, metrics
-    reconfiguration_protocol.py  Versioned reconfiguration envelope
+    plan_coordinator.py     Live planned-inference engine: DAG from Plan, epochs, switches, routes, prefetch
+    plan_runtime.py         Builds the coordinator from flags/env (None when adaptive_planning is off)
+    worker_protocol.py      Protocol-v2 transport: acks, timeouts, retries
+    foreman_policy.py       Earlier break-even policy and executor (dormant; kept for compatibility)
+    reconfiguration.py      Earlier coordinator for foreman_policy (dormant)
+    reconfiguration_protocol.py  Protocol-v1 reconfiguration envelope
     scheduling/             FIFO, round-robin, least-loaded, performance, priority, MCDM
     staged_results_manager/ Checkpoint storage and recovery
+  planning/                 Pure planning core (no I/O, clocks or globals; reused by the simulator)
+    contract.py             Shared SDK/Foreman/worker contract (ShardSpec, WorkerState, Plan, messages)
+    flags.py, config.py     Feature flags and YAML run config
+    telemetry.py            EWMA estimators with age and sample count; snapshots
+    profiles.py             Per-device-class phase models (load/init/write/unload/peak memory)
+    registry.py             Manifest loading/validation, sha256, holder map, LRU eviction
+    cost_model.py           C_switch, C_fetch, t_comm, t_comp, pipeline time, memory feasibility
+    planner.py              Exhaustive oracle, Pareto DP, scalarised DP
+    policies.py             B0, B1, B2, B3, B4, B5a, B5b, S-aware
+    controller.py           Triggers, hysteresis, break-even switch rule
+    routes.py, prefetch.py, problems.py, eventlog.py, serialize.py
   db/                       SQLAlchemy models, CRUD, seeding
   schema/                   Pydantic schemas
 
@@ -155,7 +173,10 @@ pc_worker/                  Worker service
   staged_results_manager/   Checkpoint handler and delta computation
 
 evaluation/                 Metrics collectors, trackers, experiments, charts
+  reconfig/                 Planner simulator, scenarios, metrics, replay, CLI (run.py), example configs
+docs/reconfiguration/       Step 0 inspection report and per-component build report
 tests/                      Launchers, example clients, workloads, unit tests
+  planning/                 Planner/controller/cost-model tests, fake-worker integration, live WebSocket smoke test
 Dockerfile.foreman, Dockerfile.worker, docker-compose.yml
 pyproject.toml, uv.lock, requirements.txt
 ```
@@ -174,7 +195,9 @@ The message protocol is defined in `common/protocol.py` (from `crowdio-sdk`). Me
 | Foreman -> Client | `job_accepted`, `job_progress`, `job_results`, `job_error` |
 | Foreman -> Worker (ack) | `checkpoint_ack` |
 
-Shard reconfiguration messages use a separate envelope (`"protocol": "crowdio.reconfiguration"`, version 1) so older SDK `MessageType` enums stay compatible. See [section 12](#12-dnn-partitioning-and-shard-reconfiguration).
+Reconfiguration messages use a separate envelope (`"protocol": "crowdio.reconfiguration"`), so older SDK `MessageType` enums stay compatible:
+- **Version 1**: the earlier `prefetch`/`assign`/`cutover`/`drain`/`unload`/`verify` set. `pc_worker` understands it.
+- **Version 2**: the planned-inference protocol. Handled only when `adaptive_planning` is on, and ignored with a log line otherwise. See [section 13](#13-reconfiguration-aware-planning).
 
 Standard flow:
 1. The client calls `crowdio_map(...)`; the SDK serializes the function and arguments.
@@ -197,8 +220,8 @@ There are two dependency sources, and they differ:
 
 | File | Contents | Use for |
 |---|---|---|
-| `pyproject.toml` / `uv.lock` | Core Foreman/worker deps, `crowdio-sdk>=0.3.1`, `onnxruntime` | Running Foreman and workers |
-| `requirements.txt` | Core deps plus ML workloads (`tensorflow`, `torch`, `transformers`, `onnx`, `opencv`, `scikit-learn`, `pandas`, `kagglehub`), `crowdio-sdk>=2.0.1` | Running the sample ML/DNN workloads in `tests/`; used by the Dockerfiles |
+| `pyproject.toml` / `uv.lock` | Core Foreman/worker deps, `crowdio-sdk>=0.3.1`, `onnxruntime`, `pyyaml`; optional `dev` extra (`pytest`, `httpx`) | Running Foreman and workers; tests |
+| `requirements.txt` | Core deps (including `pyyaml`) plus ML workloads (`tensorflow`, `torch`, `transformers`, `onnx`, `opencv`, `scikit-learn`, `pandas`, `kagglehub`), `crowdio-sdk>=2.0.1` | Running the sample ML/DNN workloads in `tests/`; used by the Dockerfiles |
 
 Pick one per environment.
 
@@ -225,10 +248,10 @@ To develop against a local SDK checkout instead of the published package:
 pip install -e ../CROWDio-SDK
 ```
 
-Unit tests also need `pytest`, which is not listed in either dependency file:
+Tests need `pytest` (and `httpx` for the shard-route tests). Both are in the `dev` extra of `pyproject.toml`:
 
 ```bash
-pip install pytest
+pip install pytest httpx
 ```
 
 ## 7. Quick Start (End-to-End)
@@ -281,7 +304,7 @@ This builds two services:
 
 Scale workers with `docker compose up --scale worker=4 -d` (remove the fixed `container_name` and host port mapping on `worker` first, or replicas will conflict).
 
-> The Dockerfiles currently `COPY common/`, which is not in this repository. See [Known Gaps](#18-known-gaps) before building.
+> The Dockerfiles currently `COPY common/`, which is not in this repository. See [Known Gaps](#19-known-gaps) before building.
 
 ## 9. Client SDK Usage
 
@@ -432,36 +455,148 @@ Scheduling decisions are logged to `logs/fifo_decisions.log` and `logs/mcdm_deci
 
 ## 12. DNN Partitioning and Shard Reconfiguration
 
-### Desktop-only DNN routing
+### Where DNN tasks run
 
-The `partition_model` stage is restricted to `PC_PYTHON` workers. The Foreman prints `[DNN ROUTING]` lines showing available workers, desktop-eligible workers and each selected target. Worker heartbeats print `[NETWORK]` lines with measured bandwidth and CPU usage. The dashboard overview includes a **DNN Desktop Offload Monitor** backed by `GET /api/dnn/observability`.
+DNN tasks run on **mobile workers**. PC workers are only for testing that the partitioning is correct. `CROWDIO_DNN_WORKERS` selects the scope, for both the legacy dispatcher and the planner:
 
-Smoke test (Foreman and at least one PC worker running):
+| Value | DNN tasks go to |
+|---|---|
+| `mobile` (default) | Android workers only (`android_kotlin`, `android_chaquopy`) |
+| `pc` | PC workers only, to validate partitions on a desktop |
+| `any` | Any connected worker |
+
+- A task counts as DNN work when its code uses `onnxruntime` or defines `partition_model`, `run_onnx_partition` or `run_tflite_partition`. Other tasks can run on any worker, as before.
+- If no worker in the scope is connected, DNN tasks wait in the queue. They never fall back to another kind of worker.
+- The Foreman prints `[DNN ROUTING]` lines with the scope, the available workers and the eligible ones.
+- The dashboard's **DNN Placement Monitor** (`GET /api/dnn/observability`) shows the scope, DNN jobs seen, DNN tasks assigned, tasks waiting for an eligible worker, and each worker's kind and eligibility.
+
+To validate partitioning on PC workers:
 
 ```bash
-python tests/dnn_partitioning/pipeline_dnn_partitioning.py --model resnet --input-size 32 --num-partitions 2 --host localhost --port 9000
+CROWDIO_DNN_WORKERS=pc python tests/run_foreman_simple.py
 ```
 
-Confirm that the terminal shows `desktop-only=True` and a `PC_PYTHON` worker, and that the dashboard reports nonzero **DNN Jobs Seen** and **Desktop Tasks Assigned**. If no PC worker is connected, the job stays queued and the monitor shows **Waiting for Desktop** rather than sending the TensorFlow partition builder to a mobile worker.
+```bash
+python tests/dnn_partitioning/sentiment_onnx_pipeline/multi_input_test.py --dataset data/sentences.csv --limit 20
+```
+
+`data/sentences.csv` is not tracked in git. Create it with `python tests/dnn_partitioning/sentiment_onnx_pipeline/prepare_sst2_dataset.py`. With the default scope, run the same client with only Android workers connected.
+
+> `pipeline_dnn_partitioning.py` builds TensorFlow partitions inside a `partition_model` task. Mobile workers can't run TensorFlow, so use that script only with `CROWDIO_DNN_WORKERS=pc`. For mobile runs, export the partitions ahead of time (ONNX) and run them with `run_onnx_partition`.
 
 Exported ONNX partitions are served to workers via `GET /api/models/{model_name}` from `tools/onnx_partitions_sentiment/` (override with `CROWDIO_MODEL_DIR`). See `tests/dnn_partitioning/sentiment_onnx_pipeline/README.md` to export them.
 
-### Shard assignment policy
+### Today's fixed sentiment pipeline (policy B0)
 
-`foreman/core/foreman_policy.py` is the policy surface shared by the simulator and the live system:
+`tests/dnn_partitioning/sentiment_onnx_pipeline/multi_input_test.py` builds a fixed 3-stage DAG with `crowdio_pipeline`:
+- `cell_a` = embeddings + encoder layers 0–2
+- `cell_b` = layers 3–5
+- `cell_c` = classification head
 
-- `SystemState` holds worker heartbeats and telemetry, the current assignment and epoch, stage profiles, workload parameters and the lower-bound move-cost model (`MoveCostModel`).
-- `BreakEvenPolicy.decide(state)` returns a `Stay` or cost-aware `Reassign` decision. Latency is the default objective; select pipelined throughput with `Objective.PIPELINED_THROUGHPUT`.
-- The policy enumerates injective assignments, applies conservative latency bounds, accounts for the critical path of concurrent downloads, and gates moves with cooldown and persistence.
-- `ReconfigurationExecutor` runs prefetch, init, cutover, drain, unload and verification with epochs and load timeouts. It uses make-before-break for idle targets and break-before-make for targets already serving a shard. The transport owns atomic routing rollback.
+That is one encoder cut plus a fixed head split. The cut is baked into the ONNX files by `export_partitions.py --split-idx 3`. Activations travel worker → Foreman → worker, zlib-compressed and base64-encoded inside JSON. This path is unchanged and is the B0 baseline.
 
-### Live coordinator
+### Earlier shard policy (dormant)
 
-`foreman/core/reconfiguration.py` provides `ForemanCoordinator`, a WebSocket transport and metrics. The Foreman starts the coordinator's periodic tick at startup and feeds heartbeat telemetry into it; prefetch/load/verify acknowledgements from workers are recorded by the WebSocket manager. To activate shard policy for a job, call `WebSocketManager.reconfiguration.configure(...)` with stage profiles and an initial assignment.
+`foreman/core/foreman_policy.py` (`BreakEvenPolicy`, `ReconfigurationExecutor`) and `foreman/core/reconfiguration.py` (`ForemanCoordinator`) predate the planner below:
+- The coordinator ticks, but nothing calls `configure(...)`, so it never acts.
+- It has no communication cost and no pipeline-time model.
+- It is kept so existing tests and imports keep working. Its executor's wrong-shard unload bug is fixed.
 
-Workers handle reconfiguration messages before legacy task messages using a local copy of the envelope (`pc_worker/core/reconfiguration_protocol.py`), since the worker image does not include the `foreman` package.
+## 13. Reconfiguration-Aware Planning
 
-## 13. REST API Reference
+The Foreman can choose **where each shard runs** (placement) and **where the model is cut** (partition) at runtime, from live compute and network telemetry. It prices the cost of switching under **single residency**: a worker holds at most one live inference session, so a switch means unload, fetch if absent, load, then session init. It only switches when the expected gain beats that cost. Design notes and every assumption are in [docs/reconfiguration/build_report.md](docs/reconfiguration/build_report.md); the code inspection is in [docs/reconfiguration/step0_report.md](docs/reconfiguration/step0_report.md).
+
+### Feature flags
+
+All flags default **off**. With all flags off, no coordinator is built and the Foreman behaves exactly as before.
+
+| Flag | Enables |
+|---|---|
+| `adaptive_planning` | The plan coordinator: planned inference (`submit_inference`), the planner and the controller. The other flags need it. |
+| `direct_path` | Worker-to-worker activations when a peer link is reachable, fresh and cheaper by a margin; otherwise the relay through the Foreman |
+| `peer_fetch` | Shard files fetched from eligible donor workers' disks instead of the Foreman |
+| `prefetch` | Standby workers download likely-next shards to disk (never loading them) |
+| `problem_reports` | Non-urgent worker problem reports feed the controller. Urgent ones (`NEXT_HOP_DOWN`, `OOM`, `LOAD_FAILED`) are always handled. |
+
+Enable flags with an environment variable (a comma list or JSON), or in a YAML run config:
+
+```bash
+CROWDIO_FLAGS=adaptive_planning,problem_reports python tests/run_foreman_simple.py
+```
+
+| Variable | Purpose |
+|---|---|
+| `CROWDIO_FLAGS` | Feature flags; overrides the run config |
+| `CROWDIO_RUN_CONFIG` | YAML run config: policy, objective, thresholds, margins, cooldown, scenario, seed. Example: [evaluation/reconfig/configs/run_example.yaml](evaluation/reconfig/configs/run_example.yaml) |
+| `CROWDIO_MANIFEST` | Shard manifest: a `manifest.json`, or a legacy export directory (default `tools/onnx_partitions_sentiment`) |
+| `CROWDIO_PUBLIC_URL` | Base URL workers use for `/api/probe` (default `http://localhost:8000`) |
+| `CROWDIO_DNN_WORKERS` | Which workers may run shards: `mobile` (default), `pc` (validate partitions on PCs) or `any`. The planner never places a shard outside this scope. Also settable as `dnn_workers` in the run config. |
+
+The run config's `log_path` sets the JSONL event log.
+
+### How it works
+
+- **Telemetry** (`foreman/planning/telemetry.py`):
+  - Per-worker, per-direction EWMA mean and variance for bandwidth and RTT. Every estimate carries its age and sample count.
+  - Bandwidth is passive first, from timed transfers. The active probe runs only when an estimate is old or the worker is idle, and is rate-limited.
+  - Both of today's heartbeat shapes are ingested, plus v2 `report` messages.
+- **Cost model** (`cost_model.py`, pure):
+  - `C_switch` is 0 when resident; unload + load + init when on disk; plus fetch + write when absent.
+  - `C_fetch` uses the best of the Foreman and eligible donors.
+  - `t_comm` is min(direct, relay).
+  - Pipeline time is `finish_i = max(ready_i, finish_{i-1} + t_comm) + t_comp`, `P = max(t_comp, t_comm)`, and `T_total(N) = finish_K + (N-1)·P`.
+  - Every value carries uncertainty bounds.
+- **Planner** (`planner.py`, `policies.py`, pure):
+  - Memory feasibility filters first. Search covers ordered assignments of distinct workers and compositions of atoms into exported shards.
+  - The exhaustive search is the exact oracle. A Pareto DP is also exact; a scalarised DP is faster and reports its gap.
+  - The baselines B0–B5b and S-aware sit behind one interface.
+- **Controller** (`controller.py`, pure):
+  - Triggers: telemetry drift, worker join or leave, deadline risk, queue growth, problem reports.
+  - Switch rule: J(new) + margin < J(current), with persistence, cooldown and a per-window switch cap.
+  - It refuses non-forced switches on stale estimates.
+  - Forced replans (worker lost, load failed, OOM) bypass the margin.
+- **Epochs**: every request, activation, ack and result carries the plan epoch.
+  - Voluntary switches **drain**: in-flight requests finish under the old epoch first.
+  - Forced switches **resume** from a retained stage-boundary activation when the new plan keeps that cut, and otherwise restart from the input.
+  - A worker never receives `load` while it has in-flight work of the old epoch.
+
+### Policies
+
+| Name | Behaviour |
+|---|---|
+| `B0` | Fixed cut, 4-tier affinity (resident > cached on disk > idle > evict) |
+| `B1` | B0 plus a network-aware score inside each tier |
+| `B2` | Placement and cuts by predicted latency, ignoring switching cost, re-planned every epoch |
+| `B3` | Load time in the objective but no current-residency state; plans once |
+| `B4` | Data-parallel replicas of the full model where it fits; pipeline over the rest |
+| `B5a` / `B5b` | Per-plan switching overhead; B5b also allows asynchronous switching (the reference showing what single residency costs) |
+| `S-aware` / `S-aware-placement` | Ours: full switching cost from the current residency state, with or without re-cutting |
+
+### Protocol v2 (`crowdio.reconfiguration`, version 2)
+
+Schemas are in [foreman/planning/contract.py](foreman/planning/contract.py). Every command carries a `msg_id` and is retried until acknowledged.
+
+| Direction | Messages |
+|---|---|
+| Foreman → worker | `load`, `prefetch`, `cancel_prefetch`, `run`, `probe`, `peer_fetch`, `serve_allowed`, `route` |
+| Worker → Foreman | `report` (WorkerState), `load_result`, `problem`, `need`, `activation` (relay route), `ack`, `msg_ack`, `probe_result` |
+| Worker → worker | `activation`, `ack` |
+| Client ↔ Foreman | `submit_inference` → `inference_accepted`, `inference_result` |
+
+Problem types: `NEXT_HOP_DOWN`, `MISSING_SHARD`, `WRONG_SHARD`, `WRONG_EPOCH`, `OOM`, `SLOW_STAGE`, `LINK_DEGRADED`, `LOAD_FAILED`.
+
+### Shards and manifests
+
+- `ShardRegistry` (`foreman/planning/registry.py`) adapts today's 3-cell `partition_metadata.json` (atoms `embed, L0..L5, head`), or loads a contract `manifest.json`.
+- To let the planner re-cut, export every contiguous range on a cut grid plus the full model. This writes `manifest.json` and checks the default chain and the full model against PyTorch:
+
+```bash
+python tests/dnn_partitioning/sentiment_onnx_pipeline/export_manifest.py --output-dir tools/onnx_shards_sentiment --cut-grid 3 --split-idx 3
+```
+
+- Workers download shards with checksums and resumable ranges from `GET /api/shards/{shard_id}`.
+
+## 14. REST API Reference
 
 Base URL: `http://localhost:8000`. Full schemas: `http://localhost:8000/docs`.
 
@@ -485,6 +620,10 @@ Core:
 | GET | `/api/dnn/observability` | DNN routing summary and recent events |
 | GET | `/api/models/{model_name}` | Download an exported `.onnx` model |
 | GET | `/api/websocket-stats` | WebSocket connection stats |
+| GET | `/api/shards/manifest` | Shard manifest (shared contract) |
+| GET | `/api/shards/{shard_id}` | Shard file; supports `Range` (206) and sends `X-Content-SHA256` |
+| GET / POST | `/api/probe/{size}`, `/api/probe` | Bandwidth probe download / upload |
+| GET | `/api/plan/status` | Plan coordinator status (`{"enabled": false}` when the flag is off) |
 
 Scheduler (`/api/scheduler`): `GET /algorithms`, `GET /config`, `GET /config/{algorithm_name}`, `POST /config`, `POST /activate/{algorithm_name}`, `GET /stats`.
 
@@ -492,7 +631,7 @@ Evaluation (`/api/evaluation`): `GET /metrics`, `GET /job/{job_id}`, `GET /load-
 
 PC worker (`http://<worker>:<api-port>`): `GET /` (status), `GET /stats`, `POST /restart`, `GET /dashboard`, WebSocket `/ws` (live status stream).
 
-## 14. Evaluation and Experiments
+## 15. Evaluation and Experiments
 
 Modules under `evaluation/`:
 
@@ -503,15 +642,44 @@ Modules under `evaluation/`:
 - Trackers: `energy_tracker.py`, `communication_tracker.py`, `load_balancing.py`, `failure_recovery.py`
 - Experiments: `experiments/scalability.py`, `heterogeneity.py`, `energy_constraints.py`, `failure_simulation.py`
 
-The scripts have CLIs (`real_runner`: `--host --port --output --quick`; `real_metrics_collector`: `--output --since-hours --job-ids`; `runner`: `--quick --output --iterations`) and write to `evaluation_results/` by default. They currently fail to import; see [Known Gaps](#18-known-gaps). The `/api/evaluation/*` endpoints work independently.
+CLIs: `python -m evaluation.real_runner --host --port --output --quick`, `python -m evaluation.real_metrics_collector --output --since-hours --job-ids`, and `python -m evaluation.runner --quick --output --iterations`. Output goes to `evaluation_results/` by default.
 
-## 15. Tests and Utility Scripts
+### Reconfiguration experiment harness (`evaluation/reconfig/`)
 
-Unit tests (no Foreman/worker needed):
+A trace-driven simulator runs the **same** pure planner and controller as the Foreman. Ground truth (links, compute, phase times) changes with a scenario, and the controller only sees noisy telemetry.
 
 ```bash
-python -m pytest tests/test_foreman_policy.py tests/test_reconfiguration_protocol.py tests/test_task_dispatcher_routing.py tests/test_code_instrumenter_wrappers.py
+python -m evaluation.reconfig.run compare --config evaluation/reconfig/configs/run_example.yaml --spec evaluation/reconfig/configs/spec_distilbert_5phones.yaml
 ```
+
+| Command | Purpose |
+|---|---|
+| `sim` | One simulated run (`--with-oracle` adds regret) |
+| `compare` | Every policy plus a clairvoyant reference: total time, regret, switches, wasted switches, stall, bytes moved, planner time, deadline hit rate |
+| `notax` | Healthy run, B0 with flags off vs every feature on: steady-state latency, throughput, control-plane bytes per request and per minute |
+| `metrics LOG` | Metrics from any JSONL log, simulated or live |
+| `replay LOG` | Re-run every logged planner call and check that the decisions match |
+| `dp-gap` | Gap of the scalarised and Pareto DPs against exhaustive search on random instances |
+| `live` | Submit planned inference to a running Foreman, fire scenario commands, and record Foreman CPU (`--foreman-pid`) |
+
+Scenario events (`network`, `load`, `drop_worker`, `join_worker`, `command`) are scheduled in the run config. In live mode the harness only runs the configured external command (for example `tc` on a Linux access point), so network shaping stays outside the app.
+
+The simulation spec (`configs/spec_distilbert_5phones.yaml`) uses **placeholder** Android phase times. Replace them with the mobile benchmark's measurements before drawing conclusions.
+
+## 16. Tests and Utility Scripts
+
+Automated tests (no Foreman or workers needed):
+
+```bash
+python -m pytest tests/
+```
+
+This runs the original unit tests (`tests/test_*.py`) plus `tests/planning/`:
+- hand-computed cost-model cases for all three residency states, with and without peer fetch;
+- planner property tests (feasibility, single residency, Pareto DP equals exhaustive, S-aware equals B2 at zero switching cost, B1 ranks like B0 at zero bandwidth weight);
+- controller hysteresis and break-even tests;
+- fake-worker integration tests (bandwidth drop with a warm vs cold replacement, worker loss with in-flight resume, small-N rejection, a peer path blocked mid-run, duplicate delivery after fallback, load failure, prefetch, replay);
+- a live WebSocket round trip through the real `WebSocketManager`.
 
 Launchers and utilities in `tests/`:
 
@@ -534,7 +702,7 @@ Sample workloads (require a running Foreman and workers; most need the ML deps f
 - `tests/image_processing/`: image tiling, batch processing and mobile face search
 - `tests/dnn_partitioning/`: VGG16/ResNet/TFLite partitioning and the sentiment ONNX pipeline (see its README files)
 
-## 16. Configuration and Runtime Files
+## 17. Configuration and Runtime Files
 
 | Item | Location / variable | Notes |
 |---|---|---|
@@ -544,14 +712,20 @@ Sample workloads (require a running Foreman and workers; most need the ML deps f
 | Scheduler logs | `./logs/` | FIFO and MCDM decision logs |
 | ONNX models | `CROWDIO_MODEL_DIR` (default `tools/onnx_partitions_sentiment/`) | Served by `/api/models/{model_name}` |
 | Worker settings | CLI flags (section 2) or Docker env vars (section 8) | |
+| Feature flags, run config, manifest, DNN worker scope | `CROWDIO_FLAGS`, `CROWDIO_RUN_CONFIG`, `CROWDIO_MANIFEST`, `CROWDIO_PUBLIC_URL`, `CROWDIO_DNN_WORKERS` | See [section 13](#13-reconfiguration-aware-planning) |
+| Planner event log | `log_path` in the run config (JSONL) | Kept in memory only when unset |
+| Worker ping interval | `CROWDIO_PING_INTERVAL` (seconds, default 30) | PING replies refresh each worker's metrics in the `workers` table |
 
 Run the Foreman from the project root so these paths resolve consistently.
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 Connection issues:
 - Check that the Foreman is listening on `:9000` (WebSocket) and `:8000` (REST).
 - Remote workers must use the Foreman's IP in `--foreman-url`, not `localhost`.
+
+`[V2] ignoring ...: adaptive_planning is off`:
+- A worker or client sent a protocol-v2 message, but the Foreman was started without `CROWDIO_FLAGS=adaptive_planning`. `GET /api/plan/status` shows whether the coordinator is enabled.
 
 `ModuleNotFoundError: crowdio` or `common`:
 - Install `crowdio-sdk` (section 6), or `pip install -e ../CROWDio-SDK` for local development.
@@ -559,7 +733,7 @@ Connection issues:
 No results returning:
 - Check worker logs for deserialization or runtime errors (missing ML packages on the worker are a common cause).
 - Check `/api/jobs` and `/api/workers`.
-- DNN `partition_model` tasks wait until a `PC_PYTHON` worker is connected.
+- DNN tasks wait until a worker in the DNN scope is connected: Android by default, or PC with `CROWDIO_DNN_WORKERS=pc`. A worker that registers without a `worker_type` counts as a PC worker.
 
 Database locked:
 - Close DB viewers or other processes holding `crowdio.db` and retry.
@@ -570,11 +744,18 @@ Schema drift:
 Unicode errors on Windows consoles:
 - Set `PYTHONIOENCODING=utf-8`.
 
-## 18. Known Gaps
+## 19. Known Gaps
 
 - `Dockerfile.foreman` and `Dockerfile.worker` copy a `common/` directory that is not in this repo; `common` comes from `crowdio-sdk`. Remove that `COPY` line (the pip install already provides it) or vendor the package before building.
 - `Dockerfile.foreman` sets `CROWDIO_DATA_DIR=/data`, but the code does not read it; the database is written to `/app/crowdio.db`, so the `crowdio_data` volume does not persist it.
 - `Dockerfile.worker` health checks `GET /health`, which the worker API does not expose (use `GET /` instead).
 - `requirements.txt` pins `crowdio-sdk>=2.0.1` while `pyproject.toml` uses `>=0.3.1`.
 - Scheduler activation via REST is persisted but not applied to the running dispatcher (section 11).
-- `evaluation/__init__.py` imports `evaluation.metrics_collector`, which does not exist, so `python -m evaluation.<module>` fails with `ModuleNotFoundError`.
+- Reconfiguration-aware planning (section 13) needs workers that speak protocol v2:
+  - Android still uses uppercase top-level `PREFETCH`/`ASSIGN`/`UNLOAD`/`EVICT` commands and has no peer listener for the direct path.
+  - `pc_worker` speaks only v1 and creates a new ONNX session per task.
+  - Until both are updated, the planned path has been exercised only with fake workers (`tests/planning/`).
+- The Android phase times in `evaluation/reconfig/configs/spec_distilbert_5phones.yaml` are placeholders. The cold ~48 s / warm ~6 s reference numbers are unverified and used only as stale priors.
+- `network_speed_mbps` from PC workers is NIC traffic over 100 ms (utilisation), not available bandwidth. It is stored as-is in the `workers` table.
+- The Foreman Docker image does not include `tools/`, so set `CROWDIO_MANIFEST` to a mounted manifest before enabling `adaptive_planning` in Docker.
+- Starlette 0.27's `TestClient` does not work with `httpx>=0.28`. The tests use `httpx.ASGITransport` directly.

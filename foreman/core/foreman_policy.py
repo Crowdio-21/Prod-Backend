@@ -292,10 +292,12 @@ class ReconfigurationExecutor:
         try:
             # Single residency requires break-before-make when the target is
             # already serving another shard. Idle targets remain uninterrupted.
+            serving = {w: s for s, w in current.assignment.worker_by_partition.items()}
             for shard, old_worker, worker in changed:
                 if worker in serving_targets and old_worker is not None:
                     await self.transport.drain(worker)
-                    await self.transport.unload(worker, shard)
+                    # Unload the shard the target is serving now, not the incoming one.
+                    await self.transport.unload(worker, serving[worker])
             await asyncio.gather(*(
                 self.transport.prefetch(worker, shard)
                 for shard, _, worker in changed

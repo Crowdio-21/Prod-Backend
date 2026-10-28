@@ -624,14 +624,14 @@
             </div>
 
             <div class="section">
-                <h2>DNN Desktop Offload Monitor</h2>
+                <h2>DNN Placement Monitor <span id="dnn-scope" style="font-size:0.6em;color:#7f8c8d;"></span></h2>
                 <div class="stats">
                     <div class="stat-card highlight"><div class="stat-number" id="dnn-jobs-seen">-</div><div class="stat-label">DNN Jobs Seen</div></div>
-                    <div class="stat-card success"><div class="stat-number" id="dnn-desktop-assigned">-</div><div class="stat-label">Desktop Tasks Assigned</div></div>
-                    <div class="stat-card warning"><div class="stat-number" id="dnn-waiting">-</div><div class="stat-label">Waiting for Desktop</div></div>
+                    <div class="stat-card success"><div class="stat-number" id="dnn-assigned">-</div><div class="stat-label">DNN Tasks Assigned</div></div>
+                    <div class="stat-card warning"><div class="stat-number" id="dnn-waiting">-</div><div class="stat-label" id="dnn-waiting-label">Waiting for Eligible Worker</div></div>
                 </div>
                 <table>
-                    <thead><tr><th>Worker</th><th>Type</th><th>Platform</th><th>Available</th><th>DNN Desktop Eligible</th></tr></thead>
+                    <thead><tr><th>Worker</th><th>Type</th><th>Platform</th><th>Kind</th><th>Available</th><th>DNN Eligible</th></tr></thead>
                     <tbody id="dnn-workers-body"></tbody>
                 </table>
                 <div class="chart-card" style="margin-top:15px;">
@@ -1148,18 +1148,22 @@
                     const data = await response.json();
                     const summary = data.summary || {};
                     document.getElementById('dnn-jobs-seen').textContent = summary.dnn_jobs_seen || 0;
-                    document.getElementById('dnn-desktop-assigned').textContent = summary.desktop_tasks_assigned || 0;
-                    document.getElementById('dnn-waiting').textContent = summary.waiting_for_desktop_worker || 0;
+                    document.getElementById('dnn-assigned').textContent = summary.dnn_tasks_assigned || 0;
+                    document.getElementById('dnn-waiting').textContent = summary.waiting_for_dnn_worker || 0;
+                    document.getElementById('dnn-scope').textContent = data.scope ? `(scope: ${data.scope})` : '';
+                    document.getElementById('dnn-waiting-label').textContent =
+                        data.scope === 'pc' ? 'Waiting for PC Worker' : data.scope === 'any' ? 'Waiting for Worker' : 'Waiting for Mobile Worker';
                     const body = document.getElementById('dnn-workers-body');
                     body.innerHTML = data.workers.length ? data.workers.map(worker => `
                         <tr>
                             <td>${worker.worker_id.substring(0, 16)}</td>
                             <td>${worker.worker_type}</td>
                             <td>${worker.platform}</td>
+                            <td>${worker.kind}</td>
                             <td><span class="status status-${worker.available ? 'online' : 'busy'}">${worker.available ? 'yes' : 'no'}</span></td>
-                            <td>${worker.supports_dnn_partition ? 'YES' : 'NO'}</td>
+                            <td>${worker.dnn_eligible ? 'YES' : 'NO'}</td>
                         </tr>`).join('') :
-                        '<tr><td colspan="5" style="text-align:center;color:#95a5a6;">No connected workers</td></tr>';
+                        '<tr><td colspan="6" style="text-align:center;color:#95a5a6;">No connected workers</td></tr>';
                     document.getElementById('dnn-events').textContent = (data.events || []).slice(0, 8)
                         .map(event => `${event.timestamp} | ${event.event} | ${JSON.stringify(event)}`).join('\n') || 'Waiting for DNN activity...';
                 } catch (error) {

@@ -119,6 +119,8 @@ python tests/run_worker_simple.py -p 8002
 ### Programmatic Usage
 
 ```python
+import asyncio
+
 from pc_worker import FastAPIWorker, WorkerConfig
 
 config = WorkerConfig(
@@ -132,7 +134,7 @@ config = WorkerConfig(
 )
 
 worker = FastAPIWorker(config)
-worker.run()  # Starts FastAPI server with worker
+asyncio.run(worker.run_with_worker())  # status API + Foreman connection (run() serves the API only)
 ```
 
 ### Worker Configuration Options

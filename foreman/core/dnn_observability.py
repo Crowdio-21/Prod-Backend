@@ -7,9 +7,8 @@ from typing import Any
 _events = deque(maxlen=200)
 _summary = {
     "dnn_jobs_seen": 0,
-    "desktop_tasks_assigned": 0,
-    "non_desktop_tasks_rejected": 0,
-    "waiting_for_desktop_worker": 0,
+    "dnn_tasks_assigned": 0,
+    "waiting_for_dnn_worker": 0,
 }
 
 
@@ -27,4 +26,6 @@ def increment(counter: str) -> None:
 
 
 def snapshot() -> dict[str, Any]:
-    return {"summary": dict(_summary), "events": list(_events)}
+    from .dnn_placement import dnn_worker_scope
+
+    return {"scope": dnn_worker_scope(), "summary": dict(_summary), "events": list(_events)}

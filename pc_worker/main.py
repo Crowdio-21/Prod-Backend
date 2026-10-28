@@ -67,8 +67,12 @@ def main():
     # Create and run worker
     worker = FastAPIWorker(config)
 
-    # Run the worker with FastAPI server
-    worker.run()
+    # Run the status API and the Foreman connection together. ``worker.run()``
+    # only serves the API and never connects to the Foreman.
+    try:
+        asyncio.run(worker.run_with_worker())
+    except KeyboardInterrupt:
+        print("\nWorker stopped by user")
 
 
 if __name__ == "__main__":

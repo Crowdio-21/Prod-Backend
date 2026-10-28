@@ -20,6 +20,15 @@ from .utils import (
 from .dependency_manager import DependencyManager, PipelineStage
 
 
+def _task_input_index(task) -> Tuple[int, str]:
+    """Order pipeline tasks by input index; ids are ``{job}_task_{stage}_{i}``.
+
+    Sorting the id as a string puts ``_10`` before ``_2``, which scrambles results.
+    """
+    suffix = str(task.id).rsplit("_", 1)[-1]
+    return (int(suffix), task.id) if suffix.isdigit() else (1 << 62, task.id)
+
+
 class JobManager:
     """
     Manages job lifecycle and state
@@ -390,7 +399,7 @@ class JobManager:
             max_stage = max((getattr(t, "stage", 0) or 0) for t in tasks)
             final_tasks = sorted(
                 [t for t in tasks if (getattr(t, "stage", 0) or 0) == max_stage],
-                key=lambda t: t.id,
+                key=_task_input_index,
             )
             results = []
             for task in final_tasks:

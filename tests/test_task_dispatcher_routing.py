@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
 from common.code_instrumenter import WorkerType
+from foreman.core.dnn_placement import dnn_worker_scope
 from foreman.core.task_dispatcher import TaskDispatcher
 
 
@@ -16,24 +19,40 @@ class _ConnectionManager:
         return self.workers.get(worker_id)
 
 
-def test_onnx_tasks_only_use_desktop_workers():
-    dispatcher = TaskDispatcher(None, _ConnectionManager(), None)
-
-    assert dispatcher._requires_desktop_worker(
-        "def run(stage_input):\n    import onnxruntime as ort\n"
-    )
-    assert dispatcher._requires_desktop_worker("def partition_model(config):\n    pass\n")
-    assert dispatcher._onnx_workers({"android", "android-kotlin", "desktop"}) == {
-        "android-kotlin",
-        "desktop",
-    }
-    assert dispatcher._desktop_workers({"android", "android-kotlin", "desktop"}) == {
-        "desktop",
-    }
+ALL = {"android", "android-kotlin", "desktop", "ghost"}
 
 
-def test_regular_tasks_keep_android_workers_eligible():
-    dispatcher = TaskDispatcher(None, _ConnectionManager(), None)
+def _dispatcher(monkeypatch, scope=None):
+    if scope is None:
+        monkeypatch.delenv("CROWDIO_DNN_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("CROWDIO_DNN_WORKERS", scope)
+    return TaskDispatcher(None, _ConnectionManager(), None)
 
-    assert not dispatcher._requires_desktop_worker("def add(value):\n    return value + 1\n")
-    assert dispatcher._onnx_workers({"android", "desktop"}) == {"desktop"}
+
+def test_dnn_tasks_are_detected():
+    assert TaskDispatcher._is_dnn_task("def run(stage_input):\n    import onnxruntime as ort\n")
+    assert TaskDispatcher._is_dnn_task("def partition_model(config):\n    pass\n")
+    assert TaskDispatcher._is_dnn_task("def run_onnx_partition(stage_input):\n    pass\n")
+    assert not TaskDispatcher._is_dnn_task("def add(value):\n    return value + 1\n")
+
+
+def test_dnn_tasks_run_on_mobile_workers_by_default(monkeypatch):
+    dispatcher = _dispatcher(monkeypatch)
+    assert dispatcher.dnn_scope == "mobile"
+    assert dispatcher._dnn_workers(ALL) == {"android", "android-kotlin"}
+
+
+def test_pc_scope_is_for_validating_partitions_on_pcs(monkeypatch):
+    dispatcher = _dispatcher(monkeypatch, "pc")
+    assert dispatcher._dnn_workers(ALL) == {"desktop"}
+
+
+def test_any_scope_allows_known_workers_only(monkeypatch):
+    dispatcher = _dispatcher(monkeypatch, "any")
+    assert dispatcher._dnn_workers(ALL) == {"android", "android-kotlin", "desktop"}
+
+
+def test_invalid_scope_is_rejected():
+    with pytest.raises(ValueError):
+        dnn_worker_scope({"CROWDIO_DNN_WORKERS": "desktop"})

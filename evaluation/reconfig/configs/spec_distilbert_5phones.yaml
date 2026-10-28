@@ -1,0 +1,31 @@
+# Simulation ground truth: today's DistilBERT export (cell_a | cell_b | cell_c) on five phones.
+# Phase fits are y = a + b * shard_bytes (seconds). The Android numbers are placeholders
+# shaped after the unverified reference (cold ~48 s, warm ~6 s for ~180 MB) until the
+# mobile benchmark decomposes them.
+manifest: tools/onnx_partitions_sentiment
+profiles:
+  android:
+    load: [0.3, 2.06e-8]
+    init: [0.2, 1.0e-8]
+    write: [0.1, 2.2e-8]
+    unload: [0.2, 0.0]
+    peak_mult: 2.0
+    flops_per_s: 5.0e9
+  android_fast:
+    load: [0.2, 1.2e-8]
+    init: [0.1, 0.6e-8]
+    write: [0.1, 1.5e-8]
+    unload: [0.1, 0.0]
+    peak_mult: 2.0
+    flops_per_s: 1.2e10
+workers:
+  - {id: p1, class: android, bw: 2.5e6, rtt: 0.03, resident: cell_a, ram: 1.5e9}
+  - {id: p2, class: android, bw: 2.5e6, rtt: 0.03, resident: cell_b, ram: 1.5e9}
+  - {id: p3, class: android, bw: 2.5e6, rtt: 0.03, resident: cell_c, ram: 1.5e9}
+  - {id: p4, class: android_fast, bw: 5.0e6, rtt: 0.02, disk: [cell_b], ram: 3.0e9}
+  - {id: p5, class: android, bw: 2.5e6, rtt: 0.03, ram: 1.0e9}
+peer_links:
+  - [p1, p2, 2.0e7, 0.005]
+  - [p2, p3, 2.0e7, 0.005]
+  - [p1, p4, 2.0e7, 0.005]
+  - [p4, p3, 2.0e7, 0.005]

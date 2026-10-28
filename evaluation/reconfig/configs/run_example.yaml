@@ -1,0 +1,46 @@
+# Example run config. Every threshold below is a tunable, not a known value.
+policy: S-aware            # B0 | B1 | B2 | B3 | B4 | B5a | B5b | S-aware | S-aware-placement
+objective: min_total       # min_total | min_steady_deadline (needs deadline_s)
+deadline_s: null
+seed: 1
+n_requests: 700
+planner_mode: exhaustive   # exhaustive | pareto_dp | scalar_dp
+flags:
+  adaptive_planning: true
+  direct_path: false
+  peer_fetch: false
+  prefetch: false
+  problem_reports: true
+estimator:
+  ewma_alpha: 0.3
+  max_age_s: 30
+  min_samples: 2
+  probe_after_s: 20
+  probe_min_interval_s: 60
+  uncertainty_k: 2.0
+cost:
+  compression_ratio: 0.9   # prior until measured
+  seq_len: 64
+  runtime_overhead_bytes: 67108864
+controller:
+  bw_drift: 0.3
+  rtt_drift: 0.5
+  cpu_drift: 0.25
+  temp_drift: 5.0
+  persist_k: 2
+  cooldown_s: 30
+  max_switches: 3
+  switch_window_s: 300
+  margin_abs_s: 1.0
+  margin_frac: 0.05
+routes:
+  margin_frac: 0.15
+  min_dwell_s: 10
+prefetch:
+  max_link_utilisation: 0.3
+  min_battery: 40
+# Scenario hooks. In live mode only `command` runs (network shaping happens on the
+# access point, e.g. `ssh root@ap tc qdisc change dev wlan0 ...`).
+scenario:
+  - {at: 120, action: network, worker: p2, bw: 150000, command: "./shape.sh {worker} {bw}"}
+  - {at: 400, action: drop_worker, worker: p3}

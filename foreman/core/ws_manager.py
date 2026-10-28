@@ -29,6 +29,7 @@ from foreman.db.base import db_session
 from foreman.db.models import TaskModel
 from .reconfiguration import ForemanCoordinator
 from .reconfiguration_protocol import ReconfigurationMessage, PREFETCH_DONE, LOAD_COMPLETE, VERIFY_RESULT
+from foreman.planning.contract import is_v2_envelope
 
 
 class WebSocketManager:
@@ -95,6 +96,11 @@ class WebSocketManager:
             task_dispatcher=self.task_dispatcher,
         )
 
+        # Reconfiguration-aware planning (None unless adaptive_planning is on)
+        from .plan_runtime import build_plan_coordinator
+
+        self.plan_coordinator = build_plan_coordinator(self.connection_manager)
+
         self.worker_handler = WorkerMessageHandler(
             connection_manager=self.connection_manager,
             job_manager=self.job_manager,
@@ -104,6 +110,7 @@ class WebSocketManager:
             reconnection_handler=self.reconnection_handler,
             reconfiguration=self.reconfiguration,
         )
+        self.worker_handler.plan_coordinator = self.plan_coordinator
 
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
         """Handle new WebSocket connection"""
@@ -114,6 +121,9 @@ class WebSocketManager:
             async for message in websocket:
                 try:
                     raw = json.loads(message)
+                    if is_v2_envelope(raw):
+                        await self._handle_v2_message(raw, websocket)
+                        continue
                     reconfiguration = ReconfigurationMessage.from_dict(raw)
                     if reconfiguration is not None:
                         self._handle_reconfiguration_message(reconfiguration, websocket)
@@ -154,6 +164,14 @@ class WebSocketManager:
                 f"[CLEANUP] Cleaning up connection for {client_type} {worker_id_debug}"
             )
             await self._cleanup_connection(websocket, client_type)
+
+    async def _handle_v2_message(self, raw: dict, websocket) -> None:
+        """Protocol v2 (planned inference). Ignored unless adaptive_planning is on."""
+        if self.plan_coordinator is None:
+            print(f"[V2] ignoring {raw.get('type')}: adaptive_planning is off")
+            return
+        worker_id = self.connection_manager.find_worker_by_websocket(websocket)
+        await self.plan_coordinator.handle_envelope(websocket, raw, worker_id=worker_id)
 
     def _handle_reconfiguration_message(self, message, websocket) -> None:
         worker_id = self.connection_manager.find_worker_by_websocket(websocket)
@@ -307,12 +325,19 @@ class WebSocketManager:
             print(f"⚠️ [CLEANUP DEBUG] Error getting pending tasks: {e}")
             return []
     
-    async def ping_workers(self):
-        """Periodically ping workers to keep connections alive"""
+    async def ping_workers(self, interval_s: float = None):
+        """Periodically ping workers; their PONG replies carry live performance metrics.
+
+        Interval: ``interval_s`` or ``CROWDIO_PING_INTERVAL`` (seconds, default 30).
+        """
+        if interval_s is None:
+            import os
+
+            interval_s = float(os.getenv("CROWDIO_PING_INTERVAL", "30"))
         while True:
             try:
-                await asyncio.sleep(130)  # Ping every 30 seconds
-                
+                await asyncio.sleep(interval_s)
+
                 ping_message = create_ping_message()
                 worker_ids = self.connection_manager.get_all_worker_ids()
                 

@@ -186,6 +186,7 @@ class WorkerMessageHandler:
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         self.reconnection_handler = reconnection_handler  # may be None if checkpointing unused
         self.reconfiguration = reconfiguration
+        self.plan_coordinator = None  # set by WebSocketManager when adaptive_planning is on
 
     # ------------------------------------------------------------------
     # Disconnection entry-point  (NEW – wire this into your WS close path)
@@ -206,6 +207,8 @@ class WorkerMessageHandler:
             return  # Was a client socket or already cleaned up
 
         print(f"[Disconnect] Worker {worker_id} disconnected.")
+        if self.plan_coordinator is not None:
+            await self.plan_coordinator.worker_disconnected(worker_id)
 
         # Do not requeue or explicitly resume tasks on disconnect. Workers continue
         # execution on their side and reconnect with the same worker_id. We only
@@ -263,17 +266,23 @@ class WorkerMessageHandler:
         worker_id = self.connection_manager.find_worker_by_websocket(websocket)
         if worker_id:
             await _update_worker_status(worker_id, "online")
-            if "performance_metrics" in message.data:
-                await self._update_worker_performance_metrics(worker_id, message.data["performance_metrics"])
+            # Accepts PING replies, periodic PC heartbeats and Android heartbeats alike.
+            from .worker_metrics import extract_performance_metrics
+
+            metrics = extract_performance_metrics(message.data)
+            if metrics:
+                await self._update_worker_performance_metrics(worker_id, metrics)
                 if self.reconfiguration is not None:
                     from .foreman_policy import WorkerTelemetry
-                    metrics = message.data["performance_metrics"]
+                    raw = message.data.get("performance_metrics") or message.data
                     self.reconfiguration.record_heartbeat(WorkerTelemetry(
                         worker_id=worker_id,
-                        device_class=str(metrics.get("device_class", "unknown")),
+                        device_class=str(raw.get("device_class", "unknown")),
                         bandwidth_mean=float(metrics.get("network_speed_mbps", 10.0)) * 125000,
-                        rtt_seconds=float(metrics.get("rtt_seconds", 0.05)),
+                        rtt_seconds=float(raw.get("rtt_seconds", 0.05)),
                     ))
+        if worker_id and self.plan_coordinator is not None:
+            self.plan_coordinator.ingest_legacy_heartbeat(worker_id, message.data)
 
     async def _update_worker_performance_metrics(self, worker_id: str, metrics: dict):
         try:
@@ -283,18 +292,11 @@ class WorkerMessageHandler:
             from datetime import datetime
 
             async with async_session() as session:
+                # Only columns present in this heartbeat; never overwrite known values with NULL.
                 stmt = (
                     update(WorkerModel)
                     .where(WorkerModel.id == worker_id)
-                    .values(
-                        cpu_usage_percent=metrics.get("cpu_usage_percent"),
-                        ram_available_mb=metrics.get("ram_available_mb"),
-                        battery_level=metrics.get("battery_level"),
-                        is_charging=metrics.get("is_charging"),
-                        network_speed_mbps=metrics.get("network_speed_mbps"),
-                        storage_available_gb=metrics.get("storage_available_gb"),
-                        last_performance_update=datetime.now(),
-                    )
+                    .values(**metrics, last_performance_update=datetime.now())
                 )
                 await session.execute(stmt)
                 await session.commit()
@@ -342,6 +344,10 @@ class WorkerMessageHandler:
                 frame_support = capabilities.get("supports_frame_introspection", True)
                 if not settrace_support or not frame_support:
                     print(f"  Limited capabilities: settrace={settrace_support}, frame_introspection={frame_support}")
+
+            if self.plan_coordinator is not None:
+                kind = "pc" if str(worker_type).lower().startswith("pc") else "mobile"
+                self.plan_coordinator.worker_connected(worker_id, "pc" if kind == "pc" else "android", kind)
 
             # ---- Register worker in connection manager ----
             from .connection_manager import WorkerInfo
