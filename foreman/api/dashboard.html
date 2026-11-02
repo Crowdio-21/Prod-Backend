@@ -924,12 +924,7 @@
                         <div class="stat-number" id="sched-workers">-</div>
                         <div class="stat-label">Workers</div>
                     </div>
-                    <div class="stat-card warning">
-                        <div class="stat-number" id="sched-criteria">-</div>
-                        <div class="stat-label">Criteria</div>
-                    </div>
                 </div>
-                <div id="sched-criteria-details" style="margin-top:10px;"></div>
             </div>
 
             <!-- Worker Rankings -->
@@ -1323,7 +1318,7 @@
             }
         }
         
-        // Calculate device score for scheduling based on WRR algorithm
+        // Display-only device capability score (not used for scheduling)
         // Weights: success_rate 35%, cpu_cores 25%, ram_available 20%, battery 20%
         function calculateDeviceScore(worker) {
             let score = 0.0;
@@ -1421,26 +1416,6 @@
 
         function renderSchedulerInfo(scheduler) {
             document.getElementById('sched-algorithm').textContent = scheduler.algorithm.toUpperCase();
-            document.getElementById('sched-criteria').textContent = scheduler.criteria_names.length || 'N/A';
-
-            const detailsDiv = document.getElementById('sched-criteria-details');
-            if (scheduler.criteria_names.length > 0) {
-                let html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
-                scheduler.criteria_names.forEach((name, i) => {
-                    const weight = scheduler.criteria_weights[i];
-                    const type = scheduler.criteria_types[i] === 1 ? 'Benefit' : 'Cost';
-                    const typeColor = type === 'Benefit' ? '#27ae60' : '#e74c3c';
-                    html += `<div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 14px;font-size:0.85em;">
-                        <b>${name.replace(/_/g, ' ')}</b><br>
-                        <span style="color:#888;">Weight: ${(weight * 100).toFixed(0)}%</span>
-                        <span style="color:${typeColor};margin-left:6px;">${type}</span>
-                    </div>`;
-                });
-                html += '</div>';
-                detailsDiv.innerHTML = html;
-            } else {
-                detailsDiv.innerHTML = '<span style="color:#888;">Simple scheduler — no MCDM criteria configured</span>';
-            }
         }
 
         function renderWorkerRankings(workers) {

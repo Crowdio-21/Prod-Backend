@@ -70,3 +70,32 @@ def extract_performance_metrics(data: Mapping[str, Any]) -> Dict[str, Any]:
         if down is not None:
             metrics["network_speed_mbps"] = down / 1e6
     return metrics
+
+
+def extract_link_report(data: Mapping[str, Any]) -> Dict[str, float]:
+    """A worker's own link measurement from a heartbeat/PONG, in bytes/s and seconds.
+
+    * PC worker: ``data["link"] = {down_bps, up_bps, rtt_s}`` (bytes/s, measured against the
+      Foreman's /api/probe endpoints).
+    * Android worker heartbeat: ``data["net"] = {bw_down, bw_up}`` in **bits**/s, measured on
+      timed, network-limited transfers.
+
+    ``network_speed_mbps`` is deliberately ignored: on PC it is NIC traffic over 100 ms
+    (utilisation), not available bandwidth.
+    """
+    if not isinstance(data, Mapping):
+        return {}
+    report: Dict[str, float] = {}
+    link = data.get("link")
+    net = data.get("net")
+    if isinstance(link, Mapping):
+        for key in ("down_bps", "up_bps", "rtt_s"):
+            value = _number(link.get(key))
+            if value and value > 0:
+                report[key] = value
+    elif isinstance(net, Mapping):
+        for source, target in (("bw_down", "down_bps"), ("bw_up", "up_bps")):
+            value = _number(net.get(source))
+            if value and value > 0:
+                report[target] = value / 8.0
+    return report

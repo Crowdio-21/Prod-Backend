@@ -106,7 +106,7 @@ class WorkerModel(Base):
     network_type = Column(String, nullable=True)  # WiFi, Cellular, Ethernet
     python_version = Column(String, nullable=True)
 
-    # MCDM Performance Metrics (added for intelligent task allocation)
+    # Live performance metrics (refreshed from worker PING replies and heartbeats)
     cpu_usage_percent = Column(Float, nullable=True)  # Current CPU usage (0-100)
     gpu_available = Column(Boolean, default=False)  # Whether GPU is available
     storage_available_gb = Column(Float, nullable=True)  # Available disk space in GB
@@ -141,33 +141,6 @@ class WorkerFailureModel(Base):
     latest_checkpoint_data = Column(
         Text, nullable=True
     )  # Decoded JSON from latest delta_checkpoint_blob entry
-
-
-class SchedulerConfigModel(Base):
-    """Configuration for MCDM schedulers"""
-
-    __tablename__ = "scheduler_configs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    algorithm_name = Column(
-        String, nullable=False, unique=True
-    )  # "aras", "edas", "mabac", "wrr"
-    is_active = Column(Boolean, default=False)  # Only one can be active at a time
-
-    # Criteria configuration stored as JSON
-    criteria_weights = Column(Text, nullable=True)  # JSON: [0.3, 0.2, 0.15, ...]
-    criteria_names = Column(
-        Text, nullable=True
-    )  # JSON: ["cpu_cores", "ram_available", ...]
-    criteria_types = Column(
-        Text, nullable=True
-    )  # JSON: [1, 1, -1, ...] (1=benefit, -1=cost)
-
-    # Metadata
-    description = Column(Text, nullable=True)  # Human-readable description
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    created_by = Column(String, nullable=True)  # User/admin who created config
 
 
 class WorkerPerformanceHistoryModel(Base):

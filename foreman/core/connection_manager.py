@@ -14,6 +14,27 @@ from websockets.server import WebSocketServerProtocol
 from common.code_instrumenter import WorkerType, detect_worker_capabilities
 
 
+def resolve_worker_type(detected: WorkerType, declared, platform: str, runtime: str) -> WorkerType:
+    """The worker's type, trusting what it declares over runtime-string guessing.
+
+    The Android app registers with ``runtime: "jvm"`` and ``worker_type: "android_kotlin"``, but
+    ``detect_worker_capabilities`` only recognises the runtimes "kotlin" and "chaquopy", so on its
+    own it files every real phone under PC_PYTHON (and the mobile-only DNN rule would then never
+    offer it any work). An explicit, valid ``worker_type`` therefore wins; failing that, any Android
+    platform that is not Chaquopy is the Kotlin app.
+    """
+    if declared:
+        try:
+            parsed = WorkerType(str(declared).strip().lower())
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed is not WorkerType.UNKNOWN:
+            return parsed
+    if detected is WorkerType.PC_PYTHON and platform and str(platform).lower() == "android":
+        return WorkerType.ANDROID_KOTLIN
+    return detected
+
+
 @dataclass
 class WorkerInfo:
     """
@@ -70,11 +91,14 @@ class WorkerInfo:
             runtime=runtime,
             capabilities=capabilities
         )
+        worker_type = resolve_worker_type(
+            caps["worker_type"], message_data.get("worker_type"), platform, runtime
+        )
         
         return cls(
             worker_id=worker_id,
             websocket=websocket,
-            worker_type=caps["worker_type"],
+            worker_type=worker_type,
             platform=platform,
             runtime=runtime,
             supports_settrace=caps["supports_settrace"],

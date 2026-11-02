@@ -80,3 +80,38 @@ def resolve_text_ref(value: str | None) -> str | None:
             return fh.read().decode("utf-8")
     except Exception:
         return value
+
+
+def payload_ref_path(value: str | None) -> str | None:
+    """Absolute path of a ``payload_ref://`` file, or None if ``value`` is not a reference."""
+    if not is_payload_ref(value):
+        return None
+    return os.path.join(_ROOT_DIR, value[len(PAYLOAD_REF_PREFIX):].replace("/", os.sep))
+
+
+def payload_ref_size(value: str | None) -> int | None:
+    """Uncompressed size in bytes of a referenced payload (what is sent over the wire).
+
+    Read from the gzip trailer (ISIZE, the last four bytes), so the file is not decompressed.
+    """
+    path = payload_ref_path(value)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-4, os.SEEK_END)
+            return int.from_bytes(fh.read(4), "little")
+    except OSError:
+        return None
+
+
+def payload_ref_head(value: str | None, n_bytes: int = 4096) -> str | None:
+    """The first ``n_bytes`` of a referenced payload, decompressed (None if unreadable)."""
+    path = payload_ref_path(value)
+    if path is None:
+        return None
+    try:
+        with gzip.open(path, "rb") as fh:
+            return fh.read(n_bytes).decode("utf-8", errors="replace")
+    except Exception:
+        return None

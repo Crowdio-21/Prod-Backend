@@ -6,8 +6,7 @@ initial data is present.
 """
 
 from foreman.db.base import init_db, async_session
-from foreman.db.models import SchedulerConfigModel, WorkerModel
-from foreman.core.scheduling.mcdm import SchedulerConfigManager
+from foreman.db.models import WorkerModel
 from sqlalchemy import select
 
 
@@ -21,7 +20,6 @@ async def verify_database_schema():
     try:
         async with async_session() as session:
             # Try to query each critical table
-            await session.execute(select(SchedulerConfigModel).limit(1))
             await session.execute(select(WorkerModel).limit(1))
         return True
     except Exception as e:
@@ -40,15 +38,12 @@ async def seed_initial_data(force: bool = False):
     print("🌱 Database Initialization & Seeding")
     print("=" * 60)
 
-    # Initialize MCDM scheduler configurations
-    created = await SchedulerConfigManager.initialize_default_configs(force=force)
-
-    # Add any other initial data here in the future
-    # e.g., default worker templates, system settings, etc.
+    # Nothing to seed yet. Add default worker templates, system settings, etc. here.
+    print("No initial data required")
 
     print("=" * 60 + "\n")
 
-    return created
+    return 0
 
 
 async def initialize_database(force_seed: bool = False):

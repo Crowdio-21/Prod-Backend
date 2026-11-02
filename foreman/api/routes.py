@@ -86,6 +86,40 @@ async def get_dnn_observability():
     return data
 
 
+@router.get("/api/links")
+async def get_links():
+    """Per-worker link estimates (bandwidth, RTT, compute) kept by the bandwidth-aware scheduler."""
+    from foreman.main import ws_manager
+
+    scheduler = ws_manager.task_dispatcher.scheduler if ws_manager is not None else None
+    snapshot = scheduler.link_snapshot() if scheduler is not None else None
+    return {
+        "scheduler": scheduler.__class__.__name__ if scheduler is not None else None,
+        "bandwidth_aware": snapshot is not None,
+        **(snapshot or {}),
+    }
+
+
+@router.get("/api/runs")
+async def list_runs(limit: int = 20):
+    """Newest-first run records written when jobs finish (see foreman/core/run_log.py)."""
+    from foreman.core.run_log import read_runs
+
+    return list(reversed(read_runs(limit=max(1, min(limit, 500)))))
+
+
+@router.get("/api/runs/{job_id}")
+async def get_run(job_id: str, format: str = "json"):
+    """One run by job id (or its first characters). ``?format=text`` returns the readable report."""
+    from fastapi.responses import PlainTextResponse
+    from foreman.core.run_log import find_run, render_text
+
+    record = find_run(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return PlainTextResponse(render_text(record)) if format == "text" else record
+
+
 @router.get("/api/jobs", response_model=list[JobResponse])
 async def list_jobs(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
     """List all jobs"""
@@ -341,31 +375,16 @@ async def get_scheduling_info(db: AsyncSession = Depends(get_db)):
     import json
     from sqlalchemy.orm import selectinload
 
-    # 1. Get active scheduler config
-    from foreman.db.models import SchedulerConfigModel
-    sched_result = await db.execute(
-        select(SchedulerConfigModel).where(SchedulerConfigModel.is_active == True)
-    )
-    active_config = sched_result.scalar_one_or_none()
+    # 1. The scheduler the dispatcher is actually running
+    from foreman.main import ws_manager
 
-    scheduler_info = None
-    if active_config:
-        scheduler_info = {
-            "algorithm": active_config.algorithm_name,
-            "description": active_config.description,
-            "criteria_weights": json.loads(active_config.criteria_weights) if active_config.criteria_weights else [],
-            "criteria_names": json.loads(active_config.criteria_names) if active_config.criteria_names else [],
-            "criteria_types": json.loads(active_config.criteria_types) if active_config.criteria_types else [],
-        }
-    else:
-        # Check if simple scheduler is being used (default FIFO)
-        scheduler_info = {
-            "algorithm": "fifo",
-            "description": "First-In-First-Out (default)",
-            "criteria_weights": [],
-            "criteria_names": [],
-            "criteria_types": [],
-        }
+    scheduler_class = (
+        ws_manager.task_dispatcher.get_scheduler_name() if ws_manager is not None else "FIFOScheduler"
+    )
+    scheduler_info = {
+        "algorithm": scheduler_class.removesuffix("Scheduler").lower(),
+        "description": scheduler_class,
+    }
 
     # 2. Get all workers with full device specs
     workers = await get_workers(db)

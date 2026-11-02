@@ -58,14 +58,14 @@ class WorkerResponse(BaseModel):
     battery_level: Optional[float] = None
     is_charging: Optional[bool] = None
     
-    # Computed device score for scheduling (0-100) based on WRR algorithm weights
+    # Display-only device capability score (0-100); not used for scheduling
     @computed_field
     @property
     def device_score(self) -> float:
         """
-        Calculate device score based on MCDM WRR scheduling algorithm.
+        Calculate a device capability score for the dashboard (display only).
         
-        Weights (from config_manager.py WRR config):
+        Weights:
         - success_rate: 35% (computed from tasks completed/failed)
         - cpu_cores: 25% (normalized to max 16 cores)
         - ram_available_mb: 20% (normalized to max 16GB)

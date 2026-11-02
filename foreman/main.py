@@ -112,7 +112,6 @@ app.add_middleware(
 # Include the routes
 app.include_router(api.routes.router)
 app.include_router(api.websockets.router)
-app.include_router(api.scheduler_routes.router)
 app.include_router(api.checkpoint_routes.router)
 app.include_router(api.shard_routes.router)
 

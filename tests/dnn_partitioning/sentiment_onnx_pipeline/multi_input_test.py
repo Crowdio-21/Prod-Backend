@@ -270,11 +270,12 @@ def run_onnx_partition(stage_input: dict) -> dict:
     }
 
 
-def classify_result(result: Any, text: str, index: int) -> None:
+def classify_result(result: Any, text: str, index: int) -> Optional[dict]:
+    """Print one prediction and return it as a row for the results CSV."""
     payload = extract_tensor_payload(result)
     if payload is None:
         print(f"  Input {index}: tensor payload not found")
-        return
+        return None
     logits = np.asarray(deserialize_tensor(payload), dtype=np.float64)
     if logits.ndim == 1:
         logits = np.expand_dims(logits, axis=0)
@@ -284,9 +285,30 @@ def classify_result(result: Any, text: str, index: int) -> None:
     prediction = int(np.argmax(probabilities))
     sentiment = "POSITIVE" if prediction == 1 else "NEGATIVE"
     print(f'  Input {index}: {sentiment} (neg={probabilities[0]:.4f}, pos={probabilities[1]:.4f}) "{text[:50]}..."')
+    return {"index": index, "label": sentiment, "neg": round(float(probabilities[0]), 6),
+            "pos": round(float(probabilities[1]), 6), "worker_id": result.get("worker_id", "") if isinstance(result, dict) else "",
+            "text": text}
 
 
-async def run(host: str, port: int, models: list[str], tokenizer_dir: str, max_length: int, texts: list[str], model_base_url: str | None = None) -> None:
+def save_results(rows: list, elapsed: float, log_dir: str) -> Optional[Path]:
+    """Write per-sentence predictions to <log_dir>/sentiment_<timestamp>.csv."""
+    rows = [row for row in rows if row]
+    if not rows:
+        return None
+    out = Path(log_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"sentiment_{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    positive = sum(1 for row in rows if row["label"] == "POSITIVE")
+    print(f"Saved {len(rows)} predictions ({positive} positive, {len(rows) - positive} negative, "
+          f"{elapsed:.1f}s) to {path}")
+    return path
+
+
+async def run(host: str, port: int, models: list[str], tokenizer_dir: str, max_length: int, texts: list[str], model_base_url: str | None = None, log_dir: str = "logs/runs") -> None:
     model_names = [Path(model).name for model in models]
     model_urls = {
         name: f"{model_base_url.rstrip('/')}/{name}"
@@ -311,8 +333,8 @@ async def run(host: str, port: int, models: list[str], tokenizer_dir: str, max_l
         elapsed = time.perf_counter() - started
         raw_results = results.get("raw_results", results) if isinstance(results, dict) else results
         print(f"Pipeline completed in {elapsed:.2f}s; got {len(raw_results)} results for {len(texts)} inputs")
-        for index, (text, result) in enumerate(zip(texts, raw_results)):
-            classify_result(result, text, index)
+        rows = [classify_result(result, text, index) for index, (text, result) in enumerate(zip(texts, raw_results))]
+        save_results(rows, elapsed, log_dir)
     finally:
         await crowdio_disconnect()
 
@@ -325,6 +347,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--max-length", type=int, default=64)
+    parser.add_argument("--log-dir", default=os.getenv("CROWDIO_RUN_LOG_DIR", "logs/runs"),
+                        help="where to save the per-sentence results CSV (default: logs/runs)")
     parser.add_argument(
         "--model-base-url",
         default=os.getenv("CROWDIO_MODEL_BASE_URL"),
@@ -338,4 +362,4 @@ if __name__ == "__main__":
     dataset_texts = load_texts(args.dataset, args.text_column, args.limit)
     print(f"Loaded {len(dataset_texts)} sentences from {Path(args.dataset).resolve()}")
     model_base_url = args.model_base_url or f"http://{args.host}:8000/api/models"
-    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts, model_base_url))
+    asyncio.run(run(args.host, args.port, DEFAULT_MODELS, DEFAULT_TOKENIZER_DIR, args.max_length, dataset_texts, model_base_url, args.log_dir))

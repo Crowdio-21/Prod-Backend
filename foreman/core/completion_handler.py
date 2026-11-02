@@ -1,12 +1,15 @@
 from common.protocol import create_job_results_message
 
+from .run_log import log_job_run
+
 
 class JobCompletionHandler:
     """Handles job completion logic and result delivery"""
 
-    def __init__(self, connection_manager, job_manager):
+    def __init__(self, connection_manager, job_manager, task_dispatcher=None):
         self.connection_manager = connection_manager
         self.job_manager = job_manager
+        self.task_dispatcher = task_dispatcher
 
     async def handle_job_completion(self, job_id: str):
         """Handle completion of a job and send results to client"""
@@ -41,6 +44,12 @@ class JobCompletionHandler:
         none_count = sum(1 for r in results if r is None)
         print(
             f"🏁 [COMPLETION DEBUG] Results for job {job_id}: {len(results)} total, {none_count} are None"
+        )
+
+        # Write the run log before finalize_job clears the pipeline's stage names.
+        await log_job_run(
+            self.job_manager, self.connection_manager, self.task_dispatcher, job_id,
+            results_returned=len(results) - none_count, results_missing=none_count, status="completed",
         )
 
         # Send results to client

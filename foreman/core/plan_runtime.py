@@ -7,6 +7,7 @@ Environment:
   CROWDIO_MANIFEST    shard manifest (manifest.json or a legacy export directory)
   CROWDIO_PUBLIC_URL  base URL workers use for /api/probe and /api/shards
   CROWDIO_DNN_WORKERS mobile (default) | pc (validate partitions on PCs) | any
+  CROWDIO_RUN_LOG_DIR where run logs go (default logs/runs); planner events go there too
 """
 
 from __future__ import annotations
@@ -53,6 +54,14 @@ def build_plan_coordinator(connection_manager):
     from .plan_coordinator import PlanCoordinator
     from .worker_protocol import WebSocketTransport
 
+    if not config.log_path:  # keep a JSONL event log of every planned run (one file per Foreman start)
+        from datetime import datetime
+
+        from .run_log import log_dir
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        config = replace(config, log_path=str(log_dir() / f"plan_{stamp}.jsonl"))
+    print(f"[PLAN LOG] events -> {config.log_path}")
     registry = ShardRegistry.load(manifest_path(config))
     base = os.getenv("CROWDIO_PUBLIC_URL", "http://localhost:8000").rstrip("/")
     return PlanCoordinator(config, registry, WebSocketTransport(connection_manager),

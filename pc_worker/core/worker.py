@@ -20,6 +20,7 @@ from common.serializer import get_runtime_info
 from ..config import WorkerConfig
 from ..schema.models import TaskResult
 from .app import create_app
+from .link_probe import LinkProbe, foreman_http_base
 from ..staged_results_manager.checkpoint_handler import CheckpointHandler
 try:
     from foreman.core.reconfiguration_protocol import (
@@ -47,11 +48,14 @@ class FastAPIWorker:
             "tasks_failed": 0,
             "total_execution_time": 0.0,
             "started_at": datetime.now(),
-            "task_durations": [],  # Track individual task durations for MCDM
+            "task_durations": [],  # Individual task durations, for the success/duration stats
         }
 
         # Initialize checkpoint handler with 5 second intervals
         self.checkpoint_handler = CheckpointHandler(checkpoint_interval=5.0)
+
+        # Measures this worker's link to the Foreman for the bandwidth-aware scheduler
+        self.link_probe = LinkProbe(foreman_http_base(config.foreman_url))
 
         # Build FastAPI application with routes and dashboard
         self.app = create_app(self)
@@ -234,6 +238,15 @@ class FastAPIWorker:
                 "verify_result", {"worker_id": self.config.worker_id, "ok": True},
                 message.epoch).to_dict()))
 
+    async def _refresh_link(self) -> Optional[Dict[str, float]]:
+        """Latest link measurement; re-measures when due, but never while a task is running."""
+        if self.current_task is None and self.link_probe.due():
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, self.link_probe.measure)
+            except Exception:
+                pass
+        return self.link_probe.last()
+
     async def _handle_ping(self):
         """Handle PING message and respond with PONG + performance metrics"""
         try:
@@ -254,6 +267,7 @@ class FastAPIWorker:
                 data={
                     "worker_id": self.config.worker_id,
                     "performance_metrics": metrics,
+                    **({"link": link} if (link := self.link_probe.last()) else {}),
                 },
             )
             await self.websocket.send(pong_message.to_json())
@@ -1161,6 +1175,7 @@ class FastAPIWorker:
                     from common.device_info import get_performance_metrics
 
                     metrics = get_performance_metrics()
+                    link = await self._refresh_link()
 
                     # Send heartbeat as PONG with performance metrics
                     heartbeat_message = Message(
@@ -1168,6 +1183,7 @@ class FastAPIWorker:
                         data={
                             "worker_id": self.config.worker_id,
                             "status": "online",
+                            **({"link": link} if link else {}),
                             "current_task": (
                                 self.current_task["task_id"]
                                 if self.current_task

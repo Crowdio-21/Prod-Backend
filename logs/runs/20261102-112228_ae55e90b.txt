@@ -1,0 +1,30 @@
+Run ae55e90b-4ff7-4360-872f-9602e934e0d5
+  status      client_disconnected
+  started     2026-11-02T11:22:28    finished -
+  duration    167.27 s    throughput 1.15 tasks/s
+  tasks       192/300 completed   {'completed': 192, 'pending': 100, 'blocked': 8}
+  scheduler   BandwidthAwareScheduler    DNN worker scope mobile
+
+Stages
+  stage  name           tasks  done   task seconds (mean / p50 / p95 / max)      span
+  0      cell_a           100   100    0.47 s /  0.45 s /  0.70 s /  1.16 s   56.25 s
+          workers: android_sma366e_71a3f3=100
+  1      cell_b           100    92    0.85 s /  0.82 s /  1.09 s /  1.49 s   89.10 s
+          workers: android_sma366e_71a3f3=93  unassigned=7
+  2      cell_c           100     0         - /       - /       - /       -   -
+          workers: unassigned=100
+
+Workers
+  worker                kind    platform     tasks   busy s   by stage
+  android_sma366e_71a3f mobile  Android        193    125.7   {'0': 100, '1': 93}
+  unassigned            unknown -              107      0.0   {'1': 7, '2': 100}
+
+Link estimates when the run ended
+  worker                 down Mbit/s  up Mbit/s  rtt ms  samples compute s
+  worker-17add0ff               5.12       2.57  2041.3      9/9         -
+  worker-19e1a85c               5.13       2.57  2041.2      9/9         -
+  worker-855fcf1b               5.13       2.51  2039.4      9/9         -
+  worker-976b0df0               5.11       2.57  2038.7      9/9         -
+  worker-a06e6fe3               5.12       2.56  2044.4      9/9         -
+
+Failures: 0

@@ -3,6 +3,7 @@ WebSocket manager for CrowdCompute Foreman - Refactored
 """
 
 import asyncio
+import os
 import json
 import time
 import websockets
@@ -48,15 +49,16 @@ class WebSocketManager:
         manager = WebSocketManager(scheduler=custom_scheduler)
     """
 
-    def __init__(self, scheduler: TaskScheduler = None, scheduler_type: str = "fifo"):
+    def __init__(self, scheduler: TaskScheduler = None, scheduler_type: str = None):
         """
         Initialize WebSocket manager
 
         Args:
             scheduler: Custom scheduler instance (optional)
             scheduler_type: Type of scheduler to create if scheduler not provided
+                          (default: CROWDIO_SCHEDULER, else "fifo")
                           Options: "fifo", "round_robin", "performance",
-                                  "least_loaded", "priority"
+                                  "least_loaded", "priority", "bandwidth_aware"
         """
         # Core components
         self.connection_manager = ConnectionManager()
@@ -65,8 +67,11 @@ class WebSocketManager:
 
         # Scheduler
         if scheduler is None:
-            scheduler = create_scheduler(scheduler_type)
+            # CROWDIO_SCHEDULER picks the scheduler when none is given (default: fifo)
+            scheduler = create_scheduler(scheduler_type or os.getenv("CROWDIO_SCHEDULER") or "fifo")
         self.scheduler = scheduler
+        print(f"[SCHEDULER] {scheduler.__class__.__name__} "
+              f"(CROWDIO_SCHEDULER={os.getenv('CROWDIO_SCHEDULER') or 'not set, default fifo'})")
 
         # Task dispatcher
         self.task_dispatcher = TaskDispatcher(
@@ -86,7 +91,8 @@ class WebSocketManager:
 
         # Completion handler
         self.completion_handler = JobCompletionHandler(
-            connection_manager=self.connection_manager, job_manager=self.job_manager
+            connection_manager=self.connection_manager, job_manager=self.job_manager,
+            task_dispatcher=self.task_dispatcher,
         )
 
         # Message handlers
@@ -226,7 +232,20 @@ class WebSocketManager:
             if job_id:
                 print(f"[CLEANUP DEBUG] Client for job {job_id} disconnected")
                 self.connection_manager.remove_client(job_id)
+                await self._log_unfinished_run(job_id)
     
+    async def _log_unfinished_run(self, job_id: str) -> None:
+        """A client left before its job finished: record how far the run got."""
+        try:
+            from .run_log import log_job_run
+
+            job = await self.job_manager.get_job_info(job_id)
+            if job is not None and job.status != "completed":
+                await log_job_run(self.job_manager, self.connection_manager, self.task_dispatcher, job_id,
+                                  status="client_disconnected")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[RUN LOG] could not log unfinished job {job_id}: {exc}")
+
     async def _record_worker_disconnection_failures(self, worker_id: str):
         """
         Record failures for all tasks assigned to a disconnected worker

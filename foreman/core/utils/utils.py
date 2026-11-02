@@ -325,7 +325,7 @@ async def _get_worker_stats(worker_id: str):
 
 async def _get_worker_stats_extended(worker_id: str):
     """
-    Get EXTENDED worker statistics including device specs for MCDM
+    Get EXTENDED worker statistics including device specs and live metrics
 
     Args:
         worker_id: Worker identifier

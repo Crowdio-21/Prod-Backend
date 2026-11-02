@@ -599,7 +599,7 @@ class TaskDispatcher:
 
     async def _get_all_workers(self) -> Dict[str, Worker]:
         """
-        Get all worker objects with EXTENDED device specifications for MCDM
+        Get all worker objects with device specifications and live metrics
 
         Returns workers with:
         - Basic stats: tasks_completed, tasks_failed, status

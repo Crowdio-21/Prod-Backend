@@ -21,7 +21,7 @@ class Task:
 
 @dataclass
 class Worker:
-    """Worker information for scheduling - EXTENDED for MCDM"""
+    """Worker information for scheduling, including device specs and live metrics"""
 
     # Basic info (existing)
     id: str
@@ -30,7 +30,7 @@ class Worker:
     tasks_failed: int = 0
     current_task_id: Optional[str] = None
 
-    # Device specifications (NEW for MCDM)
+    # Device specifications
     cpu_cores: int = 1
     cpu_threads: int = 1
     cpu_frequency_mhz: float = 1000.0
@@ -39,23 +39,23 @@ class Worker:
     ram_total_mb: float = 1024.0
     ram_available_mb: float = 512.0
 
-    # Battery/Power (NEW for MCDM)
+    # Battery/Power
     battery_level: float = 100.0  # 0-100
     is_charging: bool = True
 
-    # Network (NEW for MCDM)
+    # Network
     network_type: str = "WiFi"  # WiFi, Cellular, Ethernet
     network_speed_mbps: float = 10.0
 
-    # Performance (NEW for MCDM)
+    # Performance
     avg_task_duration_sec: float = 0.0
-    success_rate: float = 1.0  # Moved from property to field for MCDM
+    success_rate: float = 1.0
 
-    # GPU (NEW for MCDM)
+    # GPU
     gpu_available: bool = False
     gpu_model: Optional[str] = None
 
-    # Storage (NEW for MCDM)
+    # Storage
     storage_available_gb: float = 0.0
 
     # Device info
@@ -123,6 +123,18 @@ class TaskScheduler(ABC):
         """
         pass
 
+    # Optional feedback hooks. The Foreman calls these for every scheduler; schedulers that
+    # learn from what they observe override them, the rest ignore them.
+    def observe_link_report(self, worker_id: str, report: dict) -> None:
+        """A worker reported its own link measurement ``{down_bps, up_bps, rtt_s}`` (bytes/s, seconds)."""
+
+    def observe_completion(self, task_id: str, worker_id: str, result_bytes: int) -> None:
+        """A task finished on ``worker_id`` and produced ``result_bytes`` of result text."""
+
+    def link_snapshot(self) -> Optional[dict]:
+        """Link/compute estimates for monitoring, or None if this scheduler keeps none."""
+        return None
+
     async def batch_select_workers(
         self, tasks: List[Task], available_workers: Set[str], all_workers: dict
     ) -> List[tuple]:
@@ -130,7 +142,7 @@ class TaskScheduler(ABC):
         Optimized batch assignment: select workers for multiple tasks at once.
 
         This method ranks workers ONCE and assigns them to tasks, avoiding
-        redundant MCDM computations. Subclasses can override for custom logic.
+        redundant ranking computations. Subclasses can override for custom logic.
 
         Optimization strategy:
         - If tasks >= available_workers: Skip ranking, assign all workers (no choice needed)
@@ -145,7 +157,7 @@ class TaskScheduler(ABC):
             List of (task, worker_id) tuples for successful assignments
         """
         # Default implementation: fall back to individual select_worker calls
-        # Subclasses (like BaseMCDMScheduler) should override for optimization
+        # Subclasses that rank workers should override this to rank only once
         assignments = []
         remaining_workers = set(available_workers)
 

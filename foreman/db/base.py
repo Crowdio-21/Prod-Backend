@@ -8,8 +8,8 @@ import asyncio
 import os
 import sqlite3
 
-# Database URL
-DATABASE_URL = "sqlite+aiosqlite:///./crowdio.db"
+# Database URL. CROWDIO_DATABASE_URL overrides it (the tests use a throwaway database).
+DATABASE_URL = os.getenv("CROWDIO_DATABASE_URL") or "sqlite+aiosqlite:///./crowdio.db"
 
 # Create async engine
 # timeout (seconds) lets SQLite wait for transient locks instead of failing fast.

@@ -267,8 +267,11 @@ class WorkerMessageHandler:
         if worker_id:
             await _update_worker_status(worker_id, "online")
             # Accepts PING replies, periodic PC heartbeats and Android heartbeats alike.
-            from .worker_metrics import extract_performance_metrics
+            from .worker_metrics import extract_link_report, extract_performance_metrics
 
+            link = extract_link_report(message.data)
+            if link:  # schedulers that track bandwidth learn from the worker's own measurement
+                self.task_dispatcher.scheduler.observe_link_report(worker_id, link)
             metrics = extract_performance_metrics(message.data)
             if metrics:
                 await self._update_worker_performance_metrics(worker_id, metrics)
@@ -485,6 +488,8 @@ class WorkerMessageHandler:
             self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
+            # Let a learning scheduler see the turnaround and result size (no-op for the others)
+            self.task_dispatcher.scheduler.observe_completion(task_id, worker_id, len(result_str))
 
             # Pipeline dependency resolution
             pipeline_batch_dispatched = False
