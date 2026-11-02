@@ -46,7 +46,7 @@ CROWDio uses a hub-and-spoke model. Clients and workers both connect to the Fore
                                                            +--------------------------+
                                                               |                  |
                                      assign / resume tasks    |                  |  jobs, tasks, workers,
-                                     reconfiguration msgs     v                  v  checkpoints, scheduler cfg
+                                     reconfiguration msgs     v                  v  checkpoints
                                           +--------------------------+   +---------------------------+
                                           |  Workers (1..N)          |   |  SQLite: ./crowdio.db     |
                                           |  pc_worker (PC_PYTHON)   |   |  foreman/db/models.py     |
@@ -70,7 +70,7 @@ Endpoints (defaults):
 Entry point: `foreman/main.py` (FastAPI app `foreman.main:app`)
 
 On startup it:
-- Initializes and seeds the database (`foreman/db/seed.py`), including default MCDM scheduler configs
+- Initializes the database (`foreman/db/seed.py`)
 - Creates the `WebSocketManager`. When `adaptive_planning` is on, it also builds and starts the plan coordinator ([section 13](#13-reconfiguration-aware-planning)) and prints the feature flags (`[FLAGS] ...`)
 - Starts the WebSocket server on `0.0.0.0:9000` with `max_size=None` (no message size cap) and application-level ping/pong
 
@@ -125,7 +125,6 @@ foreman/                    Orchestrator service
   main.py                   FastAPI app + WebSocket server startup
   api/
     routes.py               Core REST endpoints + dashboard
-    scheduler_routes.py     /api/scheduler/*
     evaluation_routes.py    /api/evaluation/*
     checkpoint_routes.py    Checkpoint route factory
     websockets.py           /api/websocket-stats, /ws
@@ -149,7 +148,9 @@ foreman/                    Orchestrator service
     foreman_policy.py       Earlier break-even policy and executor (dormant; kept for compatibility)
     reconfiguration.py      Earlier coordinator for foreman_policy (dormant)
     reconfiguration_protocol.py  Protocol-v1 reconfiguration envelope
-    scheduling/             FIFO, round-robin, least-loaded, performance, priority, MCDM
+    scheduling/             FIFO, round-robin, least-loaded, performance, priority, bandwidth-aware
+                            (bandwidth_scheduler.py, link_estimator.py)
+    run_log.py              One record per finished run (logs/runs/)
     staged_results_manager/ Checkpoint storage and recovery
   planning/                 Pure planning core (no I/O, clocks or globals; reused by the simulator)
     contract.py             Shared SDK/Foreman/worker contract (ShardSpec, WorkerState, Plan, messages)
@@ -168,12 +169,14 @@ foreman/                    Orchestrator service
 pc_worker/                  Worker service
   main.py                   CLI entry point
   config.py                 WorkerConfig
-  core/                     worker.py, app.py, task_wrapper.py, reconfiguration_protocol.py
+  core/                     worker.py, app.py, task_wrapper.py, link_probe.py, reconfiguration_protocol.py
   api/                      Status routes and dashboard
   staged_results_manager/   Checkpoint handler and delta computation
 
 evaluation/                 Metrics collectors, trackers, experiments, charts
   reconfig/                 Planner simulator, scenarios, metrics, replay, CLI (run.py), example configs
+  scheduler_sim.py          Compares schedulers on simulated uneven links (python -m evaluation.scheduler_sim)
+  devsim/                   Device simulator: a fleet of virtual devices with changing bandwidth against the real Foreman
 docs/reconfiguration/       Step 0 inspection report and per-component build report
 tests/                      Launchers, example clients, workloads, unit tests
   planning/                 Planner/controller/cost-model tests, fake-worker integration, live WebSocket smoke test
@@ -221,9 +224,11 @@ There are two dependency sources, and they differ:
 | File | Contents | Use for |
 |---|---|---|
 | `pyproject.toml` / `uv.lock` | Core Foreman/worker deps, `crowdio-sdk>=0.3.1`, `onnxruntime`, `pyyaml`; optional `dev` extra (`pytest`, `httpx`) | Running Foreman and workers; tests |
-| `requirements.txt` | Core deps (including `pyyaml`) plus ML workloads (`tensorflow`, `torch`, `transformers`, `onnx`, `opencv`, `scikit-learn`, `pandas`, `kagglehub`), `crowdio-sdk>=2.0.1` | Running the sample ML/DNN workloads in `tests/`; used by the Dockerfiles |
+| `requirements.txt` | Core deps (including `pyyaml`) plus ML workloads (`tensorflow`, `torch`, `transformers`, `onnx`, `opencv`, `scikit-learn`, `pandas`, `kagglehub`), `crowdio-sdk>=0.3.1` | Running the sample ML/DNN workloads in `tests/`; used by the Dockerfiles |
 
 Pick one per environment.
+
+**Note:** the published `crowdio-sdk` 2.0.1 on PyPI lacks `common.serializer.deserialize_tensor`, which the DNN pipeline needs. Install the sibling checkout (`pip install ../CROWDio-SDK`, version 0.4.0) after `requirements.txt`; the version range `>=0.3.1` keeps pip from replacing it.
 
 With uv:
 
@@ -291,6 +296,22 @@ python tests/run_multiple_workers.py 8 --start-port 8001
 ```
 
 On Windows, set `PYTHONIOENCODING=utf-8` if the console fails on emoji/arrow characters in log output.
+
+### Run logs
+
+When a job finishes, the Foreman writes one record to `logs/runs/runs.jsonl` and a readable report next to it (`<start time>_<job id>.txt`). It shows the duration and throughput, tasks per stage with task-time statistics, which workers (mobile or PC) ran what, failures, how many results came back, and the link estimates when the run ended. A job whose client disconnects early is logged with status `client_disconnected`. Planned-inference runs also write their event log there (`plan_<time>.jsonl`). `CROWDIO_RUN_LOG_DIR` changes the directory.
+
+```bash
+python tests/view_runs.py            # table of the latest runs
+python tests/view_runs.py --last     # full report of the latest run
+python tests/view_runs.py --job 3f2a # a specific run (by the start of its job id)
+```
+
+The same data is served at `GET /api/runs` and `GET /api/runs/{job_id}?format=text`. The sentiment test (`multi_input_test.py`) also saves its per-sentence predictions to `logs/runs/sentiment_<time>.csv`.
+
+### Simulating many devices
+
+`python -m evaluation.devsim run --scenario drop --scheduler bandwidth_aware --devices 15` runs the real Foreman against 15 simulated phones whose bandwidth changes. All scenarios, workloads and options are in section 15.
 
 ## 8. Running with Docker
 
@@ -430,28 +451,33 @@ Inspect checkpoints with `python tests/view_checkpoints.py`, or via:
 
 The live dispatcher is created by `WebSocketManager` with the **FIFO** scheduler by default (`foreman/core/ws_manager.py`).
 
-Available schedulers (`foreman/core/scheduling/factory.py`):
+Available schedulers (`foreman/core/scheduling/factory.py`): `fifo`, `round_robin`, `least_loaded`, `performance`, `priority`.
 
-| Type | Names |
-|---|---|
-| Simple | `fifo`, `round_robin`, `least_loaded`, `performance`, `priority` |
-| MCDM (weighted criteria) | `aras`, `edas`, `mabac`, `wrr` |
+- `fifo` hands tasks to workers in the order they became available.
+- `round_robin` rotates through the workers.
+- `least_loaded` picks the worker with the fewest assigned tasks.
+- `performance` prefers the workers with the best success rate and most completed tasks.
+- `priority` honours task priority.
+- `bandwidth_aware` places each task where it should finish soonest, counting the time to move its data (below).
+- Apart from `bandwidth_aware`, none of them reads link speed, and none reads live battery, RAM or CPU values. Those are stored in the `workers` table and shown on the dashboard.
 
-MCDM configs (criteria weights, names, types) are seeded into the database at startup, with `aras` marked active. Manage them over REST:
+The scheduler is chosen with the `CROWDIO_SCHEDULER` environment variable (default `fifo`), in code with `WebSocketManager(scheduler_type="...")`, or at runtime with its scheduler-change method. There is no REST endpoint for choosing it. An unknown name raises `ValueError` listing the valid ones. `GET /api/scheduling-info` reports the scheduler that is running, plus per-worker and per-job placement data for the dashboard.
 
-```bash
-curl http://localhost:8000/api/scheduler/algorithms
-curl http://localhost:8000/api/scheduler/config
-curl http://localhost:8000/api/scheduler/config/aras
-curl -X POST http://localhost:8000/api/scheduler/activate/edas
-curl http://localhost:8000/api/scheduler/stats
+Scheduling decisions are logged to `logs/fifo_decisions.log`.
+
+### Bandwidth-aware scheduler
+
+```powershell
+$env:CROWDIO_SCHEDULER = "bandwidth_aware"; python tests\run_foreman_simple.py
 ```
 
-`POST /api/scheduler/config` creates or updates a config.
+It estimates, for every task and worker, `rtt + (arguments + code + model not yet on the worker) / downlink + compute + expected result size / uplink`, and maps the batch of waiting tasks with the Sufferage heuristic on those completion times. Large payloads therefore get the fast links, a task waits briefly for a fast worker that is about to free up instead of going to a slow idle one, and with fewer tasks than workers the slow links stay idle. A task that has waited 60 s is forced onto an idle worker.
 
-> Activating a config only updates the database. It does not swap the running dispatcher's scheduler, and the Foreman does not read the active config at startup (the endpoint's "restart foreman to apply changes" note does not hold yet). To change the live scheduler, construct `WebSocketManager(scheduler_type=...)` or call its scheduler-change method in code.
-
-Scheduling decisions are logged to `logs/fifo_decisions.log` and `logs/mcdm_decisions.log`.
+- **Where the numbers come from:** each PC worker measures its own link to the Foreman while idle (a timed download and upload against `/api/probe`, at most once a minute) and reports it in its heartbeat. Android workers already report timed transfer rates in their heartbeat. The Foreman learns compute time per worker and per model (or function) from task turnaround, minus the transfer it predicted. A worker with no measurement looks average, so it still gets tried and measured.
+- **Settings:** `CROWDIO_SHARED_CAPACITY_MBPS` sets the capacity of a medium that concurrent transfers share (a single Wi-Fi access point, say); transfers are then given a max-min fair share. Unset, links are treated as independent. `CROWDIO_FOREMAN_HTTP` tells workers where the Foreman's REST API is (default: the WebSocket host on port 8000).
+- **Monitoring:** `GET /api/links` shows each worker's estimated Mbit/s, round trip, sample count and compute time, plus recent decisions. Each run report ends with the estimates.
+- **Comparison:** `python -m evaluation.scheduler_sim` runs the real scheduler classes on simulated workers over 30 random layouts. On uneven links the mean makespan is 4.2 s, against 8.4 to 9.6 s for FIFO (it varies between runs, because FIFO takes workers in Python set order) and 9.9 s for round-robin; the worst case is 5.2 s against 14 to 17 s. With identical links it is no worse. The simulation uses the scheduler's own cost model, so it shows the policy working with accurate estimates, not that the estimates are accurate.
+- **Design and literature:** [docs/bandwidth_aware_scheduling.md](docs/bandwidth_aware_scheduling.md).
 
 ## 12. DNN Partitioning and Shard Reconfiguration
 
@@ -508,21 +534,74 @@ The Foreman can choose **where each shard runs** (placement) and **where the mod
 
 ### Feature flags
 
-All flags default **off**. With all flags off, no coordinator is built and the Foreman behaves exactly as before.
+There are five flags. All default **off**. With every flag off no coordinator is built and the Foreman behaves exactly as it did before this feature existed.
 
-| Flag | Enables |
-|---|---|
-| `adaptive_planning` | The plan coordinator: planned inference (`submit_inference`), the planner and the controller. The other flags need it. |
-| `direct_path` | Worker-to-worker activations when a peer link is reachable, fresh and cheaper by a margin; otherwise the relay through the Foreman |
-| `peer_fetch` | Shard files fetched from eligible donor workers' disks instead of the Foreman |
-| `prefetch` | Standby workers download likely-next shards to disk (never loading them) |
-| `problem_reports` | Non-urgent worker problem reports feed the controller. Urgent ones (`NEXT_HOP_DOWN`, `OOM`, `LOAD_FAILED`) are always handled. |
+| Flag | What it changes | Extra traffic | Workers must support |
+|---|---|---|---|
+| `adaptive_planning` | Builds the plan coordinator: planned inference (`submit_inference`), the planner, the controller, epochs, the relay of activations through the Foreman. **The master switch: every other flag is ignored without it.** | `probe`, `report`, `load`, `run`, `route`, `flags` (v2 envelopes) | Protocol v2 with the engine messages `load`, `run`, `route` |
+| `problem_reports` | Non-urgent worker problem reports (for example a slow stage) feed the controller. Urgent ones (`NEXT_HOP_DOWN`, `OOM`, `LOAD_FAILED`) are always handled, flag or not. | None extra (workers send `problem` when they have one) | `problem` |
+| `prefetch` | Standby workers download the shard they are likely to need next to disk (never loading it), so a later switch skips the fetch. | The shard file, once per standby | `prefetch`, `cancel_prefetch` |
+| `peer_fetch` | A worker may fetch a shard from a donor worker's disk instead of from the Foreman. The planner prices `C_fetch` from the donor's link. | Shard file worker to worker, plus capability probes | `peer_fetch`, `serve_allowed`, and a reachable peer endpoint |
+| `direct_path` | Activations travel worker to worker when the peer link is reachable, fresh and cheaper by a margin; otherwise they relay through the Foreman. | Activations leave the Foreman path; extra `route` messages | `route` and a reachable peer endpoint |
 
-Enable flags with an environment variable (a comma list or JSON), or in a YAML run config:
+#### How to set flags
 
-```bash
-CROWDIO_FLAGS=adaptive_planning,problem_reports python tests/run_foreman_simple.py
+Highest priority first:
+
+1. `CROWDIO_FLAGS` environment variable. A comma list (`adaptive_planning,problem_reports`) or JSON (`{"adaptive_planning": true, "prefetch": true}`). It **replaces** the flags in the run config, it does not merge with them.
+2. `flags:` in the YAML run config (`CROWDIO_RUN_CONFIG`), for example `flags: {adaptive_planning: true, problem_reports: true}`.
+3. Nothing: all off.
+
+An unknown flag name is an error (`ValueError`), so a typo stops the Foreman instead of silently doing nothing.
+
+```powershell
+$env:CROWDIO_FLAGS = "adaptive_planning,problem_reports"
+python tests/run_foreman_simple.py
 ```
+
+The Foreman prints the active flags at startup (`[FLAGS] ...`). `GET /api/plan/status` shows them while it runs, and the event log `logs/runs/plan_<timestamp>.jsonl` records every decision.
+
+#### Every case
+
+Thirty-two combinations exist, but only the ones below behave differently. A flag combination not listed behaves as the closest listed one (for example `prefetch` and `peer_fetch` without `adaptive_planning` are both case 1).
+
+| # | Flags | Behaviour | Use it to |
+|---|---|---|---|
+| 1 | none, or any flags **without** `adaptive_planning` | No coordinator. Legacy scheduling only. The Foreman logs a warning that the other flags are ignored. | Run as before |
+| 2 | `adaptive_planning` | Planned inference with the relay through the Foreman. Shards come from the Foreman, nothing is pre-downloaded. Only urgent problem reports are handled. | Smallest useful setup; the baseline for the others |
+| 3 | `adaptive_planning,problem_reports` | Case 2, plus slow-stage and similar reports can trigger a re-plan. | React to degradation a worker notices before the Foreman does |
+| 4 | `adaptive_planning,prefetch` | Case 2, plus standby workers pre-download likely-next shards. | Make switches cheaper when workers have spare disk |
+| 5 | `adaptive_planning,peer_fetch` | Case 2, plus shards may come from donor workers. | Offload the Foreman's uplink |
+| 6 | `adaptive_planning,prefetch,peer_fetch` | Prefetch sources from donors too. | Pre-load without loading the Foreman |
+| 7 | `adaptive_planning,direct_path` | Case 2, plus worker-to-worker activations where a good peer link exists. | Cut the Foreman out of the data path |
+| 8 | `adaptive_planning,direct_path,peer_fetch` | Direct activations and donor fetches. Capability probes run so the planner knows which links are real. | Fully peer-to-peer data |
+| 9 | all five | Everything on. | Complete system; the most demanding on workers |
+
+The other combinations (for example `adaptive_planning,problem_reports,prefetch`) simply add each flag's effect on top of case 2; the effects are independent.
+
+#### What works with which worker today
+
+| Worker | `adaptive_planning` | `problem_reports` | `prefetch` | `peer_fetch` | `direct_path` |
+|---|---|---|---|---|---|
+| Android app (current build) | Yes: `probe`, `msg_ack`, `flags`, and `load`/`run`/`route` when the shard engine is present | Yes (sends `problem`) | **No**: answers `prefetch` and `cancel_prefetch` with status `unsupported` | **No**: `peer_fetch` and `serve_allowed` are unsupported | Unverified: the app has no peer listener yet (it reports `peer_endpoint: null`) |
+| PC worker (`pc_worker`) | **No**: speaks only protocol v1 and rejects version 2 envelopes | No | No | No | No |
+| Simulated devices (`evaluation.devsim`) | **No**: legacy protocol only | No | No | No | No |
+| Fake workers (`tests/planning/fake_workers.py`) | Yes | Yes | Yes | Yes | Yes |
+
+Consequences:
+
+- Cases 4 to 9 can be run end to end only against the fake workers until the Android app implements the missing messages. The planner still prices them correctly in the simulation harness (section 15).
+- **Do not enable `adaptive_planning` while PC workers are connected.** The coordinator sends a v2 `probe` to every connected worker and has no capability check yet (Known Gaps), so a legacy PC worker answers with errors and planned inference can stall waiting for it. Use `CROWDIO_DNN_WORKERS=mobile` (the default) and connect phones only.
+- To validate partitions on PCs you must use the legacy path (case 1) with `CROWDIO_DNN_WORKERS=pc`, or the simulation harness.
+
+#### How to check a flag case is active
+
+1. Startup line: `[FLAGS] {'adaptive_planning': True, 'direct_path': False, ...}`.
+2. `GET /api/plan/status` returns the flags and the current plan.
+3. In `logs/runs/plan_<timestamp>.jsonl` look for the events each flag produces: `prefetch` events (`prefetch`, `peer_fetch` when the source is a donor), `route` events with a peer next hop (`direct_path`), `problem` records (`problem_reports`).
+4. Run the matrix test, which drives a fake-worker job through every combination: `python -m pytest tests/planning/test_flag_matrix.py -q`.
+
+#### Other settings
 
 | Variable | Purpose |
 |---|---|
@@ -618,14 +697,14 @@ Core:
 | GET | `/api/checkpoints/job/{job_id}` | Checkpoints for a job |
 | GET | `/api/checkpoints/recovery-events` | Recovery events |
 | GET | `/api/dnn/observability` | DNN routing summary and recent events |
+| GET | `/api/links` | Per-worker link and compute estimates (bandwidth-aware scheduler) |
+| GET | `/api/runs`, `/api/runs/{job_id}` | Run records written when jobs finish (`?format=text` for the report) |
 | GET | `/api/models/{model_name}` | Download an exported `.onnx` model |
 | GET | `/api/websocket-stats` | WebSocket connection stats |
 | GET | `/api/shards/manifest` | Shard manifest (shared contract) |
 | GET | `/api/shards/{shard_id}` | Shard file; supports `Range` (206) and sends `X-Content-SHA256` |
 | GET / POST | `/api/probe/{size}`, `/api/probe` | Bandwidth probe download / upload |
 | GET | `/api/plan/status` | Plan coordinator status (`{"enabled": false}` when the flag is off) |
-
-Scheduler (`/api/scheduler`): `GET /algorithms`, `GET /config`, `GET /config/{algorithm_name}`, `POST /config`, `POST /activate/{algorithm_name}`, `GET /stats`.
 
 Evaluation (`/api/evaluation`): `GET /metrics`, `GET /job/{job_id}`, `GET /load-distribution`, `GET /throughput-history`, `GET /worker-performance`.
 
@@ -644,11 +723,72 @@ Modules under `evaluation/`:
 
 CLIs: `python -m evaluation.real_runner --host --port --output --quick`, `python -m evaluation.real_metrics_collector --output --since-hours --job-ids`, and `python -m evaluation.runner --quick --output --iterations`. Output goes to `evaluation_results/` by default.
 
+### Which simulator answers which question
+
+| Question | Tool | Runs the real Foreman? |
+|---|---|---|
+| Which **scheduler** copes best with 15 devices whose bandwidth changes? | `evaluation.devsim` | Yes, over the real WebSocket protocol |
+| Do my own test scripts work against a large fleet? | `evaluation.devsim serve` | Yes |
+| When should the **planner** switch placement or partition, and what does a switch cost? | `evaluation.reconfig.run` | No, the same pure planner and controller only |
+| How do the five **flags** compare in cost and latency? | `evaluation.reconfig.run notax` and `compare` | No |
+| Raw scheduler policies on uneven links, quickly | `evaluation.scheduler_sim` | No, the real scheduler classes on simulated workers |
+
+### Device simulator (`evaluation/devsim/`)
+
+Runs the **real Foreman** against simulated phones that speak the real worker protocol and register as Android phones. Each device has a bandwidth that changes over time; every message waits for its transfer time at the device's current rate. Full details and limits: [docs/device_simulator.md](docs/device_simulator.md).
+
+```powershell
+python -m evaluation.devsim scenarios                     # list scenarios and workloads
+python -m evaluation.devsim trace --scenario drop         # bandwidth over time, nothing runs
+python -m evaluation.devsim run --scenario drop --scheduler bandwidth_aware --devices 15
+python -m evaluation.devsim compare --scenario drop --schedulers fifo,round_robin,bandwidth_aware --repeats 3
+python -m evaluation.devsim serve --scenario congestion   # real Foreman on :8000/:9000 plus the fleet
+```
+
+**Scenarios** (`--scenario`; the same seed gives every scheduler the same bandwidth):
+
+| Scenario | What happens |
+|---|---|
+| `stable` | Nominal bandwidth throughout |
+| `congestion` | Each link flips between good and congested (15% of nominal) |
+| `drift` | Bandwidth drifts around nominal (mean-reverting random walk) |
+| `drop` | The fastest third of the fleet falls to 8% from 30 s to 100 s |
+| `commute` | Drifting links; a third of the devices also pass through 2 to 6 s outages |
+| `churn` | Stable links; three devices leave around 25 s and two return around 70 s |
+| `shared-wifi` | Congested links, and all devices share one 100 Mbit/s access point |
+
+**Workloads** (`--workload`):
+
+| Workload | Job |
+|---|---|
+| `mixed` (default) | 150 tasks, 20 KB to 5 MB payloads, 1 to 3 s of work |
+| `uniform` | 120 identical tasks: 500 KB in, 50 KB out, 2 s |
+| `dnn3` | 3-stage pipeline like the DistilBERT sentiment test, 40 inputs; each device downloads each model file once over its own link |
+| `stream` | 10 jobs of 12 tasks, one every 8 s |
+
+**Options**:
+
+| Option | Meaning |
+|---|---|
+| `--devices N` (15), `--pc N` (0) | Fleet size; how many of them are PCs (phones: 20% flagship, 40% mid, 40% low) |
+| `--scheduler` | `fifo`, `round_robin`, `bandwidth_aware` (`run`, `serve`); `--schedulers a,b,c` and `--repeats N` for `compare` |
+| `--mode model` (default) / `real` | `model`: a task takes its modelled time. `real`: the task function really runs (speed 1, light tasks only) |
+| `--speed S` (1) | Simulated seconds per real second. Keep at 1 to 2: the Foreman is not sped up and handles about 6 to 7 tasks per second |
+| `--tasks N`, `--work-scale X`, `--model-scale X` | Job size, compute multiplier, model-file shrink for `dnn3` (default 0.05) |
+| `--shared-capacity-mbps M` | Put every device behind one shared medium |
+| `--seed`, `--out`, `--timeout`, `--quiet`, `--verbose` | Reproducibility and output |
+
+Output in `devsim_results/<name>/`: `summary.json`, `devices.csv`, `bandwidth_trace.csv`, `events.jsonl`, `run_logs/`. Runs use a throwaway database, never `crowdio.db`.
+
+**Limits.** The simulated devices speak the legacy protocol only, so this tool compares **schedulers**; it cannot exercise `adaptive_planning` or any other flag (use the harness below). Everything shares one machine and the network is a fluid model (no packet loss or TCP dynamics). Numbers are plausible for phones, not measured.
+
+**Measured result** (`drop`, 15 devices, `mixed`, 2 runs each, same bandwidth for every scheduler): makespan 64.6 s for FIFO, 63.3 s for round-robin, 60.9 s for bandwidth-aware (5.8% faster than FIFO). The ordering is as expected but the gap is small and the sample is two runs, so treat it as indicative. Details: [docs/device_simulator.md](docs/device_simulator.md) section 9.
+
 ### Reconfiguration experiment harness (`evaluation/reconfig/`)
 
-A trace-driven simulator runs the **same** pure planner and controller as the Foreman. Ground truth (links, compute, phase times) changes with a scenario, and the controller only sees noisy telemetry.
+A trace-driven simulator runs the **same** pure planner and controller as the Foreman. Ground truth (links, compute, phase times) changes with a scenario, and the controller only sees noisy telemetry. It is the place to study the **flags** and **policies**: the simulator honours the same five flags as the Foreman.
 
-```bash
+```powershell
 python -m evaluation.reconfig.run compare --config evaluation/reconfig/configs/run_example.yaml --spec evaluation/reconfig/configs/spec_distilbert_5phones.yaml
 ```
 
@@ -662,9 +802,19 @@ python -m evaluation.reconfig.run compare --config evaluation/reconfig/configs/r
 | `dp-gap` | Gap of the scalarised and Pareto DPs against exhaustive search on random instances |
 | `live` | Submit planned inference to a running Foreman, fire scenario commands, and record Foreman CPU (`--foreman-pid`) |
 
+To simulate a flag case, set `flags:` in the run config (or `CROWDIO_FLAGS`), then run `sim` or `compare`. `notax` already contrasts all flags off with all on, which measures what the flags cost when nothing is going wrong.
+
 Scenario events (`network`, `load`, `drop_worker`, `join_worker`, `command`) are scheduled in the run config. In live mode the harness only runs the configured external command (for example `tc` on a Linux access point), so network shaping stays outside the app.
 
 The simulation spec (`configs/spec_distilbert_5phones.yaml`) uses **placeholder** Android phase times. Replace them with the mobile benchmark's measurements before drawing conclusions.
+
+### Scheduler model (`evaluation/scheduler_sim.py`)
+
+Runs the real scheduler classes on simulated workers over 30 random layouts with uneven links, without the Foreman:
+
+```powershell
+python -m evaluation.scheduler_sim
+```
 
 ## 16. Tests and Utility Scripts
 
@@ -674,12 +824,17 @@ Automated tests (no Foreman or workers needed):
 python -m pytest tests/
 ```
 
+The tests always use a temporary database (`tests/conftest.py` sets `CROWDIO_DATABASE_URL`), never `crowdio.db`.
+
 This runs the original unit tests (`tests/test_*.py`) plus `tests/planning/`:
 - hand-computed cost-model cases for all three residency states, with and without peer fetch;
 - planner property tests (feasibility, single residency, Pareto DP equals exhaustive, S-aware equals B2 at zero switching cost, B1 ranks like B0 at zero bandwidth weight);
 - controller hysteresis and break-even tests;
 - fake-worker integration tests (bandwidth drop with a warm vs cold replacement, worker loss with in-flight resume, small-N rejection, a peer path blocked mid-run, duplicate delivery after fallback, load failure, prefetch, replay);
 - a live WebSocket round trip through the real `WebSocketManager`.
+- `test_flag_matrix.py`: all 32 flag combinations: parsing (comma list vs JSON, unknown names rejected, environment replaces the run config), no coordinator without `adaptive_planning`, and a full fake-worker job for each of the 16 combinations with it.
+
+Other suites in `tests/`: the bandwidth-aware scheduler and scheduler factory, run logs, test-database isolation, worker classification, and the device simulator (`test_devsim_core.py` for the link engine and bandwidth models, `test_devsim_run.py` for small and 15-device worlds against the real Foreman; the latter takes about 45 s). The full suite is 356 tests and takes about 70 s.
 
 Launchers and utilities in `tests/`:
 
@@ -709,12 +864,16 @@ Sample workloads (require a running Foreman and workers; most need the ML deps f
 | Database | `./crowdio.db` (relative to the working directory) | Hardcoded in `foreman/db/base.py`; WAL files alongside |
 | Large payloads | `./.payload_store/` | Referenced in SQLite as `payload_ref://...` |
 | Checkpoints | `./.checkpoints/` | Written by the Foreman's storage handler |
-| Scheduler logs | `./logs/` | FIFO and MCDM decision logs |
+| Scheduler logs | `./logs/` | FIFO decision log |
 | ONNX models | `CROWDIO_MODEL_DIR` (default `tools/onnx_partitions_sentiment/`) | Served by `/api/models/{model_name}` |
 | Worker settings | CLI flags (section 2) or Docker env vars (section 8) | |
 | Feature flags, run config, manifest, DNN worker scope | `CROWDIO_FLAGS`, `CROWDIO_RUN_CONFIG`, `CROWDIO_MANIFEST`, `CROWDIO_PUBLIC_URL`, `CROWDIO_DNN_WORKERS` | See [section 13](#13-reconfiguration-aware-planning) |
 | Planner event log | `log_path` in the run config (JSONL) | Kept in memory only when unset |
 | Worker ping interval | `CROWDIO_PING_INTERVAL` (seconds, default 30) | PING replies refresh each worker's metrics in the `workers` table |
+| Scheduler | `CROWDIO_SCHEDULER` (default `fifo`), `CROWDIO_SHARED_CAPACITY_MBPS` | See section 11 |
+| Run logs | `CROWDIO_RUN_LOG_DIR` (default `logs/runs`) | JSONL records, readable reports, planner event logs |
+| Worker to Foreman REST address | `CROWDIO_FOREMAN_HTTP` | Used by PC workers for link probes |
+| Database location | `CROWDIO_DATABASE_URL` (default `sqlite+aiosqlite:///./crowdio.db`) | The test suite and the device simulator set it to a temporary database |
 
 Run the Foreman from the project root so these paths resolve consistently.
 
@@ -750,12 +909,14 @@ Unicode errors on Windows consoles:
 - `Dockerfile.foreman` sets `CROWDIO_DATA_DIR=/data`, but the code does not read it; the database is written to `/app/crowdio.db`, so the `crowdio_data` volume does not persist it.
 - `Dockerfile.worker` health checks `GET /health`, which the worker API does not expose (use `GET /` instead).
 - `requirements.txt` pins `crowdio-sdk>=2.0.1` while `pyproject.toml` uses `>=0.3.1`.
-- Scheduler activation via REST is persisted but not applied to the running dispatcher (section 11).
 - Reconfiguration-aware planning (section 13) needs workers that speak protocol v2:
-  - Android still uses uppercase top-level `PREFETCH`/`ASSIGN`/`UNLOAD`/`EVICT` commands and has no peer listener for the direct path.
-  - `pc_worker` speaks only v1 and creates a new ONNX session per task.
-  - Until both are updated, the planned path has been exercised only with fake workers (`tests/planning/`).
+  - The Android app has a v2 layer (`probe`, `msg_ack`, `flags`, and `load`/`run`/`route` with the shard engine). It does not implement `prefetch`, `cancel_prefetch`, `peer_fetch` or `serve_allowed`, and has no peer listener for the direct path.
+  - `pc_worker` speaks only v1 and creates a new ONNX session per task. The simulated devices also speak only the legacy protocol.
+  - The coordinator does not check a worker's `proto_version` before sending v2 messages, so `adaptive_planning` must not be enabled while legacy workers are connected.
+  - The Foreman and the Android v2 layer have not been tested against each other end to end; the planned path has been exercised with fake workers (`tests/planning/`).
 - The Android phase times in `evaluation/reconfig/configs/spec_distilbert_5phones.yaml` are placeholders. The cold ~48 s / warm ~6 s reference numbers are unverified and used only as stale priors.
 - `network_speed_mbps` from PC workers is NIC traffic over 100 ms (utilisation), not available bandwidth. It is stored as-is in the `workers` table.
 - The Foreman Docker image does not include `tools/`, so set `CROWDIO_MANIFEST` to a mounted manifest before enabling `adaptive_planning` in Docker.
+- The Foreman dispatches about 6 to 7 tasks per second with 15 workers on a development machine (each completion queries the database for every worker). Tasks much shorter than a few seconds make a larger fleet idle.
 - Starlette 0.27's `TestClient` does not work with `httpx>=0.28`. The tests use `httpx.ASGITransport` directly.
+- The bandwidth-aware scheduler starts with no knowledge of compute time (it assumes 1 s until tasks complete), loses its learned estimates when the Foreman restarts, assumes a worker that has been sent a model still has it, and assumes a missing direction is as fast as the measured one. PC link probes cost a little bandwidth and run only while the worker is idle. It does not check RAM or disk space for a model. The dispatcher's single-worker path (used when fewer workers than the threshold are online) bypasses the scheduler.

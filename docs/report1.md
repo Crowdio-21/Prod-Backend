@@ -136,7 +136,7 @@ The default is **mobile only** (`foreman/core/dnn_placement.py`):
   - **PC**: a `PONG` every `--heartbeat-interval` seconds (default 30), with metrics at the top level of the message.
   - **Android**: a `worker_heartbeat` with network, resource, residency and queue fields.
 - The Foreman pings every worker every 30 s (`CROWDIO_PING_INTERVAL`) and marks it online on any reply or heartbeat.
-- The metrics in every shape (PING reply, periodic heartbeat, Android `res`/`net`) are written to the `workers` table (`foreman/core/worker_metrics.py`). The MCDM schedulers read them from there.
+- The metrics in every shape (PING reply, periodic heartbeat, Android `res`/`net`) are written to the `workers` table (`foreman/core/worker_metrics.py`). The dashboard and the worker device score read them from there; no scheduler does.
 
 **PC worker**: `pc_worker/core/worker.py`, started with `python -m pc_worker.main` or `tests/run_multiple_workers.py N`.
 - Runs one task at a time by default (`--max-concurrent-tasks`).
@@ -175,7 +175,7 @@ The planner respects the same DNN worker scope as section 7. **Neither the Andro
 
 | What | Where |
 |---|---|
-| Jobs, tasks, workers, checkpoint metadata, scheduler configs | `./crowdio.db` (SQLite, path fixed in `foreman/db/base.py`) |
+| Jobs, tasks, workers, checkpoint metadata | `./crowdio.db` (SQLite, path fixed in `foreman/db/base.py`) |
 | Large task arguments and results | `./.payload_store/` |
 | Checkpoint blobs | `./.checkpoints/` |
 | Scheduler decision logs | `./logs/` |
@@ -193,7 +193,7 @@ The planner respects the same DNN worker scope as section 7. **Neither the Andro
 - `/api/stats`, `/api/jobs`, `/api/workers`
 - `/api/pipeline/jobs`, `/api/checkpoints/...`
 - `/api/dnn/observability`, `/api/models/{name}`
-- `/api/scheduler/...`, `/api/evaluation/...`
+- `/api/scheduling-info`, `/api/evaluation/...`
 - With the planner: `/api/shards/...`, `/api/probe`, `/api/plan/status`
 
 ## 12. Known issues in the current system
@@ -204,10 +204,10 @@ The planner respects the same DNN worker scope as section 7. **Neither the Andro
    - All three heartbeat shapes are stored: nested PING reply, flat PC heartbeat or Android PONG, and Android `res`/`net`. The code is `foreman/core/worker_metrics.py`.
    - Missing values no longer overwrite known ones with NULL.
    - Verified with a real PC worker. Its `workers` row now gets live CPU, RAM, battery, charging, network and disk values.
-   - Before this, the MCDM schedulers ranked on empty values.
+   - These values feed the dashboard and the worker device score. None of the remaining schedulers uses them.
 
    Found while verifying: `python -m pc_worker.main` started only the worker's own API and never connected to the Foreman. **Fixed**: it now runs `run_with_worker()`. `tests/run_multiple_workers.py` was not affected.
-3. **Choosing a scheduler over REST has no effect on the running system.** `POST /api/scheduler/activate/...` only updates the database.
+3. **The scheduler is chosen by `CROWDIO_SCHEDULER` or in code, not over REST.** A `bandwidth_aware` scheduler was added on 2026-11-02 ([bandwidth_aware_scheduling.md](bandwidth_aware_scheduling.md)). The REST endpoints that pretended to choose one (`/api/scheduler/...`) and the whole MCDM scheduling family (ARAS, EDAS, MABAC, WRR) were removed on 2026-11-02. They only ever edited database rows and never changed the running scheduler.
 4. **PC bandwidth is mislabelled.** `network_speed_mbps` is NIC traffic over 100 ms (utilisation), not available bandwidth, and RTT is never measured.
 5. **Neither worker enforces "one model in memory at a time".** PC workers reload the ONNX session for every task; Android caches sessions without a limit.
 6. **Docker images are broken as written.** They copy a `common/` folder that isn't in this repo, the database path ignores `CROWDIO_DATA_DIR`, and the worker health check calls a missing `/health` route.
