@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -58,7 +59,7 @@ from foreman.planning.policies import build_plan, current_cost, make_policy
 from foreman.planning.prefetch import plan_prefetch
 from foreman.planning.problems import ProblemAggregator
 from foreman.planning.profiles import ProfileLearner
-from foreman.planning.registry import ShardRegistry
+from foreman.planning.registry import ShardRegistry, plan_evictions
 from foreman.planning.serialize import opts_to_dict, snapshot_to_dict
 from foreman.planning.routes import CapabilityTracker, RouteSelector
 from foreman.planning.telemetry import TelemetryStore
@@ -81,6 +82,14 @@ class Request:
     computing_stage_atom: Optional[int] = None  # start atom of the stage being computed
     dispatched_at: float = 0.0
     restarts: int = 0
+    # Bumped when a dispatch is presumed lost. Workers and the Foreman de-duplicate by
+    # (request_id, epoch, stage), so a retry must not look like the attempt it replaces.
+    attempt: int = 0
+
+    @property
+    def wire_id(self) -> str:
+        """The request id workers see."""
+        return self.request_id if self.attempt == 0 else f"{self.request_id}#{self.attempt}"
 
 
 @dataclass
@@ -171,6 +180,11 @@ class PlanCoordinator:
         self.completed = _Bounded(100_000)
         self.seen = _Bounded(100_000)
         self.connected: Set[str] = set()
+        # Declared v2 capabilities per worker: (flags, messages); None = not declared (baseline assumed)
+        self.caps: Dict[str, Tuple[Optional[frozenset], Optional[frozenset]]] = {}
+        self.flagged: Set[str] = set()  # workers already told the active feature flags
+        # worker -> (its reported free RAM when a load was refused for memory, the shards ruled out meanwhile)
+        self.mem_excluded: Dict[str, Tuple[int, Set[str]]] = {}
         self.prefetching: Dict[Tuple[str, str], float] = {}
         self.prefetched: Set[Tuple[str, str]] = set()
         self.uploads: Dict[str, int] = {}
@@ -238,15 +252,48 @@ class PlanCoordinator:
         self.log.close()
 
     def worker_connected(self, worker_id: str, device_class: Optional[str] = None,
-                         kind: Optional[str] = None) -> None:
-        self.connected.add(worker_id)
+                         kind: Optional[str] = None, proto_version: int = 2,
+                         supported_flags=None, supported_messages=None) -> None:
+        """A worker registered. A legacy worker (``proto_version`` < 2) is remembered but never planned
+        onto or sent a v2 message; it joins the plan only if it later sends a v2 ``report``."""
+        self.caps[worker_id] = (None if supported_flags is None else frozenset(supported_flags),
+                                None if supported_messages is None else frozenset(supported_messages))
+        v2 = proto_version >= 2 and self.supports_message(worker_id, "load") and self.supports_message(worker_id, "run")
+        if v2:
+            self.connected.add(worker_id)
+        else:
+            self.connected.discard(worker_id)
+            logger.info("worker %s is not planned onto (proto_version=%s, messages=%s)", worker_id,
+                        proto_version, None if supported_messages is None else sorted(supported_messages))
         if device_class:
             self.telemetry.ingest_state(WorkerState(worker_id=worker_id, device_class=device_class))
         self.telemetry.set_kind(worker_id, kind)
+        self.telemetry.set_v2(worker_id, v2)
         self.capability.network_changed(worker_id)
+
+    # ------------------------------------------------------- worker capabilities
+    BASELINE_MESSAGES = frozenset({"probe", "msg_ack", "flags", "load", "run", "route"})
+    BASELINE_FLAGS = frozenset({"adaptive_planning", "problem_reports"})
+
+    def supports_message(self, worker_id: str, message_type: str) -> bool:
+        """Whether the worker declared support for ``message_type`` (the baseline set if it declared nothing)."""
+        declared = self.caps.get(worker_id, (None, None))[1]
+        return message_type in (self.BASELINE_MESSAGES if declared is None else declared)
+
+    def supports_flag(self, worker_id: str, flag: str) -> bool:
+        """A flag is usable with a worker only if the Foreman has it on and the worker declared it."""
+        if not getattr(self.flags, flag, False):
+            return False
+        declared = self.caps.get(worker_id, (None, None))[0]
+        return flag in (self.BASELINE_FLAGS if declared is None else declared)
+
+    def peer_ok(self, a: str, b: str, flag: str, *messages: str) -> bool:
+        """Both ends support ``flag`` and ``messages`` (peer links need both phones to take part)."""
+        return all(self.supports_flag(w, flag) and all(self.supports_message(w, m) for m in messages) for w in (a, b))
 
     async def worker_disconnected(self, worker_id: str) -> None:
         self.connected.discard(worker_id)
+        self.flagged.discard(worker_id)
         self.telemetry.mark_departed(worker_id)
         self.sender.cancel_worker(worker_id)
         self.log.emit("failure", kind="worker_lost", worker=worker_id)
@@ -296,7 +343,9 @@ class PlanCoordinator:
         if state.worker_id != worker_id:
             state = state.model_copy(update={"worker_id": worker_id})
         self.connected.add(worker_id)
+        self.telemetry.set_v2(worker_id, True)  # a v2 report proves the worker speaks v2
         self.telemetry.ingest_state(state)
+        self._release_memory_exclusions(worker_id, state.ram_free)
         self.log.emit("heartbeat", worker=worker_id, source="v2", state=state.model_dump(mode="json"))
         pending = self.pending
         if pending is not None and pending.phase == "loading" and worker_id in pending.loads_pending                 and state.resident_shard == pending.changed.get(worker_id) and state.last_epoch == pending.epoch:
@@ -364,7 +413,7 @@ class PlanCoordinator:
         request.computing_on = stage.worker_id
         request.computing_stage_atom = self.registry.catalog.shards[stage.shard_id].start_atom
         request.dispatched_at = self.clock()
-        body = RunMsg(stage=stage_index, activation=activation, epoch=request.epoch, request_id=request.request_id)
+        body = RunMsg(stage=stage_index, activation=activation, epoch=request.epoch, request_id=request.wire_id)
         await self.sender.send(stage.worker_id, "run", body, epoch=request.epoch, reliable=False)
         self._count("runs_sent")
 
@@ -377,9 +426,13 @@ class PlanCoordinator:
             self._count("duplicates_dropped")
             self.log.emit("message", kind="duplicate_activation", worker=worker_id, key=list(key))
             return
-        request = self.requests.get(body.request_id)
-        if request is None or body.request_id in self.completed:
+        request_id = body.request_id.partition("#")[0]
+        request = self.requests.get(request_id)
+        if request is None or request_id in self.completed:
             self._count("late_activation_dropped")
+            return
+        if body.request_id != request.wire_id:
+            self._count("stale_attempt_dropped")
             return
         if body.epoch != request.epoch:
             self._count("stale_epoch_dropped")
@@ -583,18 +636,79 @@ class PlanCoordinator:
                 self.prefetching.pop(key, None)
                 self.log.emit("prefetch", worker=worker_id, shard=key[1], status="cancelled_by_load")
         source = pending.sources.get(worker_id)
+        if source is not None and not self.peer_ok(source, worker_id, "peer_fetch", "serve_allowed"):
+            source = None  # the plan assumed a donor that cannot take part: fetch from the Foreman instead
         if source is not None and self.flags.peer_fetch:
             self.uploads[source] = self.uploads.get(source, 0) + 1
             await self.sender.send(source, "serve_allowed", ServeAllowedMsg(shard_id=shard_id, to=worker_id))
             self.log.emit("peer_fetch", donor=source, worker=worker_id, shard=shard_id, status="brokered")
         if (worker_id, shard_id) in self.prefetched:
             self.log.emit("prefetch_used", worker=worker_id, shard=shard_id)
+        evict = self._disk_evictions(worker_id, shard_id)
+        if evict:
+            self.log.emit("evict", worker=worker_id, shard=shard_id, evict=evict, reason="load")
         pending.loads_pending.add(worker_id)
         pending.load_started[worker_id] = self.clock()
         stage = next((i for i, (s, w) in enumerate(pending.target) if w == worker_id), None)
         await self.sender.send(worker_id, "load", LoadMsg(shard_id=shard_id, epoch=pending.epoch, stage=stage,
-                                                          source=source if self.flags.peer_fetch else None),
+                                                          source=source if self.flags.peer_fetch else None,
+                                                          source_address=(self.telemetry.peer_endpoint(source)
+                                                                          if source and self.flags.peer_fetch else None),
+                                                          evict=evict),
                                epoch=pending.epoch)
+
+    def _disk_evictions(self, worker_id: str, shard_id: str) -> list:
+        """Shard files (LRU, never the resident or target one) the worker must delete to fit ``shard_id``."""
+        snap = self.snapshot()
+        worker = snap.workers.get(worker_id)
+        shard = snap.catalog.shards.get(shard_id)
+        if worker is None or shard is None or shard_id in worker.disk_shards or worker.resident_shard == shard_id:
+            return []
+        entries = self.registry.disk_entries(
+            worker_id, [(s, snap.catalog.shards[s].bytes) for s in worker.disk_shards if s in snap.catalog.shards])
+        protected = {shard_id} | ({worker.resident_shard} if worker.resident_shard else set())
+        evict = plan_evictions(entries, worker.disk_used, worker.disk_cap, shard.bytes, protected)
+        if evict is None:  # the planner only picks workers where it fits, so this means stale telemetry
+            self.log.emit("evict", worker=worker_id, shard=shard_id, evict=[], reason="does_not_fit")
+            return []
+        return list(evict)
+
+    MEMORY_FAILURE_WORDS = ("pre-flight", "out of memory", "oom", "bad_alloc", "failed to allocate")
+    RAM_RECOVERY_FACTOR = 1.25
+
+    def _exclude_larger_after_memory_failure(self, worker_id: str, shard_id: str, error: Optional[str]) -> None:
+        """A shard refused for lack of memory rules out every shard at least as big on that phone, until its
+        reported free RAM has grown clearly. One pair at a time made the Foreman retry dozens of times."""
+        text = (error or "").lower()
+        shard = self.registry.catalog.shards.get(shard_id)
+        if shard is None or not any(word in text for word in self.MEMORY_FAILURE_WORDS):
+            return
+        record = self.telemetry._workers.get(worker_id)
+        reported = record.state.ram_free if record is not None and record.state is not None else None
+        threshold = shard.bytes
+        # The phone says what it needed and what it had ("needs ~N bytes, ~M available"): everything whose need
+        # exceeds M is ruled out at once, not one size at a time.
+        found = re.search(r"needs ~(\d+) bytes, ~(-?\d+) available", text)
+        if found and int(found.group(1)) > 0:
+            ratio = int(found.group(1)) / shard.bytes
+            threshold = min(threshold, max(0.0, int(found.group(2)) / ratio))
+        larger = {s for s, info in self.registry.catalog.shards.items()
+                  if info.bytes >= shard.bytes or info.bytes > threshold}
+        for other in larger:
+            self.excluded.add((worker_id, other))
+        previous = self.mem_excluded.get(worker_id)
+        self.mem_excluded[worker_id] = (reported or 0, larger | (previous[1] if previous else set()))
+        self.log.emit("failure", kind="memory_refused", worker=worker_id, shard=shard_id, reported_ram_free=reported,
+                      excluded=len(larger))
+
+    def _release_memory_exclusions(self, worker_id: str, ram_free: Optional[int]) -> None:
+        entry = self.mem_excluded.get(worker_id)
+        if entry is None or ram_free is None or ram_free <= entry[0] * self.RAM_RECOVERY_FACTOR:
+            return
+        for shard in entry[1]:
+            self.excluded.discard((worker_id, shard))
+        del self.mem_excluded[worker_id]
+        self.log.emit("failure", kind="memory_exclusion_released", worker=worker_id, ram_free=ram_free)
 
     async def _on_load_result(self, worker_id: str, body: LoadResultMsg) -> None:
         self.sender.acknowledge_where(lambda m: m.get("type") == "load" and m.get("data", {}).get("shard_id") == body.shard_id
@@ -621,6 +735,7 @@ class PlanCoordinator:
             return
         if not body.ok:
             self.excluded.add((worker_id, body.shard_id))
+            self._exclude_larger_after_memory_failure(worker_id, body.shard_id, body.error)
             self._abort_switch(f"load failed on {worker_id}: {body.error}")
             self.urgent.add("load_failed")
             await self.tick()
@@ -672,7 +787,7 @@ class PlanCoordinator:
         nxt = stage.next_hop.worker_id
         routes = [RouteMode.VIA_FOREMAN]
         address = None
-        if nxt is not None and self.flags.direct_path:
+        if nxt is not None and self.flags.direct_path and self.peer_ok(stage.worker_id, nxt, "direct_path", "route"):
             shard = self.registry.catalog.shards[stage.shard_id]
             choice = self.routes.choose(snap, stage.worker_id, nxt,
                                         shard.out_act_bytes_per_token * opts.tokens, opts, self.clock())
@@ -695,6 +810,7 @@ class PlanCoordinator:
             await self._tick(self.clock() if now is None else now)
 
     async def _tick(self, now: float) -> None:
+        await self._announce_flags()  # before any early return: a worker should know the flags before its first plan
         if self.pending is not None:
             lost = set(self.pending.changed) - self.connected
             if lost:
@@ -718,6 +834,7 @@ class PlanCoordinator:
             snap, self.plan, self.state.baseline, self.config.controller,
             problem_count=self.problems.recent_count(now), urgent_problems=frozenset(self.urgent),
             deadline_remaining_s=job_deadline, j_current_hi=current.T_total.hi if current else None,
+            ram_critical_bytes=self.config.cost.ram_critical_bytes,
         )
         if self.plan is None:
             triggers = tuple(sorted(set(triggers) | {"initial"}))
@@ -781,19 +898,40 @@ class PlanCoordinator:
                                in_flight=self.prefetching.keys(), last_used=last_used)
         opts = self._opts()
         for order in orders:
+            if not (self.supports_flag(order.worker_id, "prefetch")
+                    and self.supports_message(order.worker_id, "prefetch")):
+                continue
             source = None
             if self.flags.peer_fetch:
                 source = c_switch(snap, order.worker_id, order.shard_id, opts).source
+                if source is not None and not self.peer_ok(source, order.worker_id, "peer_fetch",
+                                                           "serve_allowed"):
+                    source = None
             self.prefetching[(order.worker_id, order.shard_id)] = self.clock()
-            await self.sender.send(order.worker_id, "prefetch", PrefetchMsg(shard_id=order.shard_id, source=source))
+            await self.sender.send(order.worker_id, "prefetch",
+                                   PrefetchMsg(shard_id=order.shard_id, source=source,
+                                               source_address=self.telemetry.peer_endpoint(source) if source else None,
+                                               evict=list(order.evict)))
             if source is not None:
                 await self.sender.send(source, "serve_allowed", ServeAllowedMsg(shard_id=order.shard_id,
                                                                                 to=order.worker_id))
             self.log.emit("prefetch", worker=order.worker_id, shard=order.shard_id, status="issued",
                           evict=list(order.evict), reason=order.reason, source=source)
 
+    async def _announce_flags(self) -> None:
+        """Tell each v2 worker which flags are on; a worker acts on a flag (for example problem reports)
+        only after it has been told."""
+        for worker_id in sorted(self.connected - self.flagged):
+            if not self.supports_message(worker_id, "flags"):
+                continue
+            self.flagged.add(worker_id)
+            await self.sender.send(worker_id, "flags", {"flags": self.flags.to_dict()})
+            self.log.emit("flags_sent", worker=worker_id, flags=self.flags.to_dict())
+
     async def _probes(self, now: float) -> None:
         for worker_id in sorted(self.connected):
+            if not self.supports_message(worker_id, "probe"):
+                continue
             if self.telemetry.needs_probe(worker_id, now):
                 self.telemetry.mark_probed(worker_id, now)
                 await self.sender.send(worker_id, "probe", ProbeMsg(size=self.config.estimator.probe_bytes,
@@ -802,20 +940,36 @@ class PlanCoordinator:
         if self.flags.direct_path or self.flags.peer_fetch:
             for a, b in self.capability.pairs_to_test(self.connected, now):
                 self.capability.record(a, b, self.capability.reachable(a, b), now)  # rate-limit re-tests
-                await self.sender.send(a, "probe", ProbeMsg(size=16 * 1024, peer=b))
+                if not (self.peer_ok(a, b, "direct_path", "probe") or self.peer_ok(a, b, "peer_fetch", "probe")):
+                    continue  # one end cannot take part: the pair stays untested, so no peer route or donor is chosen
+                address = self.telemetry.peer_endpoint(b)
+                if address is None:
+                    continue  # a phone cannot reach a peer by id: wait until the peer reports its endpoint
+                await self.sender.send(a, "probe", ProbeMsg(size=16 * 1024, peer=b, peer_address=address))
                 self.log.emit("probe", worker=a, kind="capability", peer=b)
 
     async def _timeouts(self, now: float) -> None:
         for request in list(self.requests.values()):
             if request.request_id in self.completed or request.request_id in self.queue:
                 continue
-            if request.dispatched_at and now - request.dispatched_at > self.request_timeout_s and self.pending is None \
-                    and self.plan is not None:
-                self.log.emit("failure", kind="request_timeout", request_id=request.request_id)
-                request.restarts += 1
-                request.epoch = self.epoch
-                request.retained = None
-                await self._dispatch(request, 0, request.input)
+            if not request.dispatched_at or now - request.dispatched_at <= self.request_timeout_s \
+                    or self.plan is None:
+                continue
+            if self.pending is not None:
+                # A request that never comes back would hold the drain forever. Stop waiting for it:
+                # the commit re-dispatches it (and after an aborted switch this timeout restarts it).
+                if self.pending.phase == "draining" and request.computing_on is not None:
+                    self.log.emit("failure", kind="request_timeout", request_id=request.request_id,
+                                  during_switch=True)
+                    request.attempt += 1
+                    request.computing_on = None
+                continue
+            self.log.emit("failure", kind="request_timeout", request_id=request.request_id)
+            request.attempt += 1
+            request.restarts += 1
+            request.epoch = self.epoch
+            request.retained = None
+            await self._dispatch(request, 0, request.input)
 
     # ------------------------------------------------------------- views
     def status(self) -> dict:

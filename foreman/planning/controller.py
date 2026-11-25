@@ -10,6 +10,21 @@ is inside J(new) once, not added twice) and
 Equivalent break-even form, logged for every decision:
     N_remaining * (T_steady_cur - T_steady_new)  vs  C_switch + margin.
 
+Rule (regret policies, rent or buy): while the best alternative is cheaper per
+request, accumulate the regret of staying,
+
+    regret += served_since_last_decision * (T_steady_cur - T_steady_best)
+
+and switch once regret >= C_switch(best) + margin_regret, where
+
+    margin_regret = (C_switch.hi - C_switch.mid) + margin_abs_s + margin_frac * C_switch.mid.
+
+Regret resets to zero after a switch and whenever no alternative is cheaper.
+Unlike break-even it uses no prediction of the remaining requests. In the
+two-state abstraction (stay versus one fixed alternative, exact costs) this is
+the deterministic ski-rental rule, which is 2-competitive; with many plans and
+drifting estimates no such bound is claimed.
+
 Hysteresis: a trigger must persist for ``persist_k`` samples, a cooldown
 follows every switch, and switches per window are capped. Forced replans
 (worker lost, load failed, OOM, next hop down) bypass margin and hysteresis but
@@ -30,7 +45,9 @@ from .planner import Objective, Stages
 from .policies import B0Policy, Policy, PolicyDecision
 from .types import Snapshot
 
-FORCED = frozenset({"worker_lost", "load_failed", "oom", "next_hop_down", "initial"})
+FORCED = frozenset({"worker_lost", "load_failed", "oom", "next_hop_down", "initial", "ram_pressure"})
+# Forced only once it persists (free RAM flaps on a phone), unlike a lost worker.
+PERSISTENT_FORCED = frozenset({"ram_pressure"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +68,8 @@ class ControllerState:
     switch_times: Tuple[float, ...] = ()
     trigger_counts: Mapping[str, int] = field(default_factory=dict)
     baseline: Optional[Baseline] = None
+    regret_s: float = 0.0  # regret policies: accumulated cost of staying
+    last_n: Optional[int] = None  # n_remaining at the previous decision
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,7 @@ def detect_triggers(
     urgent_problems: FrozenSet[str] = frozenset(),
     deadline_remaining_s: Optional[float] = None,
     j_current_hi: Optional[float] = None,
+    ram_critical_bytes: int = 0,
 ) -> Tuple[str, ...]:
     """Pure trigger detection. Returns sorted trigger names (forced ones included)."""
     found = set(urgent_problems)
@@ -121,6 +141,9 @@ def detect_triggers(
                 found.add("temp_drift")
     for stage in plan.stages:
         view = snap.workers.get(stage.worker_id)
+        if (view is not None and ram_critical_bytes > 0 and view.ram_free is not None
+                and view.ram_free < ram_critical_bytes):
+            found.add("ram_pressure")
         if view is not None and view.queue_len >= cfg.queue_growth:
             found.add("queue_growth")
     if problem_count >= cfg.problem_threshold:
@@ -141,13 +164,19 @@ def decide(
     triggers: Tuple[str, ...],
     now: float,
 ) -> Tuple[ControllerDecision, ControllerState]:
-    forced = tuple(t for t in triggers if t in FORCED)
     counts = {t: state.trigger_counts.get(t, 0) + 1 for t in triggers}
-    state = replace(state, trigger_counts=counts)
+    forced = tuple(t for t in triggers if t in FORCED
+                   and (t not in PERSISTENT_FORCED or counts[t] >= cfg.persist_k))
+    served = max(0, state.last_n - n_remaining) if state.last_n is not None else 0
+    state = replace(state, trigger_counts=counts, last_n=n_remaining)
 
     if forced:
         decision = policy.plan(snap, plan, n_remaining, objective)
         if not decision.feasible or decision.stages is None:
+            if set(forced) <= PERSISTENT_FORCED and plan is not None:
+                # Memory is tight but the current plan still runs: keep serving rather than stop.
+                return ControllerDecision("stay", "no plan fits the free memory", triggers, decision,
+                                          planner_called=True), state
             return ControllerDecision("stall", "no feasible plan", triggers, decision, planner_called=True), state
         action = "initial" if "initial" in forced else "forced_switch"
         if set(forced) == {"initial"} and policy.switch_rule == "break_even":
@@ -159,7 +188,8 @@ def decide(
                                   planner_called=True), _after_switch(state, now, cfg, snap)
 
     active = tuple(t for t in triggers if counts.get(t, 0) >= cfg.persist_k)
-    if not active:
+    accumulating = policy.switch_rule == "regret" and state.regret_s > 0
+    if not active and not accumulating:
         return ControllerDecision("stay", "no persistent trigger", triggers), state
     if policy.switch_rule == "static":
         return ControllerDecision("stay", "static policy", triggers), state
@@ -171,14 +201,18 @@ def decide(
 
     decision = policy.plan(snap, plan, n_remaining, objective)
     if not decision.feasible or decision.stages is None:
-        return ControllerDecision("stay", "no feasible alternative", triggers, decision, planner_called=True), state
+        return ControllerDecision("stay", "no feasible alternative", triggers, decision, planner_called=True), \
+            replace(state, regret_s=0.0)
     if plan is not None and decision.stages == plan.assignment() and not decision.replicas:
-        return ControllerDecision("stay", "planner keeps current plan", triggers, decision, planner_called=True), state
+        return ControllerDecision("stay", "planner keeps current plan", triggers, decision, planner_called=True), \
+            replace(state, regret_s=0.0)
     current: Optional[PipelineCost] = policy.evaluate(snap, plan, n_remaining)
     new = decision.cost
     if current is None:
         return ControllerDecision("forced_switch", "current plan not runnable", triggers, decision,
                                   j_new=new.T_total.mid, planner_called=True), _after_switch(state, now, cfg, snap)
+    if policy.switch_rule == "regret":
+        return _decide_regret(new, current, decision, triggers, served, state, cfg, now, snap)
     margin = _margin(new, current, cfg)
     break_even = {
         "gain": n_remaining * (current.T_steady.mid - new.T_steady.mid),
@@ -196,6 +230,25 @@ def decide(
     if new.T_total.mid + margin < current.T_total.mid:
         return ControllerDecision("switch", "J(new) + margin < J(current)", **common), _after_switch(state, now, cfg, snap)
     return ControllerDecision("stay", "gain below switching cost + margin", **common), state
+
+
+def _decide_regret(new: PipelineCost, current: PipelineCost, decision: PolicyDecision, triggers, served: int,
+                   state: ControllerState, cfg: ControllerConfig, now: float, snap: Snapshot):
+    gap = current.T_steady.mid - new.T_steady.mid
+    switch_cost = new.C_switch_total
+    margin = (switch_cost.hi - switch_cost.mid) + cfg.margin_abs_s + cfg.margin_frac * switch_cost.mid
+    regret = state.regret_s + served * gap if gap > 0 else 0.0
+    break_even = {"regret": regret, "gain_per_request": gap, "served": float(served),
+                  "switch_cost": switch_cost.mid, "margin": margin}
+    common = dict(triggers=triggers, decision=decision, j_current=current.T_total.mid, j_new=new.T_total.mid,
+                  margin=margin, break_even=break_even, planner_called=True)
+    if new.stale or current.stale:
+        return ControllerDecision("stay", "stale estimates", **common), state
+    if gap <= 0:
+        return ControllerDecision("stay", "no cheaper alternative", **common), replace(state, regret_s=0.0)
+    if regret >= switch_cost.mid + margin:
+        return ControllerDecision("switch", "regret >= C_switch + margin", **common), _after_switch(state, now, cfg, snap)
+    return ControllerDecision("stay", "accumulating regret", **common), replace(state, regret_s=regret)
 
 
 def _margin(new: PipelineCost, current: PipelineCost, cfg: ControllerConfig) -> float:
@@ -217,4 +270,5 @@ def guard_initial(snap, n, policy, objective, cfg, decision: PolicyDecision) -> 
 
 def _after_switch(state: ControllerState, now: float, cfg: ControllerConfig, snap: Snapshot) -> ControllerState:
     recent = tuple(t for t in state.switch_times if now - t <= cfg.switch_window_s) + (now,)
-    return replace(state, last_switch_at=now, switch_times=recent, trigger_counts={}, baseline=Baseline.capture(snap))
+    return replace(state, last_switch_at=now, switch_times=recent, trigger_counts={}, baseline=Baseline.capture(snap),
+                   regret_s=0.0)

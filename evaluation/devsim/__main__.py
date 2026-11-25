@@ -27,7 +27,7 @@ def _config(args):
         work_scale=getattr(args, "work_scale", 1.0),
         mode=getattr(args, "mode", "model"), out_dir=args.out, model_scale=getattr(args, "model_scale", 0.05),
         shared_capacity_mbps=getattr(args, "shared_capacity_mbps", None), timeout_s=getattr(args, "timeout", 900.0),
-        verbose=getattr(args, "verbose", False))
+        verbose=getattr(args, "verbose", False), bw_reports=getattr(args, "bw_reports", "always"))
 
 
 def _isolate_database(out_dir: str) -> None:
@@ -123,6 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "which is not sped up, starts to distort results)")
         p.add_argument("--out", default="devsim_results/run")
         p.add_argument("--shared-capacity-mbps", type=float, default=None, help="one medium all devices share")
+        p.add_argument("--bw-reports", choices=("always", "transfers"), default="always",
+                       help="always: phones report true bandwidth every heartbeat; transfers: only after a timed transfer (as the app)")
         if workload:
             p.add_argument("--workload", default="mixed", help="mixed, uniform, dnn3 or stream")
             p.add_argument("--tasks", type=int, default=None, help="tasks (inputs for dnn3, per job for stream)")

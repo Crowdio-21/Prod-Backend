@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, TextIO
 EVENT_TYPES = frozenset({
     "run_start", "run_end", "heartbeat", "estimate_update", "planner_call",
     "controller_decision", "switch_start", "switch_end", "route_choice", "route_flip",
-    "request_start", "request_end", "prefetch", "prefetch_used", "peer_fetch",
+    "request_start", "request_end", "prefetch", "prefetch_used", "peer_fetch", "evict", "flags_sent",
     "problem", "failure", "probe", "scenario", "message",
 })
 

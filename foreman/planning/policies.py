@@ -7,6 +7,12 @@ the controller applies:
 * ``static``: never switches on its own; only forced replans (B0, B1, B3).
 * ``always``: switches whenever its planner prefers another plan (B2).
 * ``break_even``: switches only when J(new) + margin < J(current) (B5a, B5b, S-aware).
+* ``regret``: rent or buy; switches once the accumulated per-request regret of
+  staying covers the switch cost (S-aware-regret, S-aware-local-regret).
+
+S-aware variants also choose the search: ``full`` (the planner mode) or
+``local`` (incremental moves from the current plan, with a full search every
+``full_every`` calls and whenever there is no current plan).
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from .cost_model import (
     residency,
     Residency,
 )
-from .planner import Candidate, Objective, SearchResult, Stages, exhaustive_search, search
+from .planner import Candidate, Objective, SearchResult, Stages, exhaustive_search, local_search, search
 from .types import ZERO, Q, Snapshot
 
 
@@ -161,11 +167,21 @@ class SAwarePolicy(Policy):
     name = "S-aware"
     switch_rule = "break_even"
 
-    def __init__(self, opts: CostOptions, mode: str = "exhaustive", recut: bool = True):
+    def __init__(self, opts: CostOptions, mode: str = "exhaustive", recut: bool = True, *,
+                 search: str = "full", full_every: int = 10, switch_rule: Optional[str] = None):
         super().__init__(opts, mode)
         self.recut = recut
         if not recut:
             self.name = "S-aware-placement"
+        if search not in ("full", "local"):
+            raise ValueError(f"unknown search {search!r}")
+        if search == "local" and not recut:
+            raise ValueError("local search re-cuts; use recut=True")
+        self.search = search
+        self.full_every = max(1, full_every)
+        if switch_rule is not None:
+            self.switch_rule = switch_rule  # subclasses keep their class-level rule
+        self._calls = 0
 
     def _compositions(self, snap: Snapshot, current: Optional[Plan]):
         if self.recut:
@@ -174,10 +190,28 @@ class SAwarePolicy(Policy):
 
     def plan(self, snap, current, n, objective):
         opts = self.cost_options()
-        result = search(snap, n, opts, objective, mode=self.mode, compositions=self._compositions(snap, current))
+        result = self._search(snap, current, n, objective, opts)
         if not result.found:
             return PolicyDecision(self.name, None, None, search=result, reason="no feasible plan", feasible=False)
-        return PolicyDecision(self.name, result.best.stages, result.best.cost, search=result, reason="min J")
+        reason = "min J" if result.method != "local" else "min J (local moves)"
+        return PolicyDecision(self.name, result.best.stages, result.best.cost, search=result, reason=reason)
+
+    def _search(self, snap, current, n, objective, opts) -> SearchResult:
+        full = lambda: search(snap, n, opts, objective, mode=self.mode,  # noqa: E731
+                              compositions=self._compositions(snap, current))
+        if self.search == "full" or current is None or not current.stages:
+            return full()
+        self._calls += 1
+        local = local_search(snap, n, opts, objective, start=current.assignment())
+        if local.found and self._calls % self.full_every:
+            return local
+        # Periodic full search (or the local start could not be repaired): keep the better.
+        exact = full()
+        if not local.found:
+            return exact
+        if not exact.found:
+            return local
+        return min((local, exact), key=lambda r: (objective.key(r.best.cost), r.method != "local"))
 
 
 class B2Policy(SAwarePolicy):
@@ -324,6 +358,15 @@ def make_policy(name: str, opts: CostOptions, mode: str = "exhaustive", **kwargs
         return SAwarePolicy(opts, mode, recut=True)
     if name == "S-aware-placement":
         return SAwarePolicy(opts, mode, recut=False)
+    if name in ("S-aware-local", "S-aware-regret", "S-aware-local-regret"):
+        policy = SAwarePolicy(
+            opts, mode, recut=True,
+            search="local" if "local" in name else "full",
+            switch_rule="regret" if name.endswith("regret") else "break_even",
+            **kwargs,
+        )
+        policy.name = name
+        return policy
     raise ValueError(f"unknown policy {name!r}")
 
 

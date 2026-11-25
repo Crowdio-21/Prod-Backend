@@ -254,3 +254,6 @@ tensor_store/
 
 #image store
 tests/image_processing/child/
+# BERT-base shard export (regenerate with crowdio-export, see docs/RUN_COMMANDS.md)
+tools/bert_base_sst2/shards/
+tools/bert_base_sst2/tokenizer/

@@ -225,7 +225,9 @@ class BandwidthAwareScheduler(TaskScheduler):
         ready: Dict[str, float] = {}
         for worker_id, _, started, _, seconds in self._inflight.values():
             worker = all_workers.get(worker_id)
-            if worker_id in idle or getattr(worker, "status", "online") == "offline":
+            # A non-empty ``all_workers`` lists the connected workers: one missing from it will never come free
+            gone = bool(all_workers) and worker is None
+            if gone or worker_id in idle or getattr(worker, "status", "online") == "offline":
                 continue
             free_at = started + seconds
             if free_at <= now:  # overdue: probably almost done
@@ -294,6 +296,15 @@ class BandwidthAwareScheduler(TaskScheduler):
 
     def observe_link_report(self, worker_id: str, report: dict) -> None:
         self.estimator.observe_report(worker_id, report)
+
+    def observe_task_lost(self, task_id: str, worker_id: Optional[str] = None) -> None:
+        entry = self._inflight.get(task_id)
+        if entry is None or (worker_id is not None and entry[0] != worker_id):
+            return
+        del self._inflight[task_id]
+        _, profile, _, model_sent, _ = entry
+        if model_sent:  # the model may never have arrived: charge its transfer again next time
+            self._cached.get(entry[0], set()).discard(profile.model)
 
     def observe_completion(self, task_id: str, worker_id: str, result_bytes: int) -> None:
         entry = self._inflight.pop(task_id, None)

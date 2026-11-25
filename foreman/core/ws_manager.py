@@ -16,6 +16,7 @@ from .task_dispatcher import TaskDispatcher
 from .message_handlers import ClientMessageHandler, WorkerMessageHandler
 from .completion_handler import JobCompletionHandler
 from .worker_reconnection_handler import WorkerReconnectionHandler
+from .watchdog import TaskWatchdog
 from .scheduling import TaskScheduler, create_scheduler
 from .staged_results_manager.checkpoint_manager import CheckpointManager
 from .utils import (
@@ -118,10 +119,17 @@ class WebSocketManager:
         )
         self.worker_handler.plan_coordinator = self.plan_coordinator
 
+        # Re-queues lost or overdue tasks and re-runs dispatch; started with the first connection
+        self.watchdog = TaskWatchdog(
+            self.connection_manager, self.job_manager, self.task_dispatcher, self.completion_handler
+        )
+        self.worker_handler.watchdog = self.watchdog
+
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
         """Handle new WebSocket connection"""
         client_type = None
         worker_id_debug = None  # Track worker ID for debugging
+        self.watchdog.ensure_started()
 
         try:
             async for message in websocket:

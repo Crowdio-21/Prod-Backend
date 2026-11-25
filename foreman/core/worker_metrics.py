@@ -72,6 +72,21 @@ def extract_performance_metrics(data: Mapping[str, Any]) -> Dict[str, Any]:
     return metrics
 
 
+def extract_radio_report(data: Mapping[str, Any]) -> Dict[str, float]:
+    """A phone's radio state from a heartbeat: ``data["net"] = {rssi (dBm), link_mbps}`` → ``{rssi_dbm, link_mbps}``."""
+    if not isinstance(data, Mapping) or not isinstance(data.get("net"), Mapping):
+        return {}
+    net = data["net"]
+    report: Dict[str, float] = {}
+    rssi = _number(net.get("rssi"))
+    if rssi is not None and -120.0 <= rssi <= 0.0:
+        report["rssi_dbm"] = rssi
+    link = _number(net.get("link_mbps"))
+    if link and link > 0:
+        report["link_mbps"] = link
+    return report
+
+
 def extract_link_report(data: Mapping[str, Any]) -> Dict[str, float]:
     """A worker's own link measurement from a heartbeat/PONG, in bytes/s and seconds.
 

@@ -50,6 +50,7 @@ class SimConfig:
     model_scale: float = 0.05
     shared_capacity_mbps: Optional[float] = None
     heartbeat_s: float = 10.0
+    bw_reports: str = "always"  # phones report bandwidth every heartbeat, or only after a timed transfer (as the app)
     horizon_s: float = 3600.0
     timeout_s: float = 900.0
     verbose: bool = False
@@ -223,7 +224,8 @@ def format_summary(s: Dict[str, Any]) -> str:
 # ------------------------------------------------------------------ the world
 async def _start_fleet(cfg: SimConfig, fleet, clock, engine, url: str, events, model_size):
     devices = {spec.device_id: VirtualDevice(spec, url, clock, engine, mode=cfg.mode, model_size=model_size,
-                                             seed=cfg.seed, heartbeat_s=cfg.heartbeat_s, events=events)
+                                             seed=cfg.seed, heartbeat_s=cfg.heartbeat_s, bw_reports=cfg.bw_reports,
+                                             events=events)
                for spec in fleet}
     tasks = [asyncio.create_task(d.run()) for d in devices.values()]
     return devices, tasks
@@ -258,7 +260,7 @@ async def run_once(cfg: SimConfig) -> Dict[str, Any]:
         from foreman.db.base import init_db
 
         await init_db()
-        options = {"shared_capacity_bps": shared * MBIT} if shared and cfg.scheduler == "bandwidth_aware" else {}
+        options = {"shared_capacity_bps": shared * MBIT} if shared and cfg.scheduler in ("bandwidth_aware", "adaptive", "rssi_aware") else {}
         scheduler = create_scheduler(cfg.scheduler, **options)
         if isinstance(scheduler, BandwidthAwareScheduler):
             scheduler.model_size = model_size
@@ -307,7 +309,7 @@ def compare(cfg: SimConfig, schedulers: Sequence[str], repeats: int = 1) -> Dict
                        "--workload", cfg.workload, "--seed", str(seed), "--speed", str(cfg.speed),
                        "--work-scale", str(cfg.work_scale),
                        "--mode", cfg.mode, "--model-scale", str(cfg.model_scale), "--out", str(out),
-                       "--timeout", str(cfg.timeout_s)]
+                       "--timeout", str(cfg.timeout_s), "--bw-reports", cfg.bw_reports]
             if cfg.tasks:
                 command += ["--tasks", str(cfg.tasks)]
             if cfg.shared_capacity_mbps is not None:

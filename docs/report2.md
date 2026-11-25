@@ -149,6 +149,7 @@ Off by default. Read these before turning it on:
 - **Never tested end to end.** The Foreman and the app's version-2 layer have only been tested against fake workers and against each other's specifications, not together.
 
 ```powershell
+$env:CROWDIO_RUN_CONFIG = "evaluation\reconfig\configs\run_example.yaml"   # sets policy: S-aware (without it the policy is B0, which only reacts to failures)
 $env:CROWDIO_FLAGS = "adaptive_planning,problem_reports"
 $env:CROWDIO_MANIFEST = "tools\onnx_shards_sentiment\manifest.json"
 python tests\run_foreman_simple.py

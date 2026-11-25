@@ -76,6 +76,9 @@ class TensorSpec(_Model):
     dtype: str
     # Symbolic dims are strings ("batch", "seq"); fixed dims are ints.
     shape: List[Union[int, str]]
+    # contract extension (SDK export): the input of the next shard this output feeds,
+    # for example hidden_states_out -> hidden_states
+    binds_to: Optional[str] = None
 
 
 class TensorContract(_Model):
@@ -289,11 +292,15 @@ class LoadMsg(_Model):
     stage: Optional[int] = None  # contract extension
     next_hop: Optional[NextHop] = None  # contract extension
     source: Optional[str] = None  # contract extension: donor id, None = Foreman
+    source_address: Optional[str] = None  # contract extension: donor's peer_endpoint (host:port)
+    evict: List[str] = Field(default_factory=list)  # contract extension: shard files to delete (LRU) to make room
 
 
 class PrefetchMsg(_Model):
     shard_id: str
     source: Optional[str] = None  # contract extension
+    source_address: Optional[str] = None  # contract extension: donor's peer_endpoint (host:port)
+    evict: List[str] = Field(default_factory=list)  # contract extension: shard files to delete (LRU) to make room
 
 
 class CancelPrefetchMsg(_Model):
@@ -310,6 +317,7 @@ class RunMsg(_Model):
 class ProbeMsg(_Model):
     size: int = Field(gt=0)
     peer: Optional[str] = None  # contract extension: capability/peer-link test target
+    peer_address: Optional[str] = None  # contract extension: the peer's peer_endpoint (host:port)
     url: Optional[str] = None  # contract extension: Foreman probe endpoint
 
 
@@ -398,6 +406,7 @@ MESSAGE_SCHEMAS: Dict[str, type] = {
     "cancel_prefetch": CancelPrefetchMsg,
     "run": RunMsg,
     "probe": ProbeMsg,
+    "flags": None,  # contract extension: {flags: {name: bool}}, sent once to each v2 worker
     "peer_fetch": PeerFetchMsg,
     "serve_allowed": ServeAllowedMsg,
     "route": RouteMsg,

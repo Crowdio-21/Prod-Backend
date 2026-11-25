@@ -325,14 +325,21 @@ async def complete_task_if_assigned(
         await session.rollback()
         return False, task.job_id, None, None
 
-    prev_completed = job.completed_tasks or 0
-    total_tasks = job.total_tasks or 0
-    if prev_completed < total_tasks:
-        job.completed_tasks = prev_completed + 1
+    # Incremented in the database so that concurrent completions cannot overwrite each other.
+    counted = await session.execute(
+        update(JobModel)
+        .where(JobModel.id == job.id, func.coalesce(JobModel.completed_tasks, 0) < func.coalesce(JobModel.total_tasks, 0))
+        .values(completed_tasks=func.coalesce(JobModel.completed_tasks, 0) + 1)
+        .returning(JobModel.completed_tasks)
+        .execution_options(synchronize_session=False)
+    )
+    row = counted.fetchone()
+    completed_tasks = row[0] if row else job.completed_tasks
+    job_id, total_tasks = job.id, job.total_tasks
 
     await session.commit()
 
-    return True, job.id, job.completed_tasks, job.total_tasks
+    return True, job_id, completed_tasks, total_tasks
 
 
 async def record_worker_failure(
@@ -611,20 +618,61 @@ async def decrement_dependency_count(
         Tuple of (new_dependency_count, new_status)
         When count reaches 0, status is changed from 'blocked' to 'pending'
     """
-    task = await session.get(TaskModel, task_id)
-    if not task:
+    # Both writes happen in the database: a read-modify-write here loses decrements when several
+    # upstream tasks finish at once, and the downstream task then stays blocked forever.
+    result = await session.execute(
+        update(TaskModel)
+        .where(TaskModel.id == task_id)
+        .values(dependency_count=func.max(func.coalesce(TaskModel.dependency_count, 0) - 1, 0))
+        .returning(TaskModel.dependency_count, TaskModel.status)
+        .execution_options(synchronize_session=False)
+    )
+    row = result.fetchone()
+    if not row:
+        await session.rollback()
         return -1, "not_found"
+    new_count, new_status = row[0], row[1]
 
-    new_count = max(0, (task.dependency_count or 0) - 1)
-    task.dependency_count = new_count
-
-    new_status = task.status
-    if new_count == 0 and task.status == "blocked":
-        task.status = "pending"
+    if new_count == 0 and new_status == "blocked":
+        await session.execute(
+            update(TaskModel)
+            .where(TaskModel.id == task_id, TaskModel.status == "blocked")
+            .values(status="pending")
+            .execution_options(synchronize_session=False)
+        )
         new_status = "pending"
 
     await session.commit()
     return new_count, new_status
+
+
+async def requeue_task_if_assigned(
+    session: AsyncSession, task_id: str, worker_id: str, error: Optional[str] = None
+) -> bool:
+    """Put a task back to pending only if ``worker_id`` still holds it (a result may have just landed)."""
+    values = {"status": "pending", "worker_id": None, "assigned_at": None}
+    if error:
+        values["error_message"] = error
+    result = await session.execute(
+        update(TaskModel)
+        .where(TaskModel.id == task_id, TaskModel.status == "assigned", TaskModel.worker_id == worker_id)
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def fail_job_and_open_tasks(session: AsyncSession, job_id: str, error: str) -> None:
+    """Mark a job and every unfinished task of it as failed, so nothing dispatches them again."""
+    await session.execute(
+        update(TaskModel)
+        .where(TaskModel.job_id == job_id, TaskModel.status != "completed")
+        .values(status="failed", error_message=error, completed_at=datetime.now())
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(update(JobModel).where(JobModel.id == job_id).values(status="failed"))
+    await session.commit()
 
 
 async def get_task_dependents(session: AsyncSession, task_id: str) -> list:

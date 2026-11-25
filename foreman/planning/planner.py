@@ -11,6 +11,14 @@ compositions of atoms into stages restricted to exported shards.
 * :func:`scalar_dp_search` drops the used-worker set and keeps one scalarised
   label per state; it scales better but is *not* exact. Use
   :func:`dp_gap` to report its gap against exhaustive.
+* :func:`local_search` is incremental repartitioning: best-improvement hill
+  climbing from the current plan over small moves (replace a worker with a
+  standby, swap two stages' workers, shift a cut by one atom, merge or split a
+  stage) plus one larger move per exported composition (re-tile: take that
+  cut and assign workers greedily, keeping residency where it can). The small
+  moves change one or two shards, so most of the plan keeps its residency and
+  its switch cost stays zero. Not exact; pair it with an occasional full search
+  and report :func:`local_gap`.
 """
 
 from __future__ import annotations
@@ -307,8 +315,230 @@ def _finish_dp(snap, n, opts, objective, finals, evaluated, pruned_memory, metho
     return SearchResult(ranked[0] if ranked else None, tuple(ranked), evaluated, pruned_memory, 0, method)
 
 
+# ---------------------------------------------------------------------------
+# Incremental repartitioning (local search)
+# ---------------------------------------------------------------------------
+
+LOCAL_MOVES = ("replace", "swap", "shift", "merge", "split", "retile")
+
+
+class _Neighbourhood:
+    """Feasibility and shard lookups shared by every move of one local search."""
+
+    def __init__(self, snap: Snapshot, opts: CostOptions, keep_resident: bool) -> None:
+        self.snap = snap
+        self.opts = opts
+        self.keep_resident = keep_resident
+        self.alive = list(snap.alive_workers())
+        self.valid = frozenset(snap.catalog.compositions())
+        self.by_range: Dict[Tuple[int, int], str] = {}
+        for shard in sorted(snap.catalog.shards.values(), key=lambda s: s.shard_id):
+            self.by_range.setdefault((shard.start_atom, shard.end_atom), shard.shard_id)
+        self._fits: Dict[Tuple[str, str], bool] = {}
+
+    def fits(self, worker: str, shard_id: str) -> bool:
+        key = (worker, shard_id)
+        if key not in self._fits:
+            self._fits[key] = memory_feasible(self.snap, worker, shard_id, self.opts, self.keep_resident)
+        return self._fits[key]
+
+    def feasible(self, stages: Stages) -> bool:
+        if tuple(s for s, _ in stages) not in self.valid:
+            return False
+        workers = [w for _, w in stages]
+        if not self.opts.allow_time_multiplexing and len(set(workers)) != len(workers):
+            return False
+        alive = set(self.alive)
+        return all(w in alive and self.fits(w, s) for s, w in stages)
+
+    def span(self, shard_id: str) -> Tuple[int, int]:
+        shard = self.snap.catalog.shards[shard_id]
+        return shard.start_atom, shard.end_atom
+
+    def moves(self, stages: Stages):
+        """Yield (move, stages) for every plan one small move away from ``stages``."""
+        used = {w for _, w in stages}
+        spare = [w for w in self.alive if w not in used or self.opts.allow_time_multiplexing]
+        k = len(stages)
+        for i, (shard_id, worker) in enumerate(stages):
+            for other in spare:
+                if other != worker:
+                    yield "replace", stages[:i] + ((shard_id, other),) + stages[i + 1:]
+        for i in range(k):
+            for j in range(i + 1, k):
+                swapped = list(stages)
+                swapped[i] = (stages[i][0], stages[j][1])
+                swapped[j] = (stages[j][0], stages[i][1])
+                yield "swap", tuple(swapped)
+        for i in range(k - 1):
+            (left, wl), (right, wr) = stages[i], stages[i + 1]
+            start, end = self.span(left)
+            _, right_end = self.span(right)
+            for new_end in (end - 1, end + 1):
+                if new_end < start or new_end >= right_end:
+                    continue
+                a = self.by_range.get((start, new_end))
+                b = self.by_range.get((new_end + 1, right_end))
+                if a and b:
+                    yield "shift", stages[:i] + ((a, wl), (b, wr)) + stages[i + 2:]
+            merged = self.by_range.get((start, right_end))
+            if merged:
+                for w in (wl, wr):
+                    yield "merge", stages[:i] + ((merged, w),) + stages[i + 2:]
+        for i, (shard_id, worker) in enumerate(stages):
+            start, end = self.span(shard_id)
+            for cut in range(start + 1, end + 1):
+                a = self.by_range.get((start, cut - 1))
+                b = self.by_range.get((cut, end))
+                if not (a and b):
+                    continue
+                for other in spare:
+                    if other == worker:
+                        continue
+                    yield "split", stages[:i] + ((a, worker), (b, other)) + stages[i + 1:]
+                    yield "split", stages[:i] + ((a, other), (b, worker)) + stages[i + 1:]
+
+        current = tuple(s for s, _ in stages)
+        for composition in sorted(self.valid):
+            if composition != current:
+                retiled = self.assign(composition, keep=dict((s, w) for s, w in stages))
+                if retiled is not None:
+                    yield "retile", retiled
+
+    def assign(self, composition: Tuple[str, ...], keep: Dict[str, str]) -> Optional[Stages]:
+        """Greedy workers for ``composition``: a shard keeps its current worker,
+        otherwise takes the free worker with the cheapest switch."""
+        alive = set(self.alive)
+        chosen: List[Optional[str]] = [None] * len(composition)
+        for i, shard_id in enumerate(composition):
+            worker = keep.get(shard_id)
+            if worker in alive and self.fits(worker, shard_id) and worker not in chosen:
+                chosen[i] = worker
+        for i, shard_id in enumerate(composition):
+            if chosen[i] is not None:
+                continue
+            options = [w for w in self.alive if (w not in chosen or self.opts.allow_time_multiplexing)
+                       and self.fits(w, shard_id)]
+            if not options:
+                return None
+            chosen[i] = min(options, key=lambda w: (c_switch(self.snap, w, shard_id, self.opts).total.mid, w))
+        return tuple(zip(composition, chosen))
+
+    def repair(self, stages: Stages) -> Optional[Stages]:
+        """Move each stage whose worker is dead or cannot hold its shard to the
+        cheapest-to-switch standby. Keeps the cut. None if no standby fits."""
+        alive = set(self.alive)
+        fixed = list(stages)
+        for i, (shard_id, worker) in enumerate(fixed):
+            if worker in alive and self.fits(worker, shard_id):
+                continue
+            used = {w for _, w in fixed}
+            options = [w for w in self.alive if (w not in used or self.opts.allow_time_multiplexing)
+                       and self.fits(w, shard_id)]
+            if not options:
+                return None
+            best = min(options, key=lambda w: (c_switch(self.snap, w, shard_id, self.opts).total.mid, w))
+            fixed[i] = (shard_id, best)
+        fixed_stages = tuple(fixed)
+        return fixed_stages if self.feasible(fixed_stages) else None
+
+
+def local_search(
+    snap: Snapshot,
+    n: int,
+    opts: CostOptions,
+    objective: Objective = Objective(),
+    *,
+    start: Stages,
+    keep_top: int = 5,
+    keep_resident: bool = False,
+    max_rounds: int = 50,
+) -> SearchResult:
+    """Best-improvement hill climbing from ``start`` (usually the current plan).
+
+    A start whose workers died or no longer fit is first repaired by moving the
+    broken stages to standbys. The result is a local optimum: no single move
+    improves the objective. The full search remains the reference.
+    """
+    hood = _Neighbourhood(snap, opts, keep_resident)
+    current = hood.repair(tuple(start)) if start else None
+    if current is None:
+        return SearchResult(None, (), 0, 0, 0, "local")
+    seen: Dict[Stages, Candidate] = {}
+
+    def price(stages: Stages) -> Candidate:
+        if stages not in seen:
+            seen[stages] = Candidate(stages, pipeline_cost(snap, stages, n, opts))
+        return seen[stages]
+
+    best = price(current)
+    for _ in range(max_rounds):
+        step: Optional[Candidate] = None
+        for _, stages in hood.moves(best.stages):
+            if stages in seen or not hood.feasible(stages):
+                continue
+            candidate = price(stages)
+            if step is None or (objective.key(candidate.cost), candidate.stages) < (objective.key(step.cost), step.stages):
+                step = candidate
+        if step is None or objective.key(step.cost) >= objective.key(best.cost):
+            break
+        best = step
+    ranked = sorted(seen.values(), key=lambda c: (objective.key(c.cost), c.stages))[:keep_top]
+    return SearchResult(best, tuple(ranked), len(seen), 0, 0, "local", len({tuple(s for s, _ in c) for c in seen}))
+
+
+def local_gap(snap: Snapshot, n: int, opts: CostOptions, start: Stages,
+              objective: Objective = Objective()) -> Tuple[float, float, float]:
+    """(exhaustive T_total, local-search T_total, relative gap) for one instance."""
+    exact = exhaustive_search(snap, n, opts, objective)
+    approx = local_search(snap, n, opts, objective, start=start)
+    if not exact.found or not approx.found:
+        return (math.inf, math.inf, 0.0 if exact.found == approx.found else math.inf)
+    a, b = exact.best.cost.T_total.mid, approx.best.cost.T_total.mid
+    return a, b, (b - a) / a if a > 0 else 0.0
+
+
+# "auto" search limits: exhaustive search tries every assignment of workers to every composition, which is
+# fine for a handful of phones and takes minutes for ten (BERT-base, 24 shards: 0.9 s at 5 phones, 24 s at 7).
+AUTO_EXHAUSTIVE_LIMIT = 20_000  # (composition, assignment) pairs
+AUTO_PARETO_MAX_WORKERS = 7  # exact DP, about a second at 7 phones and growing fast
+
+
+def exhaustive_work(snap: Snapshot, compositions=None) -> int:
+    """How many (composition, worker assignment) pairs an exhaustive search would price."""
+    workers = len(list(snap.alive_workers()))
+    total = 0
+    for composition in (compositions if compositions is not None else snap.catalog.compositions()):
+        k = len(composition)
+        if k > workers:
+            continue
+        ways = 1
+        for i in range(k):
+            ways *= workers - i
+        total += ways
+    return total
+
+
+def auto_search(snap: Snapshot, n: int, opts: CostOptions, objective: Objective, *, compositions=None,
+                keep_resident: bool = False) -> SearchResult:
+    """Pick the search by instance size so planning never stalls the Foreman: exhaustive when small, the exact
+    Pareto DP up to a few phones, then the scalar DP polished by local search (always feasible, near-optimal)."""
+    if objective.kind != "min_total" or exhaustive_work(snap, compositions) <= AUTO_EXHAUSTIVE_LIMIT:
+        return exhaustive_search(snap, n, opts, objective, compositions=compositions, keep_resident=keep_resident)
+    if len(list(snap.alive_workers())) <= AUTO_PARETO_MAX_WORKERS:
+        return pareto_dp_search(snap, n, opts, objective, compositions=compositions, keep_resident=keep_resident)
+    result = scalar_dp_search(snap, n, opts, objective, compositions=compositions, keep_resident=keep_resident)
+    if result.found and compositions is None:
+        polished = local_search(snap, n, opts, objective, start=result.best.stages, keep_resident=keep_resident)
+        if polished.found and objective.key(polished.best.cost) < objective.key(result.best.cost):
+            return polished
+    return result
+
+
 def search(snap: Snapshot, n: int, opts: CostOptions, objective: Objective, *, mode: str = "exhaustive",
            compositions=None, keep_resident: bool = False) -> SearchResult:
+    if mode == "auto":
+        return auto_search(snap, n, opts, objective, compositions=compositions, keep_resident=keep_resident)
     if mode == "pareto_dp" and objective.kind == "min_total":
         return pareto_dp_search(snap, n, opts, objective, compositions=compositions, keep_resident=keep_resident)
     if mode == "scalar_dp" and objective.kind == "min_total":

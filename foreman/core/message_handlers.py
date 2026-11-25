@@ -34,6 +34,14 @@ from common.serializer import get_runtime_info, bytes_to_hex, hex_to_bytes
 from .staged_results_manager.checkpoint_manager import CheckpointManager
 
 
+
+def _declared_proto(value) -> int:
+    """The protocol version a worker declared in worker_ready (1 = legacy)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
 class ClientMessageHandler:
     """
     Handles messages from client SDK
@@ -187,6 +195,7 @@ class WorkerMessageHandler:
         self.reconnection_handler = reconnection_handler  # may be None if checkpointing unused
         self.reconfiguration = reconfiguration
         self.plan_coordinator = None  # set by WebSocketManager when adaptive_planning is on
+        self.watchdog = None  # set by WebSocketManager
 
     # ------------------------------------------------------------------
     # Disconnection entry-point  (NEW – wire this into your WS close path)
@@ -267,8 +276,14 @@ class WorkerMessageHandler:
         if worker_id:
             await _update_worker_status(worker_id, "online")
             # Accepts PING replies, periodic PC heartbeats and Android heartbeats alike.
-            from .worker_metrics import extract_link_report, extract_performance_metrics
+            from .worker_metrics import extract_link_report, extract_performance_metrics, extract_radio_report
 
+            from .experiment_log import record_heartbeat
+            record_heartbeat(worker_id, message.data)
+
+            radio = extract_radio_report(message.data)
+            if radio:  # the RSSI-aware scheduler uses signal strength; the others ignore it
+                self.task_dispatcher.scheduler.observe_radio(worker_id, radio)
             link = extract_link_report(message.data)
             if link:  # schedulers that track bandwidth learn from the worker's own measurement
                 self.task_dispatcher.scheduler.observe_link_report(worker_id, link)
@@ -350,7 +365,11 @@ class WorkerMessageHandler:
 
             if self.plan_coordinator is not None:
                 kind = "pc" if str(worker_type).lower().startswith("pc") else "mobile"
-                self.plan_coordinator.worker_connected(worker_id, "pc" if kind == "pc" else "android", kind)
+                self.plan_coordinator.worker_connected(
+                    worker_id, "pc" if kind == "pc" else "android", kind,
+                    proto_version=_declared_proto(message.data.get("proto_version")),
+                    supported_flags=message.data.get("supported_flags"),
+                    supported_messages=message.data.get("supported_messages"))
 
             # ---- Register worker in connection manager ----
             from .connection_manager import WorkerInfo
@@ -383,6 +402,8 @@ class WorkerMessageHandler:
                 )
 
                 if active_task_id and active_job_id:
+                    if self.watchdog is not None:
+                        self.watchdog.expect_resume(active_task_id, worker_id)
                     print(
                         f"WorkerMessageHandler: Worker {worker_id} reconnected with running task "
                         f"{active_task_id} (job {active_job_id}) \u2013 DB updated, no new task assigned."
@@ -411,6 +432,9 @@ class WorkerMessageHandler:
                 self.connection_manager.set_worker_active_task(worker_id, db_task_id, db_job_id)
                 self.connection_manager.mark_worker_busy(worker_id)
                 await _update_worker_status(worker_id, "busy", current_task_id=db_task_id)
+                if self.watchdog is not None:
+                    # A restarted app no longer has the task: re-queue it if nothing is heard of it
+                    self.watchdog.expect_resume(db_task_id, worker_id)
                 print(
                     f"WorkerMessageHandler: Worker {worker_id} reconnected with DB-assigned task "
                     f"{db_task_id} (job {db_job_id}) \u2013 no new task assigned."
@@ -534,7 +558,8 @@ class WorkerMessageHandler:
 
             print(f"WorkerMessageHandler: Task {task_id} failed on worker {worker_id} for job {job_id}: {error}")
 
-            await self.job_manager.mark_task_failed(task_id, job_id, worker_id, error)
+            exhausted = await self.job_manager.mark_task_failed(task_id, job_id, worker_id, error)
+            self.task_dispatcher.forget_dispatch(task_id, worker_id)
             await _update_worker_task_stats(worker_id, task_completed=False)
 
             try:
@@ -545,6 +570,9 @@ class WorkerMessageHandler:
             self.connection_manager.clear_worker_active_task(worker_id)
             self.connection_manager.mark_worker_available(worker_id)
             await _update_worker_status(worker_id, "online", current_task_id=None)
+
+            if exhausted:
+                await self.completion_handler.handle_job_failure(job_id, str(error))
 
             assigned = await self.task_dispatcher.assign_task_to_available_worker(worker_id)
             if assigned:
@@ -575,6 +603,8 @@ class WorkerMessageHandler:
             if not worker_id:
                 print("WorkerMessageHandler: Could not find worker for checkpoint")
                 return
+            if self.watchdog is not None:
+                self.watchdog.touch(task_id)
 
             checkpoint_data_bytes = hex_to_bytes(delta_data_hex)
             state_vars_info = f", state_vars: {checkpoint_state_vars}" if checkpoint_state_vars else ""
@@ -633,6 +663,8 @@ class WorkerMessageHandler:
             if not worker_id:
                 print("WorkerMessageHandler: Could not find worker for task progress")
                 return
+            if self.watchdog is not None:
+                self.watchdog.touch(task_id)
 
             # 1) Persist progress immediately so dashboard and DB stay in sync.
             from foreman.db.base import get_db_session

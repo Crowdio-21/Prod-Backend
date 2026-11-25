@@ -23,6 +23,8 @@ from ...db.crud import (
     complete_task_if_assigned,
     record_worker_failure,
     get_latest_task_failure_with_checkpoint,
+    requeue_task_if_assigned,
+    fail_job_and_open_tasks,
 )
 from ...db.models import TaskModel
 
@@ -261,6 +263,17 @@ async def _update_task_status(
 
     async with db_session() as session:
         await update_task_status(session, task_id, status, worker_id, stored_result, error)
+
+
+async def _requeue_task_if_assigned(task_id: str, worker_id: str, error: str = None) -> bool:
+    """Put a task back to pending only if ``worker_id`` still holds it."""
+    async with db_session() as session:
+        return await requeue_task_if_assigned(session, task_id, worker_id, error)
+
+
+async def _fail_job_and_open_tasks(job_id: str, error: str) -> None:
+    async with db_session() as session:
+        await fail_job_and_open_tasks(session, job_id, error)
 
 
 async def _claim_task_for_worker(task_id: str, worker_id: str):

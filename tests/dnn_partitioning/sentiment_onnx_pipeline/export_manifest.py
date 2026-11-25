@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Export DistilBERT SST-2 as re-cuttable ONNX shards plus a contract ``manifest.json``.
+"""Export a BERT-family SST-2 classifier as re-cuttable ONNX shards plus a contract ``manifest.json``.
+
+Supported: DistilBERT (``model_type`` distilbert) and BERT-base (``model_type`` bert). Both are a
+chain of identical encoder layers with the same ``[batch, seq, hidden + 1]`` activation, so the
+planner, the manifest and the phones treat them alike; only the module names and the head differ.
 
 Atoms: ``embed``, one atom per ``--cut-grid`` encoder layers, ``head``. Exported:
 * every contiguous encoder range, with the embedding folded into ranges that start
@@ -38,15 +42,50 @@ from foreman.planning.contract import (  # noqa: E402
 from foreman.planning.registry import EXPORTER_VERSION, distilbert_layer_flops_per_token, sha256_file  # noqa: E402
 
 
+class Arch:
+    """The parts of a BERT-family classifier the exporter cuts apart."""
+
+    def __init__(self, model):
+        kind = model.config.model_type
+        if kind == "distilbert":
+            self.embeddings = model.distilbert.embeddings
+            self.layers = list(model.distilbert.transformer.layer)
+            self.hidden = int(model.config.dim)
+            self._classify = lambda cls: torch.relu(model.pre_classifier(cls))
+        elif kind == "bert":
+            self.embeddings = model.bert.embeddings
+            self.layers = list(model.bert.encoder.layer)
+            self.hidden = int(model.config.hidden_size)
+            self._classify = lambda cls: model.bert.pooler.activation(model.bert.pooler.dense(cls))
+        else:
+            raise SystemExit(f"unsupported model_type {kind!r}; expected distilbert or bert")
+        self.kind = kind
+        self.model = model
+        self.dropout = model.dropout
+        self.classifier = model.classifier
+        self.num_labels = int(model.config.num_labels)
+
+    def run_block(self, layer, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if self.kind == "bert":  # BertLayer takes an additive [batch, 1, 1, seq] mask
+            additive = (1.0 - mask[:, None, None, :].to(hidden.dtype)) * torch.finfo(hidden.dtype).min
+            output = layer(hidden, attention_mask=additive)
+            return output[0] if isinstance(output, tuple) else output
+        return run_distilbert_block(layer, hidden, mask)
+
+    def head(self, cls: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.dropout(self._classify(cls)))
+
+
 class EncoderRange(nn.Module):
     """Optional embedding + encoder layers [lo, hi). Packs the mask as an extra channel."""
 
-    def __init__(self, distilbert, lo: int, hi: int, with_embed: bool, pad_token_id: int):
+    def __init__(self, arch: Arch, lo: int, hi: int, with_embed: bool, pad_token_id: int):
         super().__init__()
+        self.arch = arch
         self.with_embed = with_embed
-        self.embeddings = distilbert.embeddings if with_embed else None
-        self.layers = nn.ModuleList(list(distilbert.transformer.layer)[lo:hi])
-        self.hidden = int(distilbert.config.dim)
+        self.embeddings = arch.embeddings if with_embed else None
+        self.layers = nn.ModuleList(arch.layers[lo:hi])
+        self.hidden = arch.hidden
         self.pad = int(pad_token_id)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -57,29 +96,28 @@ class EncoderRange(nn.Module):
             hidden = x[..., : self.hidden]
             mask = x[..., self.hidden] > 0.5
         for layer in self.layers:
-            hidden = run_distilbert_block(layer, hidden, mask)
+            hidden = self.arch.run_block(layer, hidden, mask)
         return torch.cat([hidden, mask.unsqueeze(-1).to(hidden.dtype)], dim=-1)
 
 
 class Head(nn.Module):
-    def __init__(self, model):
+    def __init__(self, arch: Arch):
         super().__init__()
-        self.pre_classifier = model.pre_classifier
-        self.classifier = model.classifier
-        self.dropout = model.dropout
-        self.hidden = int(model.config.dim)
+        self.arch = arch
+        self.hidden = arch.hidden
+        # Register the head's parameters so they are exported (and counted) with this module.
+        self.pre = arch.model.pre_classifier if arch.kind == "distilbert" else arch.model.bert.pooler
+        self.classifier = arch.classifier
 
     def forward(self, packed: torch.Tensor) -> torch.Tensor:
-        pooled = torch.relu(self.pre_classifier(packed[:, 0, : self.hidden]))
-        return self.classifier(self.dropout(pooled))
+        return self.arch.head(packed[:, 0, : self.hidden])
 
 
 class Full(nn.Module):
-    def __init__(self, model, pad_token_id: int):
+    def __init__(self, arch: Arch, pad_token_id: int):
         super().__init__()
-        n = len(model.distilbert.transformer.layer)
-        self.encoder = EncoderRange(model.distilbert, 0, n, True, pad_token_id)
-        self.head = Head(model)
+        self.encoder = EncoderRange(arch, 0, len(arch.layers), True, pad_token_id)
+        self.head = Head(arch)
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         return self.head(self.encoder(ids))
@@ -107,10 +145,11 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     model, tokenizer = load_model_and_tokenizer(args.model_name)
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    n_layers = len(model.distilbert.transformer.layer)
+    arch = Arch(model)
+    n_layers = len(arch.layers)
     if n_layers % args.cut_grid or args.split_idx % args.cut_grid:
         raise SystemExit("cut grid must divide the layer count and the split index")
-    hidden = int(model.config.dim)
+    hidden = arch.hidden
     seq = args.max_length
     labels = int(model.config.num_labels)
     groups = n_layers // args.cut_grid
@@ -145,18 +184,18 @@ def main() -> None:
         hi = end_group * args.cut_grid
         add(f"s{0}_{end_group}", ShardRole.EMBED if hi == 0 else ShardRole.ENCODER, 0, end_group,
             0 if hi else None, hi - 1 if hi else None, layer_flops * hi,
-            EncoderRange(model.distilbert, 0, hi, True, pad), ids, ids_spec, packed_out, 8.0, packed_bpt)
+            EncoderRange(arch, 0, hi, True, pad), ids, ids_spec, packed_out, 8.0, packed_bpt)
     for g0 in range(groups):
         for g1 in range(g0 + 1, groups + 1):
             lo, hi = g0 * args.cut_grid, g1 * args.cut_grid
             add(f"s{g0 + 1}_{g1}", ShardRole.ENCODER, g0 + 1, g1, lo, hi - 1, layer_flops * (hi - lo),
-                EncoderRange(model.distilbert, lo, hi, False, pad), packed, packed_in, packed_out, packed_bpt,
+                EncoderRange(arch, lo, hi, False, pad), packed, packed_in, packed_out, packed_bpt,
                 packed_bpt)
     head_flops = 2.0 * (hidden * hidden + hidden * labels) / seq
-    add("head", ShardRole.HEAD, head_atom, head_atom, None, None, head_flops, Head(model), packed, packed_in, logits,
+    add("head", ShardRole.HEAD, head_atom, head_atom, None, None, head_flops, Head(arch), packed, packed_in, logits,
         packed_bpt, 4.0 * labels / seq, pinned=True)
     add("full", ShardRole.FULL, 0, head_atom, 0, n_layers - 1, layer_flops * n_layers + head_flops,
-        Full(model, pad), ids, ids_spec, logits, 8.0, 4.0 * labels / seq)
+        Full(arch, pad), ids, ids_spec, logits, 8.0, 4.0 * labels / seq)
     split_group = args.split_idx // args.cut_grid
     manifest = Manifest(model_id=args.model_name, cut_grid=args.cut_grid, atoms=atoms, shards=shards,
                         default_composition=[f"s0_{split_group}", f"s{split_group + 1}_{groups}", "head"])

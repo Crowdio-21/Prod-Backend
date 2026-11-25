@@ -1,3 +1,4 @@
+import os
 import sys
 import websockets
 from contextlib import asynccontextmanager
@@ -6,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .db.base import init_db
 from .core.ws_manager import WebSocketManager
 from . import api
+
+# WebSocket port for workers and clients (REST is served by uvicorn: --port).
+WS_PORT = int(os.getenv("CROWDIO_WS_PORT", "9000"))
 
 
 # Keep direct Uvicorn launches working on Windows consoles that use cp1252.
@@ -43,8 +47,9 @@ async def lifespan(app: FastAPI):
     async def start_websocket_server():
         try:
             # Configure WebSocket server with proper timeouts
-            # ping_interval: How often to send pings to keep connection alive (None = disabled, let our custom ping handle it)
-            # ping_timeout: How long to wait for pong response before closing
+            # ping_interval / ping_timeout: protocol keepalive that closes half-open connections, so their
+            # tasks can be re-queued. The timeout is generous because phones can be slow to answer under load.
+            # CROWDIO_WS_PING_INTERVAL=0 turns it off.
             # close_timeout: How long to wait for close handshake
             # max_size: Message size limit. None disables the cap so large
             # model payloads (e.g., partitioned VGG16 TFLite blobs) don't
@@ -52,13 +57,13 @@ async def lifespan(app: FastAPI):
             websocket_server = await websockets.serve(
                 ws_manager.handle_connection,
                 "0.0.0.0",
-                9000,
-                ping_interval=None,  # Disable built-in ping, we handle it ourselves
-                ping_timeout=None,  # Disable ping timeout
+                WS_PORT,
+                ping_interval=float(os.getenv("CROWDIO_WS_PING_INTERVAL") or 30) or None,
+                ping_timeout=float(os.getenv("CROWDIO_WS_PING_TIMEOUT") or 120),
                 close_timeout=30,  # Wait up to 30s for close handshake
                 max_size=None,
             )
-            print("WebSocket server started on ws://localhost:9000")
+            print(f"WebSocket server started on ws://localhost:{WS_PORT}")
             await websocket_server.wait_closed()
         except Exception as e:
             print(f"WebSocket server error: {e}")
@@ -75,7 +80,7 @@ async def lifespan(app: FastAPI):
 
     print("FastAPI Foreman started!")
     print("REST API: http://localhost:8000")
-    print("WebSocket: ws://localhost:9000")
+    print(f"WebSocket: ws://localhost:{WS_PORT}")
 
     yield
 
@@ -87,6 +92,7 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+    await ws_manager.watchdog.stop()
     await ws_manager.reconfiguration.stop()
     if ws_manager.plan_coordinator is not None:
         await ws_manager.plan_coordinator.stop()

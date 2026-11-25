@@ -55,7 +55,18 @@ class FakeClock:
         return self.now
 
 
+ALL_FLAGS = ("adaptive_planning", "direct_path", "peer_fetch", "prefetch", "problem_reports")
+ALL_MESSAGES = ("probe", "msg_ack", "flags", "load", "run", "route", "prefetch", "cancel_prefetch", "peer_fetch",
+                "serve_allowed")
+
+
 class FakeNetwork:
+    def connect(self, worker_id: str, device_class: str = "phone", kind=None, *, flags=ALL_FLAGS,
+                messages=ALL_MESSAGES, proto_version: int = 2) -> None:
+        """Register a v2 worker that declares what it supports (everything, by default)."""
+        self.coordinator.worker_connected(worker_id, device_class, kind, proto_version=proto_version,
+                                          supported_flags=flags, supported_messages=messages)
+
     def __init__(self) -> None:
         self.coordinator: Optional[PlanCoordinator] = None
         self.workers: Dict[str, "FakeWorker"] = {}
@@ -115,6 +126,10 @@ class FakeWorker:
     resident: Optional[str] = None
     disk: Set[str] = field(default_factory=set)
     timings: Dict[str, float] = field(default_factory=lambda: {"load": 1.0, "init": 0.5, "write": 0.2, "unload": 0.3})
+    disk_cap: Optional[int] = None
+    ram_free: Optional[int] = None  # reported free RAM; a load that cannot fit fails with OOM
+    hidden_reserve: int = 0  # memory the phone keeps back without reporting it
+    memory_refusals: int = 0
     compute_ms: float = 20.0
     ack_timeout_s: float = 0.05
     stall: bool = False
@@ -131,6 +146,11 @@ class FakeWorker:
     duplicates: int = 0
     loads: List[Tuple[str, int]] = field(default_factory=list)
     prefetches: List[str] = field(default_factory=list)
+    load_msgs: List[Any] = field(default_factory=list)
+    prefetch_msgs: List[Any] = field(default_factory=list)
+    received: List[str] = field(default_factory=list)
+    evicted: List[str] = field(default_factory=list)
+    evict_requests: List[List[str]] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
     computed: int = 0
 
@@ -152,6 +172,7 @@ class FakeWorker:
             "resident_shard": self.resident,
             "session_state": "SERVING" if self.in_flight else ("READY" if self.resident else "IDLE"),
             "disk_shards": [{"id": s, "bytes": catalog.shards[s].bytes} for s in sorted(self.disk)],
+            "disk_used": self._disk_used(), "disk_cap": self.disk_cap, "ram_free": self.ram_free,
             "observed_up_bps": self.bw, "observed_down_bps": self.bw, "rtt_to_foreman_ms": 10.0,
             "peer_links": [{"peer": p, "reachable": ok and (self.worker_id, p) not in self.net.blocked
                             and (self.worker_id, p) not in self.net.blackhole,
@@ -164,6 +185,24 @@ class FakeWorker:
         }
         self._send_foreman("report", {"state": state})
 
+    def _disk_used(self) -> int:
+        catalog = self.net.coordinator.registry.catalog
+        return sum(catalog.shards[s].bytes for s in self.disk)
+
+    def _make_room(self, shard_id: str, evict: List[str]) -> None:
+        """Delete the files the Foreman asked for; record a violation if the file still does not fit."""
+        self.evict_requests.append(list(evict))
+        for victim in evict:
+            if victim == self.resident:
+                self.violations.append(f"asked to evict the resident shard {victim}")
+                continue
+            if victim in self.disk:
+                self.disk.discard(victim)
+                self.evicted.append(victim)
+        size = self.net.coordinator.registry.catalog.shards[shard_id].bytes
+        if shard_id not in self.disk and self.disk_cap is not None and self._disk_used() + size > self.disk_cap:
+            self.violations.append(f"no room for {shard_id}: {self._disk_used()} used + {size} > cap {self.disk_cap}")
+
     def disconnect(self) -> None:
         self.connected = False
 
@@ -174,6 +213,7 @@ class FakeWorker:
         envelope = Envelope.model_validate(raw)
         body = envelope.body()
         kind = envelope.type
+        self.received.append(kind)
         if sender == "foreman" and envelope.msg_id and kind not in ("load", "run", "ack"):
             self._send_foreman("msg_ack", {"ack_of": envelope.msg_id})
         if kind == "load":
@@ -190,6 +230,8 @@ class FakeWorker:
             await self._resend(body.stage)
         elif kind == "prefetch":
             self.prefetches.append(body.shard_id)
+            self.prefetch_msgs.append(body)
+            self._make_room(body.shard_id, body.evict)
             self.disk.add(body.shard_id)
         elif kind == "cancel_prefetch":
             pass
@@ -210,12 +252,29 @@ class FakeWorker:
         if self.in_flight:
             self.violations.append(f"load {body.shard_id} while serving {sorted(self.in_flight)}")
         self.loads.append((body.shard_id, body.epoch))
+        self.load_msgs.append(body)
         if self.fail_load:
             self._send_foreman("load_result", {"shard_id": body.shard_id, "epoch": body.epoch, "ok": False,
                                                "error": "LOAD_FAILED"})
             return
+        size = self.net.coordinator.registry.catalog.shards[body.shard_id].bytes
+        freed = self.net.coordinator.registry.catalog.shards[self.resident].bytes if self.resident else 0
+        if self.ram_free is not None and size > self.ram_free + freed:
+            self.violations.append(f"asked to load {body.shard_id} ({size} B) with {self.ram_free} B free")
+            self._send_foreman("load_result", {"shard_id": body.shard_id, "epoch": body.epoch, "ok": False,
+                                               "error": "OOM"})
+            return
+        if self.ram_free is not None and size > self.ram_free - self.hidden_reserve + freed:
+            # The phone keeps memory for itself that it did not report: the Foreman could not have known.
+            self.memory_refusals += 1
+            available = max(0, self.ram_free - self.hidden_reserve + freed)
+            self._send_foreman("load_result", {"shard_id": body.shard_id, "epoch": body.epoch, "ok": False,
+                                               "error": f"pre-flight: needs ~{size} bytes, ~{available} available"})
+            return
         timings = {"unload_s": self.timings["unload"] if self.resident else 0.0}
         self.resident = None  # single residency: unload first
+        if body.shard_id not in self.disk:
+            self._make_room(body.shard_id, body.evict)
         size = self.net.coordinator.registry.catalog.shards[body.shard_id].bytes
         if body.shard_id not in self.disk:
             timings["fetch_s"] = size / self.bw

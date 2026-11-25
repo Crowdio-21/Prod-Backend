@@ -3,6 +3,7 @@ Job lifecycle management and state tracking
 """
 
 import json
+import os
 from typing import List, Optional, Dict, Any, Tuple
 from .payload_store import resolve_text_ref
 
@@ -16,6 +17,8 @@ from .utils import (
     _update_task_status,
     _record_worker_failure,
     _complete_task_if_assigned,
+    _requeue_task_if_assigned,
+    _fail_job_and_open_tasks,
 )
 from .dependency_manager import DependencyManager, PipelineStage
 
@@ -53,6 +56,10 @@ class JobManager:
 
         # Dependency manager for pipeline jobs
         self.dependency_manager = DependencyManager()
+
+        # Failed or timed-out attempts per task; a job fails once one task reaches the limit (0 = no limit)
+        self.max_task_attempts = int(os.getenv("CROWDIO_MAX_TASK_ATTEMPTS") or 5)
+        self._attempts: Dict[str, int] = {}
 
     # ==================== Job Creation ====================
 
@@ -312,7 +319,7 @@ class JobManager:
 
     async def mark_task_failed(
         self, task_id: str, job_id: str, worker_id: str, error: str
-    ) -> None:
+    ) -> bool:
         """
         Mark a task as failed and reset to pending for retry
 
@@ -321,20 +328,36 @@ class JobManager:
             job_id: Job identifier
             worker_id: Worker that failed the task
             error: Error message
+
+        Returns:
+            True if the task has now used up its attempts and the job should be failed
         """
         print(f"JobManager: Marking task {task_id} as failed: {error}")
 
         await _record_worker_failure(worker_id, task_id, error, job_id)
 
         # Update task status back to pending for retry
-        # Set worker_id to None so it can be reassigned
-        await _update_task_status(task_id, "pending", worker_id=None, error=error)
+        # Only if this worker still holds it: a late error must not undo a retry or a completion
+        if not await _requeue_task_if_assigned(task_id, worker_id, error):
+            print(f"JobManager: Ignoring stale error for task {task_id} from worker {worker_id}")
+            return False
 
         # Update local metadata
         if job_id in self._job_metadata:
             self._job_metadata[job_id]["failed_tasks"] += 1
 
         print(f"JobManager: Task {task_id} reset to pending for retry")
+        return self.count_attempt(task_id)
+
+    def count_attempt(self, task_id: str) -> bool:
+        """Record one unsuccessful attempt; True once the task has reached the limit."""
+        self._attempts[task_id] = self._attempts.get(task_id, 0) + 1
+        return 0 < self.max_task_attempts <= self._attempts[task_id]
+
+    async def fail_job(self, job_id: str, error: str) -> None:
+        """Stop a job for good: nothing of it is dispatched again."""
+        await _fail_job_and_open_tasks(job_id, error)
+        self._forget_job(job_id)
 
     async def mark_task_assigned(self, task_id: str, worker_id: str) -> None:
         """
@@ -446,6 +469,15 @@ class JobManager:
         # Update job status in database
         await _update_job_status(job_id, "completed", completed_tasks=completed_tasks)
 
+        self._forget_job(job_id)
+
+        print(f"JobManager: Job {job_id} finalized")
+
+    def _forget_job(self, job_id: str) -> None:
+        """Drop everything cached for a job that will not be dispatched again."""
+        for task_id in [t for t in self._attempts if t.startswith(f"{job_id}_task_")]:
+            del self._attempts[task_id]
+
         # Clean up cache
         if job_id in self._job_cache:
             del self._job_cache[job_id]
@@ -456,8 +488,6 @@ class JobManager:
 
         # Clean up pipeline data
         self.dependency_manager.cleanup_job(job_id)
-
-        print(f"JobManager: Job {job_id} finalized")
 
     # ==================== Job Information ====================
 

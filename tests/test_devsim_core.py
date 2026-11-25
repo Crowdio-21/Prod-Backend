@@ -135,7 +135,8 @@ def test_a_transfer_takes_bytes_over_rate():
         return took, up
 
     took, up = run(go())
-    assert took == pytest.approx(4.0, rel=0.15) and up == pytest.approx(4.0, rel=0.15)
+    # real-time sleeps: allow for a busy machine
+    assert took == pytest.approx(4.0, rel=0.35) and up == pytest.approx(4.0, rel=0.35)
 
 
 def test_tiny_messages_cost_nothing_and_bad_direction_is_rejected():

@@ -128,8 +128,14 @@ class TaskScheduler(ABC):
     def observe_link_report(self, worker_id: str, report: dict) -> None:
         """A worker reported its own link measurement ``{down_bps, up_bps, rtt_s}`` (bytes/s, seconds)."""
 
+    def observe_radio(self, worker_id: str, report: dict) -> None:
+        """A phone reported its radio state ``{rssi_dbm, link_mbps}`` (dBm, Mbit/s)."""
+
     def observe_completion(self, task_id: str, worker_id: str, result_bytes: int) -> None:
         """A task finished on ``worker_id`` and produced ``result_bytes`` of result text."""
+
+    def observe_task_lost(self, task_id: str, worker_id: Optional[str] = None) -> None:
+        """A dispatched task will not complete as dispatched (it failed, or was taken back)."""
 
     def link_snapshot(self) -> Optional[dict]:
         """Link/compute estimates for monitoring, or None if this scheduler keeps none."""

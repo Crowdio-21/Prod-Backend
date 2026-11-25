@@ -25,6 +25,9 @@ def replay(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         snap = snapshot_from_dict(event["snapshot"])
         opts = opts_from_dict(event["opts"])
         policy = make_policy(event["policy"], opts)
+        if event.get("local_calls"):
+            # Local-search policies run a full search every k-th call; replay the same call index.
+            policy._calls = int(event["local_calls"]) - 1
         kind, deadline = event.get("objective") or ("min_total", None)
         current = None
         if event.get("current"):

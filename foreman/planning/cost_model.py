@@ -58,6 +58,8 @@ class CostOptions:
     donor_max_uploads: int = 1
     temp_slowdown_per_c: float = 0.02
     temp_ref_c: float = 38.0
+    ram_headroom_frac: float = 0.0
+    ram_critical_bytes: int = 0
     allow_time_multiplexing: bool = False
     critical_workers: FrozenSet[str] = frozenset()
     # Policy switches (baselines):
@@ -85,6 +87,8 @@ class CostOptions:
             donor_max_uploads=cost.donor_max_uploads,
             temp_slowdown_per_c=cost.temp_slowdown_per_c,
             temp_ref_c=cost.temp_ref_c,
+            ram_headroom_frac=cost.ram_headroom_frac,
+            ram_critical_bytes=cost.ram_critical_bytes,
             allow_time_multiplexing=cost.allow_time_multiplexing,
         )
         values.update(overrides)
@@ -305,9 +309,29 @@ def memory_need(snap: Snapshot, worker_id: str, shard_id: str, opts: CostOptions
     return max(peak, shard.bytes) + opts.runtime_overhead_bytes
 
 
+def disk_feasible(snap: Snapshot, worker_id: str, shard_id: str) -> bool:
+    """A shard that is not on the worker's disk must fit under its disk cap after LRU eviction.
+
+    The resident shard's file is never evicted. Unknown ``disk_cap`` is treated as feasible.
+    """
+    worker = snap.workers[worker_id]
+    if worker.resident_shard == shard_id or shard_id in worker.disk_shards or worker.disk_cap is None:
+        return True
+    shard = snap.catalog.shards[shard_id]
+    evictable = sum(snap.catalog.shards[s].bytes for s in worker.disk_shards
+                    if s != worker.resident_shard and s in snap.catalog.shards)
+    return worker.disk_used - evictable + shard.bytes <= worker.disk_cap
+
+
+def under_memory_pressure(worker: WorkerView, opts: CostOptions) -> bool:
+    """A phone holding a shard whose free RAM has fallen below the critical floor (unknown RAM is not pressure)."""
+    return (opts.ram_critical_bytes > 0 and worker.ram_free is not None
+            and worker.resident_shard is not None and worker.ram_free < opts.ram_critical_bytes)
+
+
 def memory_feasible(snap: Snapshot, worker_id: str, shard_id: str, opts: CostOptions,
                     keep_resident: bool = False) -> bool:
-    """Shard bytes + learned load peak + runtime overhead must fit in free RAM.
+    """Shard bytes + learned load peak + runtime overhead must fit in free RAM, and the file in free disk.
 
     Single residency: switching frees the resident shard first, so its bytes
     count as available unless ``keep_resident`` (asynchronous switching, B5b).
@@ -317,10 +341,13 @@ def memory_feasible(snap: Snapshot, worker_id: str, shard_id: str, opts: CostOpt
     if not worker.alive or not worker.eligible or (worker_id, shard_id) in snap.excluded:
         return False
     if worker.resident_shard == shard_id and not opts.ignore_residency:
-        return True
+        # Already loaded, so it fits unless the phone is out of memory: then it must shed work.
+        return not under_memory_pressure(worker, opts)
+    if not disk_feasible(snap, worker_id, shard_id):
+        return False
     if worker.ram_free is None:
         return True
-    available = float(worker.ram_free)
+    available = float(worker.ram_free) * (1.0 - opts.ram_headroom_frac)
     if worker.resident_shard and not keep_resident:
         resident = snap.catalog.shards.get(worker.resident_shard)
         if resident is not None:

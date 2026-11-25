@@ -57,7 +57,7 @@ def _network(spare_disk=(), b_bytes=50 * MB, **coordinator_kwargs):
     FakeWorker("w3", net, resident="c")
     FakeWorker("spare", net, disk=set(spare_disk))
     for worker_id in net.workers:
-        net.coordinator.worker_connected(worker_id, "phone")
+        net.connect(worker_id, "phone")
     return net, clock
 
 
@@ -120,7 +120,7 @@ def test_worker_loss_resumes_in_flight_and_prefers_warm_replacement():
         FakeWorker("cold", net)
         FakeWorker("warm", net, disk={"b"})
         for worker_id in ("cold", "warm"):
-            net.coordinator.worker_connected(worker_id, "phone")
+            net.connect(worker_id, "phone")
         net.workers["spare"].disconnect()
         net.coordinator.connected.discard("spare")
         net.coordinator.telemetry.mark_departed("spare")
@@ -165,7 +165,7 @@ def test_load_failure_excludes_worker_and_replans():
     async def scenario():
         net, clock = _network()
         FakeWorker("other", net, disk={"b"})
-        net.coordinator.worker_connected("other", "phone")
+        net.connect("other", "phone")
         net.workers["spare"].fail_load = True
         net.workers["spare"].disk.add("b")
         await _heartbeats(net, clock)

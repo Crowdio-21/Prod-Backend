@@ -159,9 +159,9 @@ foreman/                    Orchestrator service
     profiles.py             Per-device-class phase models (load/init/write/unload/peak memory)
     registry.py             Manifest loading/validation, sha256, holder map, LRU eviction
     cost_model.py           C_switch, C_fetch, t_comm, t_comp, pipeline time, memory feasibility
-    planner.py              Exhaustive oracle, Pareto DP, scalarised DP
-    policies.py             B0, B1, B2, B3, B4, B5a, B5b, S-aware
-    controller.py           Triggers, hysteresis, break-even switch rule
+    planner.py              Exhaustive oracle, Pareto DP, scalarised DP, incremental local search
+    policies.py             B0, B1, B2, B3, B4, B5a, B5b, S-aware (+ local / regret variants)
+    controller.py           Triggers, hysteresis, break-even and regret-counter switch rules
     routes.py, prefetch.py, problems.py, eventlog.py, serialize.py
   db/                       SQLAlchemy models, CRUD, seeding
   schema/                   Pydantic schemas
@@ -559,6 +559,14 @@ $env:CROWDIO_FLAGS = "adaptive_planning,problem_reports"
 python tests/run_foreman_simple.py
 ```
 
+**The flags turn the coordinator on, but they do not choose the policy.** The default policy is `B0`, which keeps the fixed pipeline and only re-plans after a failure (worker lost, load failed). To make it switch for bandwidth, load or heat changes, run with a run config that sets `policy: S-aware` (see `evaluation/reconfig/configs/run_example.yaml`):
+
+```powershell
+$env:CROWDIO_RUN_CONFIG = "evaluation\reconfig\configs\run_example.yaml"
+```
+
+`GET /api/plan/status` shows the active `policy`.
+
 The Foreman prints the active flags at startup (`[FLAGS] ...`). `GET /api/plan/status` shows them while it runs, and the event log `logs/runs/plan_<timestamp>.jsonl` records every decision.
 
 #### Every case
@@ -628,10 +636,12 @@ The run config's `log_path` sets the JSONL event log.
 - **Planner** (`planner.py`, `policies.py`, pure):
   - Memory feasibility filters first. Search covers ordered assignments of distinct workers and compositions of atoms into exported shards.
   - The exhaustive search is the exact oracle. A Pareto DP is also exact; a scalarised DP is faster and reports its gap.
+  - Incremental repartitioning (`local_search`) hill-climbs from the current plan. Its moves are: replace a worker with a standby, swap two stages' workers, shift a cut by one atom, merge or split a stage, and re-tile (any other exported cut, keeping residency greedily). A plan whose worker died is first repaired onto a standby. It is not exact. The local policies run a full search every `full_every` calls (default 10) and keep the better result, and `local_gap()` reports the gap against the oracle. On 40 random instances in the tests it matched the oracle on 39 (mean gap 0.09%, worst 3.5%).
   - The baselines B0–B5b and S-aware sit behind one interface.
 - **Controller** (`controller.py`, pure):
   - Triggers: telemetry drift, worker join or leave, deadline risk, queue growth, problem reports.
-  - Switch rule: J(new) + margin < J(current), with persistence, cooldown and a per-window switch cap.
+  - Switch rule (break-even): J(new) + margin < J(current), with persistence, cooldown and a per-window switch cap.
+  - Switch rule (regret, rent or buy): while the best alternative is cheaper per request, accumulate `served × (T_steady_cur − T_steady_best)`. Switch once it reaches `C_switch + margin`, where the margin is the switch-cost uncertainty plus `margin_abs_s + margin_frac·C_switch`. Regret resets after a switch and whenever nothing is cheaper. It needs no forecast of the remaining requests. The 2-competitive ski-rental bound holds only for the two-state abstraction (stay versus one fixed alternative with exact costs), not for the full planner.
   - It refuses non-forced switches on stale estimates.
   - Forced replans (worker lost, load failed, OOM) bypass the margin.
 - **Epochs**: every request, activation, ack and result carries the plan epoch.
@@ -650,6 +660,9 @@ The run config's `log_path` sets the JSONL event log.
 | `B4` | Data-parallel replicas of the full model where it fits; pipeline over the rest |
 | `B5a` / `B5b` | Per-plan switching overhead; B5b also allows asynchronous switching (the reference showing what single residency costs) |
 | `S-aware` / `S-aware-placement` | Ours: full switching cost from the current residency state, with or without re-cutting |
+| `S-aware-local` | S-aware with incremental local search (full search every 10th call) and the break-even rule |
+| `S-aware-regret` | S-aware full search with the regret-counter switch rule |
+| `S-aware-local-regret` | Local search and the regret-counter switch rule |
 
 ### Protocol v2 (`crowdio.reconfiguration`, version 2)
 
@@ -661,6 +674,8 @@ Schemas are in [foreman/planning/contract.py](foreman/planning/contract.py). Eve
 | Worker → Foreman | `report` (WorkerState), `load_result`, `problem`, `need`, `activation` (relay route), `ack`, `msg_ack`, `probe_result` |
 | Worker → worker | `activation`, `ack` |
 | Client ↔ Foreman | `submit_inference` → `inference_accepted`, `inference_result` |
+
+**Disk space.** A worker reports `disk_used` and `disk_cap`. The planner will not place a shard that is not already on a worker's disk unless it fits under the cap after deleting older files (least recently used first; the resident shard's file is never deleted). `load` and `prefetch` carry an `evict` list naming the files the worker must delete to make room, and each deletion is logged as an `evict` event. A worker that does not report `disk_cap` is treated as having enough space. The Android app already keeps its own disk cap and deletes least-recently-used shards (never the resident one) when a download needs room, so it does not need the `evict` list; it ignores the field. It reports `disk_used` and `disk_cap`, which is what the Foreman's check uses.
 
 Problem types: `NEXT_HOP_DOWN`, `MISSING_SHARD`, `WRONG_SHARD`, `WRONG_EPOCH`, `OOM`, `SLOW_STAGE`, `LINK_DEGRADED`, `LOAD_FAILED`.
 

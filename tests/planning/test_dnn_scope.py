@@ -50,7 +50,7 @@ def test_coordinator_places_shards_only_on_workers_in_scope(scope):
         for prefix, kind in (("m", "mobile"), ("pc", "pc")):
             for index, shard in enumerate(("a", "b", "c"), 1):
                 FakeWorker(f"{prefix}{index}", net, device_class="phone", resident=shard)
-                net.coordinator.worker_connected(f"{prefix}{index}", "phone", kind)
+                net.connect(f"{prefix}{index}", "phone", kind)
         for _ in range(2):
             clock.now += 1
             for worker in net.workers.values():

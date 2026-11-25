@@ -25,14 +25,27 @@ from .failure_recovery import FailureRecoveryTracker, RecoveryMetrics
 from .communication_tracker import CommunicationTracker, CommunicationMetrics
 from .runner import EvaluationRunner, ExperimentConfig
 from .visualization import EvaluationVisualizer, ChartConfig, quick_generate_report
-from .real_metrics_collector import (
-    RealMetricsCollector, RealTaskMetrics, RealJobMetrics, 
-    RealWorkerMetrics, RealSystemMetrics, collect_real_evaluation
-)
-from .real_runner import (
-    RealEvaluationRunner, EvaluationConfig, WorkloadConfig, WorkloadResult,
-    run_quick_real_evaluation, run_full_real_evaluation
-)
+
+# The real-metrics modules import foreman.db.base, which reads CROWDIO_DATABASE_URL once at import.
+# Load them on first use so the device simulator can point the database elsewhere first.
+_LAZY = {
+    **dict.fromkeys(
+        ("RealMetricsCollector", "RealTaskMetrics", "RealJobMetrics",
+         "RealWorkerMetrics", "RealSystemMetrics", "collect_real_evaluation"),
+        ".real_metrics_collector"),
+    **dict.fromkeys(
+        ("RealEvaluationRunner", "EvaluationConfig", "WorkloadConfig", "WorkloadResult",
+         "run_quick_real_evaluation", "run_full_real_evaluation"),
+        ".real_runner"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        import importlib
+        return getattr(importlib.import_module(_LAZY[name], __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Real Metrics Collection

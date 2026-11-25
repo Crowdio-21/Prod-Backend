@@ -16,6 +16,7 @@ Similar to how CheckpointManager handles checkpoint lifecycle, this class
 handles the full dependency lifecycle from job creation through completion.
 """
 
+import asyncio
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -120,6 +121,7 @@ class DependencyManager:
         self._pipeline_func_codes: Dict[str, Dict[int, str]] = {}
         # In-memory cache: job_id → pipeline metadata
         self._pipeline_metadata: Dict[str, Dict[str, Any]] = {}
+        self._completion_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     #  Pipeline Job Creation
@@ -294,7 +296,9 @@ class DependencyManager:
         """
         newly_unblocked: List[str] = []
 
-        async with db_session() as session:
+        # One completion at a time: injecting upstream results into a fan-in task's args is a
+        # read-modify-write, and results arrive concurrently on different connections.
+        async with self._completion_lock, db_session() as session:
             # Get the completed task to find its dependents
             dependents_json = await get_task_dependents(session, task_id)
 

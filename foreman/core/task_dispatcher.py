@@ -18,6 +18,7 @@ from .utils import (
     _update_task_status,
     _update_worker_status,
     _claim_task_for_worker,
+    _requeue_task_if_assigned,
     _get_latest_task_failure_with_checkpoint,
 )
 from common.protocol import (
@@ -78,6 +79,11 @@ class TaskDispatcher:
             for worker_id in worker_ids
             if kind_allowed(self._worker_kind(worker_id), self.dnn_scope)
         }
+
+    def forget_dispatch(self, task_id: str, worker_id: Optional[str]) -> None:
+        """Tell the scheduler a dispatched task will not come back as dispatched."""
+        if self.scheduler is not None:
+            self.scheduler.observe_task_lost(task_id, worker_id)
 
     # ==================== Code Preparation for Mobile Workers ====================
 
@@ -182,7 +188,9 @@ class TaskDispatcher:
             # Check if the assigned worker is still connected
             if task.worker_id and task.worker_id not in connected_workers:
                 # Worker is disconnected - reset task to pending for reassignment
-                await _update_task_status(task.id, "pending", worker_id=None)
+                if not await _requeue_task_if_assigned(task.id, task.worker_id):
+                    continue
+                self.forget_dispatch(task.id, task.worker_id)
                 recovered += 1
                 print(
                     f"TaskDispatcher: 🔄 Recovered orphaned task {task.id} "
@@ -295,6 +303,8 @@ class TaskDispatcher:
             success = await self._assign_task_to_worker(
                 job_id, scheduler_task.id, task_func_code, task_args, worker_id
             )
+            if not success:
+                self.forget_dispatch(scheduler_task.id, worker_id)
             if success:
                 tasks_assigned += 1
                 if dnn_job:
@@ -465,6 +475,10 @@ class TaskDispatcher:
         Returns:
             True if assignment successful, False otherwise
         """
+        # Reserve the worker before the first await, so a concurrent dispatch cannot give it a second task.
+        if not self.connection_manager.is_worker_available(worker_id):
+            return False
+        self.connection_manager.mark_worker_busy(worker_id)
         try:
             # Get task_metadata from job_manager for declarative checkpointing
             task_metadata = self.job_manager.get_task_metadata(job_id)
@@ -542,12 +556,14 @@ class TaskDispatcher:
 
             if not websocket:
                 print(f"TaskDispatcher: No websocket found for worker {worker_id}")
+                self.connection_manager.mark_worker_available(worker_id)
                 return False
 
             # Atomically claim task; if someone else grabbed it, skip
             claimed_job_id = await _claim_task_for_worker(task_id, worker_id)
             if not claimed_job_id:
                 print(f"TaskDispatcher: Task {task_id} was already claimed, skipping")
+                self.connection_manager.mark_worker_available(worker_id)
                 return False
 
             # Increment total_tasks_assigned for this worker
@@ -559,9 +575,8 @@ class TaskDispatcher:
             # Send to worker
             await websocket.send(message.to_json())
 
-            # Mark worker as busy
+            # The worker was reserved above; record what it is running
             self.connection_manager.set_worker_active_task(worker_id, task_id, job_id)
-            self.connection_manager.mark_worker_busy(worker_id)
             await _update_worker_status(worker_id, "busy", current_task_id=task_id)
 
             action = "Resumed" if is_resume else "Assigned"

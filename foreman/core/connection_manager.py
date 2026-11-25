@@ -60,6 +60,10 @@ class WorkerInfo:
     device_specs: Dict[str, Any] = field(default_factory=dict)
     current_task_id: Optional[str] = None
     current_job_id: Optional[str] = None
+    # Reconfiguration protocol v2 capabilities, as declared in worker_ready (1 = legacy worker)
+    proto_version: int = 1
+    supported_flags: Optional[tuple] = None
+    supported_messages: Optional[tuple] = None
     
     @classmethod
     def from_worker_ready_message(
@@ -104,8 +108,25 @@ class WorkerInfo:
             supports_settrace=caps["supports_settrace"],
             supports_frame_introspection=caps["supports_frame_introspection"],
             needs_instrumentation=caps["needs_instrumentation"],
-            device_specs=device_specs
+            device_specs=device_specs,
+            proto_version=_as_int(message_data.get("proto_version"), 1),
+            supported_flags=_as_names(message_data.get("supported_flags")),
+            supported_messages=_as_names(message_data.get("supported_messages")),
         )
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_names(value: Any) -> Optional[tuple]:
+    """A declared list of names as a tuple; None when the worker declared nothing (or something malformed)."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    return tuple(str(v) for v in value)
 
 
 class ConnectionManager:

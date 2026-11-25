@@ -40,6 +40,13 @@ from .link import LinkEngine
 
 _MODEL_RE = re.compile(r'"model_path"\s*:\s*"([^"]+)"')
 LINK_NOISE = 0.08
+# Simulated radio: RSSI falls RADIO_DB_PER_DECADE dB for every 10x drop in the link's bandwidth factor, around a
+# per-tier level (flagship links are the strongest), with RADIO_NOISE_DB of measurement noise. This is a stand-in
+# for the real RSSI-throughput relation, deliberately different from the RSSI scheduler's default curve.
+RADIO_REF_DBM = -50.0
+RADIO_DB_PER_DECADE = 25.0
+RADIO_NOISE_DB = 2.0
+MEASURE_MIN_BYTES = 256_000  # transfers smaller than this are RTT-bound, not measured
 
 
 @dataclass
@@ -85,12 +92,15 @@ class VirtualDevice:
         seed: int = 0,
         heartbeat_s: float = 10.0,
         probe_s: float = 10.0,
+        bw_reports: str = "always",
         default_work_s: float = 0.5,
         out_ratio: float = 0.1,
         events: Optional[Callable[..., None]] = None,
     ) -> None:
         if mode not in ("model", "real"):
             raise ValueError("mode must be 'model' or 'real'")
+        if bw_reports not in ("always", "transfers"):
+            raise ValueError("bw_reports must be 'always' or 'transfers'")
         if mode == "real" and clock.speed != 1.0:
             raise ValueError("real mode runs the actual task function, so it needs speed 1")
         self.spec = spec
@@ -101,6 +111,8 @@ class VirtualDevice:
         self.model_size = model_size
         self.heartbeat_s = heartbeat_s
         self.probe_s = probe_s
+        self.bw_reports = bw_reports
+        self._transfer_rate: Dict[str, float] = {}  # direction -> bytes per real second of the last big transfer
         self.default_work_s = default_work_s
         self.out_ratio = out_ratio
         self.stats = DeviceStats()
@@ -192,12 +204,12 @@ class VirtualDevice:
 
     # ---------------------------------------------------------------- shaped I/O
     async def _download(self, n_bytes: int) -> None:
-        await self.engine.transfer(self.spec.device_id, "down", n_bytes)
+        self._measure("down", n_bytes, await self.engine.transfer(self.spec.device_id, "down", n_bytes))
         await self.clock.sleep(self.spec.rtt_ms / 2000.0)
         self.stats.bytes_down += n_bytes
 
     async def _upload(self, n_bytes: int) -> None:
-        await self.engine.transfer(self.spec.device_id, "up", n_bytes)
+        self._measure("up", n_bytes, await self.engine.transfer(self.spec.device_id, "up", n_bytes))
         await self.clock.sleep(self.spec.rtt_ms / 2000.0)
         self.stats.bytes_up += n_bytes
 
@@ -233,6 +245,30 @@ class VirtualDevice:
             self._measured_at = now
         return self._measured
 
+    def _measure(self, direction: str, n_bytes: int, seconds: float) -> None:
+        """Like the Android app: a big enough transfer is timed and becomes the reported bandwidth."""
+        if n_bytes >= MEASURE_MIN_BYTES and seconds and seconds > 0:
+            self._transfer_rate[direction] = n_bytes / seconds * self.clock.speed
+
+    def _radio(self) -> Dict[str, float]:
+        """RSSI and negotiated link speed for the device's *current* bandwidth (fresh every heartbeat)."""
+        factor = max(1e-3, self.engine.rate_bps(self.spec.device_id, "down") / self.spec.down_bps)
+        tier = 25.0 * math.log10(40.0 / max(self.spec.down_mbps, 0.1))  # weaker tiers sit further from the AP
+        rssi = RADIO_REF_DBM - tier + RADIO_DB_PER_DECADE * math.log10(factor) + self._rng.gauss(0.0, RADIO_NOISE_DB)
+        return {"rssi": round(max(-100.0, min(-20.0, rssi)), 1), "link_mbps": round(self.spec.down_mbps * 6 * min(1.0, factor * 2), 1)}
+
+    def _net(self) -> Dict[str, Any]:
+        """The Android heartbeat's ``net`` block: radio always; bandwidth always or only once measured."""
+        net: Dict[str, Any] = dict(self._radio())
+        if self.bw_reports == "always":
+            link = self._link_report()
+            net.update({"bw_down": link["down_bps"] * 8, "bw_up": link["up_bps"] * 8})
+        else:
+            for direction, key in (("down", "bw_down"), ("up", "bw_up")):
+                if direction in self._transfer_rate:
+                    net[key] = self._transfer_rate[direction] * 8
+        return net
+
     def _metrics(self) -> Dict[str, Any]:
         s, busy = self.spec, self._busy
         link = self._link_report()
@@ -252,7 +288,7 @@ class VirtualDevice:
             data.update({"performance_metrics": self._metrics(), "link": link})
         else:  # the Android app answers a PING with flat metrics
             data.update(self._metrics())
-            data["net"] = {"bw_down": link["down_bps"] * 8, "bw_up": link["up_bps"] * 8}
+            data["net"] = self._net()
         return Message(MessageType.PONG, data)
 
     async def _heartbeats(self) -> None:
@@ -267,7 +303,7 @@ class VirtualDevice:
                 message = Message(MessageType.WORKER_HEARTBEAT, {
                     "worker_id": self.spec.device_id, "status": "busy" if self._busy else "online",
                     "current_task": self._current_task,
-                    "net": {"bw_down": link["down_bps"] * 8, "bw_up": link["up_bps"] * 8},
+                    "net": self._net(),
                     "res": {"free_ram_mb": metrics["ram_available_mb"], "free_disk_mb": 40_000,
                             "battery_pct": metrics["battery_level"], "cpu_load": metrics["cpu_usage_percent"] / 100.0,
                             "thermal": 0}})

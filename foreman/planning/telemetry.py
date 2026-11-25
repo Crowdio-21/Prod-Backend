@@ -60,6 +60,7 @@ class _WorkerRecord:
     compute: Dict[str, Ewma] = field(default_factory=dict)  # shard -> seconds/request
     alive: bool = True
     kind: Optional[str] = None  # "mobile" | "pc", from the worker type at connect
+    v2: bool = True  # False = legacy worker: never planned onto (it cannot speak protocol v2)
 
 
 DEFAULT_BW = Est.prior(1.25e6)  # 10 Mbit/s prior, stale until measured
@@ -98,6 +99,13 @@ class TelemetryStore:
 
     def workers(self) -> Iterable[str]:
         return tuple(self._workers)
+
+    def set_v2(self, worker_id: str, value: bool) -> None:
+        self._record(worker_id).v2 = value
+
+    def peer_endpoint(self, worker_id: str) -> Optional[str]:
+        record = self._workers.get(worker_id)
+        return record.state.peer_endpoint if record is not None and record.state is not None else None
 
     def set_kind(self, worker_id: str, kind: Optional[str]) -> None:
         if kind in ("mobile", "pc"):
@@ -261,7 +269,7 @@ class TelemetryStore:
                 down=record.down.estimate(now, DEFAULT_BW, self.config.small_sample_rel_std),
                 rtt=record.rtt.estimate(now, DEFAULT_RTT, self.config.small_sample_rel_std),
                 queue_len=(state.stage_stats.queue_len if state and state.stage_stats else 0),
-                eligible=dnn_scope is None or kind_allowed(self.kind(worker_id), dnn_scope),
+                eligible=record.v2 and (dnn_scope is None or kind_allowed(self.kind(worker_id), dnn_scope)),
             )
         links = {
             pair: replace(view, bw=replace(view.bw, age_s=now - observed), rtt=replace(view.rtt, age_s=now - observed))

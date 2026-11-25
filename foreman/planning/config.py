@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from .flags import FeatureFlags
 
-POLICIES = ("B0", "B1", "B2", "B3", "B4", "B5a", "B5b", "S-aware", "S-aware-placement")
+POLICIES = ("B0", "B1", "B2", "B3", "B4", "B5a", "B5b", "S-aware", "S-aware-placement",
+            "S-aware-local", "S-aware-regret", "S-aware-local-regret")
 OBJECTIVES = ("min_total", "min_steady_deadline")
 
 
@@ -39,6 +40,10 @@ class CostConfig:
     donor_max_uploads: int = 1
     temp_slowdown_per_c: float = 0.02  # above temp_ref_c
     temp_ref_c: float = 38.0
+    # Phones report free RAM that the OS can take back at any moment: plan on this fraction less.
+    ram_headroom_frac: float = 0.15
+    # Free RAM below this on a phone that holds a shard is memory pressure: the shard is cut finer or moved.
+    ram_critical_bytes: int = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -89,7 +94,7 @@ class RunConfig:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     routes: RouteConfig = field(default_factory=RouteConfig)
     prefetch: PrefetchConfig = field(default_factory=PrefetchConfig)
-    planner_mode: str = "exhaustive"  # exhaustive | pareto_dp | scalar_dp
+    planner_mode: str = "auto"  # auto | exhaustive | pareto_dp | scalar_dp (auto picks by instance size)
     dnn_workers: str = "mobile"  # mobile | pc (validate partitions on PCs) | any
 
     def __post_init__(self) -> None:
@@ -102,7 +107,7 @@ class RunConfig:
         from .scope import check_scope
 
         check_scope(self.dnn_workers)
-        if self.planner_mode not in ("exhaustive", "pareto_dp", "scalar_dp"):
+        if self.planner_mode not in ("auto", "exhaustive", "pareto_dp", "scalar_dp"):
             raise ValueError(f"unknown planner_mode {self.planner_mode!r}")
 
     @classmethod

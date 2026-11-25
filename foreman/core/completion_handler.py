@@ -1,4 +1,4 @@
-from common.protocol import create_job_results_message
+from common.protocol import Message, MessageType, create_job_results_message
 
 from .run_log import log_job_run
 
@@ -10,6 +10,22 @@ class JobCompletionHandler:
         self.connection_manager = connection_manager
         self.job_manager = job_manager
         self.task_dispatcher = task_dispatcher
+
+    async def handle_job_failure(self, job_id: str, error: str):
+        """Give up on a job and tell its client, instead of retrying it forever"""
+        reason = f"Job failed after {self.job_manager.max_task_attempts} attempts: {error}"
+        print(f"[JOB FAILED] {job_id}: {reason}")
+        # Log before the job's cached stage names are cleared
+        await log_job_run(
+            self.job_manager, self.connection_manager, self.task_dispatcher, job_id, status="failed",
+        )
+        await self.job_manager.fail_job(job_id, reason)
+        client_websocket = self.connection_manager.get_client_websocket(job_id)
+        if client_websocket:
+            try:
+                await client_websocket.send(Message(MessageType.JOB_ERROR, {"error": reason}, job_id).to_json())
+            except Exception as exc:  # noqa: BLE001
+                print(f"[JOB FAILED] could not notify the client of {job_id}: {exc}")
 
     async def handle_job_completion(self, job_id: str):
         """Handle completion of a job and send results to client"""

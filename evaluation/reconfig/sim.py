@@ -226,10 +226,11 @@ class Simulator:
                           "triggers": list(triggers), "action": decision.action,
                           "current": [list(s) for s in plan.assignment()] if plan else None,
                           "objective": [self.objective.kind, self.objective.deadline_s],
-                          "opts": opts_to_dict(opts), "controller": dict(self.cfg.__dict__)}
+                          "opts": opts_to_dict(opts), "controller": dict(self.cfg.__dict__),
+                          "local_calls": getattr(policy, "_calls", 0)}
                 if self.log_snapshots:
                     record["snapshot"] = snapshot_to_dict(obs)
-                    record["controller_state"] = {"last_switch_at": state.last_switch_at}
+                    record["controller_state"] = {"last_switch_at": state.last_switch_at, "regret_s": state.regret_s}
                 record["inputs_hash"] = stable_hash({k: record.get(k) for k in ("snapshot", "n", "current", "opts")})
                 self.log.emit("planner_call", **record)
             self.log.emit("controller_decision", action=decision.action, reason=decision.reason,

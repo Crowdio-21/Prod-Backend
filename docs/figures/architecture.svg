@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 830" width="1200" height="830" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a3a3a"/>
+    </marker>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5fc4"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2e8b57"/>
+    </marker>
+    <marker id="arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c76a12"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="830" fill="#ffffff"/>
+
+  <!-- ============ SDK ============ -->
+  <rect x="25" y="45" width="185" height="135" rx="10" fill="#fff6db" stroke="#c9a227" stroke-width="1.5"/>
+  <text x="117" y="72" text-anchor="middle" font-size="15" font-weight="bold" fill="#5a4500">Job submitter (SDK)</text>
+  <text x="117" y="98" text-anchor="middle" font-size="12" fill="#333">Exports ONNX shards</text>
+  <text x="117" y="115" text-anchor="middle" font-size="12" fill="#333">+ sha256 manifest</text>
+  <text x="117" y="140" text-anchor="middle" font-size="12" fill="#333">Submits job with</text>
+  <text x="117" y="157" text-anchor="middle" font-size="12" fill="#333">objective and deadline</text>
+  <line x1="210" y1="112" x2="238" y2="112" stroke="#3a3a3a" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ============ Foreman ============ -->
+  <rect x="240" y="20" width="935" height="230" rx="16" fill="#eaf1fd" stroke="#2f5fc4" stroke-width="2"/>
+  <text x="707" y="47" text-anchor="middle" font-size="17" font-weight="bold" fill="#1d3f8a">Foreman (coordinator): global view, makes the decisions</text>
+
+  <g font-size="12" fill="#333" text-anchor="middle">
+    <!-- Telemetry -->
+    <rect x="255" y="65" width="160" height="120" rx="8" fill="#ffffff" stroke="#2f5fc4" stroke-width="1.5"/>
+    <text x="335" y="90" font-size="14" font-weight="bold" fill="#1d3f8a">Telemetry</text>
+    <text x="335" y="114">Per-phone bandwidth,</text>
+    <text x="335" y="131">RTT, free RAM, battery</text>
+    <text x="335" y="148">(running mean</text>
+    <text x="335" y="165">and variance)</text>
+    <!-- Cost model -->
+    <rect x="440" y="65" width="160" height="120" rx="8" fill="#ffffff" stroke="#2f5fc4" stroke-width="1.5"/>
+    <text x="520" y="90" font-size="14" font-weight="bold" fill="#1d3f8a">Cost model</text>
+    <text x="520" y="114">Switching cost,</text>
+    <text x="520" y="131">transfer time,</text>
+    <text x="520" y="148">pipeline time</text>
+    <text x="520" y="165">(with uncertainty)</text>
+    <!-- Planner -->
+    <rect x="625" y="65" width="160" height="120" rx="8" fill="#ffffff" stroke="#2f5fc4" stroke-width="1.5"/>
+    <text x="705" y="90" font-size="14" font-weight="bold" fill="#1d3f8a">Planner</text>
+    <text x="705" y="114">Where to cut the</text>
+    <text x="705" y="131">model, and which</text>
+    <text x="705" y="148">phone runs</text>
+    <text x="705" y="165">each stage?</text>
+    <!-- Controller -->
+    <rect x="810" y="65" width="160" height="120" rx="8" fill="#ffffff" stroke="#2f5fc4" stroke-width="1.5"/>
+    <text x="890" y="90" font-size="14" font-weight="bold" fill="#1d3f8a">Controller</text>
+    <text x="890" y="114">Switch plans now?</text>
+    <text x="890" y="131">Only if the gain</text>
+    <text x="890" y="148">repays the cost</text>
+    <text x="890" y="165">(break-even, cooldown)</text>
+    <!-- Scheduler -->
+    <rect x="995" y="65" width="160" height="120" rx="8" fill="#ffffff" stroke="#2f5fc4" stroke-width="1.5"/>
+    <text x="1075" y="90" font-size="14" font-weight="bold" fill="#1d3f8a">Task scheduler</text>
+    <text x="1075" y="114">Which phone gets</text>
+    <text x="1075" y="131">each task?</text>
+    <text x="1075" y="148">FIFO, bandwidth-aware,</text>
+    <text x="1075" y="165">RSSI-assisted</text>
+  </g>
+  <g stroke="#2f5fc4" stroke-width="2">
+    <line x1="415" y1="125" x2="438" y2="125" marker-end="url(#arrBlue)"/>
+    <line x1="600" y1="125" x2="623" y2="125" marker-end="url(#arrBlue)"/>
+    <line x1="785" y1="125" x2="808" y2="125" marker-end="url(#arrBlue)"/>
+    <line x1="970" y1="125" x2="993" y2="125" marker-end="url(#arrBlue)"/>
+  </g>
+  <text x="707" y="222" text-anchor="middle" font-size="12.5" font-style="italic" fill="#1d3f8a">Outputs: a plan (stage cut points + phone for each stage) and task assignments</text>
+
+  <!-- ============ Foreman <-> AP ============ -->
+  <line x1="707" y1="256" x2="707" y2="318" stroke="#3a3a3a" stroke-width="4" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  <text x="725" y="280" font-size="13" font-weight="bold" fill="#333">WebSocket, protocol v2</text>
+  <text x="725" y="298" font-size="12" fill="#555">shards, plans, tasks, activations, acknowledgements</text>
+
+  <!-- ============ Wi-Fi AP ============ -->
+  <rect x="597" y="322" width="220" height="52" rx="26" fill="#f1f1f1" stroke="#555" stroke-width="1.5"/>
+  <g fill="none" stroke="#555" stroke-width="2" stroke-linecap="round">
+    <path d="M626,346 a14,14 0 0 1 22,0"/>
+    <path d="M620,340 a22,22 0 0 1 34,0"/>
+  </g>
+  <circle cx="637" cy="352" r="2.6" fill="#555"/>
+  <text x="725" y="354" text-anchor="middle" font-size="15" font-weight="bold" fill="#333">Wi-Fi access point</text>
+
+  <!-- AP <-> phones -->
+  <g stroke="#3a3a3a" stroke-width="2.5">
+    <line x1="660" y1="374" x2="440" y2="452" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <line x1="707" y1="374" x2="707" y2="452" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <line x1="754" y1="374" x2="974" y2="452" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  </g>
+
+  <!-- ============ Phones container label ============ -->
+  <text x="707" y="805" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">Volunteer phones: report their state and run one pipeline stage each</text>
+
+  <!-- Phone template: body, screen, speaker -->
+  <!-- Phone A -->
+  <g>
+    <rect x="320" y="455" width="200" height="275" rx="26" fill="#2b2b2b"/>
+    <rect x="331" y="480" width="178" height="225" rx="8" fill="#fbfbf8"/>
+    <rect x="395" y="465" width="50" height="6" rx="3" fill="#777"/>
+    <text x="420" y="505" text-anchor="middle" font-size="15" font-weight="bold" fill="#222">Phone A</text>
+    <rect x="370" y="517" width="100" height="24" rx="12" fill="#c76a12"/>
+    <text x="420" y="534" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Stage 1</text>
+    <rect x="348" y="556" width="144" height="16" rx="3" fill="#f6d3b0"/>
+    <rect x="348" y="576" width="144" height="16" rx="3" fill="#f6d3b0"/>
+    <rect x="348" y="596" width="144" height="16" rx="3" fill="#f6d3b0"/>
+    <rect x="348" y="616" width="144" height="16" rx="3" fill="#f6d3b0"/>
+    <text x="420" y="568" text-anchor="middle" font-size="11" fill="#5a2e00">embedding</text>
+    <text x="420" y="588" text-anchor="middle" font-size="11" fill="#5a2e00">layer 1</text>
+    <text x="420" y="608" text-anchor="middle" font-size="11" fill="#5a2e00">layer 2</text>
+    <text x="420" y="628" text-anchor="middle" font-size="11" fill="#5a2e00">layer 3</text>
+    <text x="420" y="660" text-anchor="middle" font-size="13" fill="#333">shard: 172 MB</text>
+    <text x="420" y="682" text-anchor="middle" font-size="11" fill="#777">Android worker</text>
+  </g>
+  <!-- Phone B -->
+  <g>
+    <rect x="607" y="455" width="200" height="275" rx="26" fill="#2b2b2b"/>
+    <rect x="618" y="480" width="178" height="225" rx="8" fill="#fbfbf8"/>
+    <rect x="682" y="465" width="50" height="6" rx="3" fill="#777"/>
+    <text x="707" y="505" text-anchor="middle" font-size="15" font-weight="bold" fill="#222">Phone B</text>
+    <rect x="657" y="517" width="100" height="24" rx="12" fill="#2e8b57"/>
+    <text x="707" y="534" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Stage 2</text>
+    <rect x="635" y="566" width="144" height="16" rx="3" fill="#cfe8d8"/>
+    <rect x="635" y="586" width="144" height="16" rx="3" fill="#cfe8d8"/>
+    <rect x="635" y="606" width="144" height="16" rx="3" fill="#cfe8d8"/>
+    <text x="707" y="578" text-anchor="middle" font-size="11" fill="#14432a">layer 4</text>
+    <text x="707" y="598" text-anchor="middle" font-size="11" fill="#14432a">layer 5</text>
+    <text x="707" y="618" text-anchor="middle" font-size="11" fill="#14432a">layer 6</text>
+    <text x="707" y="660" text-anchor="middle" font-size="13" fill="#333">shard: 81 MB</text>
+    <text x="707" y="682" text-anchor="middle" font-size="11" fill="#777">Android worker</text>
+  </g>
+  <!-- Phone C -->
+  <g>
+    <rect x="894" y="455" width="200" height="275" rx="26" fill="#2b2b2b"/>
+    <rect x="905" y="480" width="178" height="225" rx="8" fill="#fbfbf8"/>
+    <rect x="969" y="465" width="50" height="6" rx="3" fill="#777"/>
+    <text x="994" y="505" text-anchor="middle" font-size="15" font-weight="bold" fill="#222">Phone C</text>
+    <rect x="944" y="517" width="100" height="24" rx="12" fill="#6b4bb3"/>
+    <text x="994" y="534" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Stage 3</text>
+    <rect x="922" y="586" width="144" height="16" rx="3" fill="#ddd2f2"/>
+    <text x="994" y="598" text-anchor="middle" font-size="11" fill="#2f1d5e">classifier head</text>
+    <text x="994" y="660" text-anchor="middle" font-size="13" fill="#333">shard: 2.3 MB</text>
+    <text x="994" y="682" text-anchor="middle" font-size="11" fill="#777">Android worker</text>
+  </g>
+
+  <!-- Activations between phones -->
+  <g stroke="#3a3a3a" stroke-width="2.5">
+    <line x1="520" y1="600" x2="604" y2="600" marker-end="url(#arr)"/>
+    <line x1="807" y1="600" x2="891" y2="600" marker-end="url(#arr)"/>
+  </g>
+  <text x="563" y="590" text-anchor="middle" font-size="11.5" fill="#333">activations</text>
+  <text x="850" y="590" text-anchor="middle" font-size="11.5" fill="#333">activations</text>
+  <text x="563" y="618" text-anchor="middle" font-size="10" fill="#777">direct or</text>
+  <text x="563" y="631" text-anchor="middle" font-size="10" fill="#777">via Foreman</text>
+  <text x="850" y="618" text-anchor="middle" font-size="10" fill="#777">direct or</text>
+  <text x="850" y="631" text-anchor="middle" font-size="10" fill="#777">via Foreman</text>
+
+  <!-- Peer shard transfer -->
+  <g fill="none" stroke="#6b6b6b" stroke-width="1.8" stroke-dasharray="6 4">
+    <path d="M450,733 Q563,778 677,733" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <path d="M737,733 Q850,778 964,733" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  </g>
+  <text x="563" y="774" text-anchor="middle" font-size="11" fill="#555">peer shard transfer</text>
+  <text x="850" y="774" text-anchor="middle" font-size="11" fill="#555">peer shard transfer</text>
+
+  <!-- Input and result -->
+  <line x1="215" y1="600" x2="317" y2="600" stroke="#c76a12" stroke-width="3" marker-end="url(#arrOrange)"/>
+  <text x="262" y="588" text-anchor="middle" font-size="13" font-weight="bold" fill="#c76a12">Input</text>
+  <text x="262" y="620" text-anchor="middle" font-size="11" fill="#555">(sentence)</text>
+  <line x1="1094" y1="600" x2="1172" y2="600" stroke="#6b4bb3" stroke-width="3" marker-end="url(#arr)"/>
+  <text x="1135" y="588" text-anchor="middle" font-size="13" font-weight="bold" fill="#6b4bb3">Result</text>
+  <text x="1135" y="620" text-anchor="middle" font-size="11" fill="#555">to Foreman</text>
+
+  <!-- Heartbeats: phones -> Telemetry -->
+  <path d="M320,500 H228 V150 H252" fill="none" stroke="#2e8b57" stroke-width="2" stroke-dasharray="7 4" marker-end="url(#arrGreen)"/>
+  <rect x="22" y="300" width="196" height="108" rx="8" fill="#eef8f1" stroke="#2e8b57" stroke-width="1.2"/>
+  <text x="120" y="324" text-anchor="middle" font-size="13" font-weight="bold" fill="#1f6b41">Heartbeats</text>
+  <text x="120" y="345" text-anchor="middle" font-size="11.5" fill="#333">RSSI, Wi-Fi link speed,</text>
+  <text x="120" y="362" text-anchor="middle" font-size="11.5" fill="#333">free RAM, battery,</text>
+  <text x="120" y="379" text-anchor="middle" font-size="11.5" fill="#333">measured bandwidth,</text>
+  <text x="120" y="396" text-anchor="middle" font-size="11.5" fill="#333">problem reports</text>
+</svg>

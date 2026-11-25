@@ -93,13 +93,78 @@ def manifest_from_legacy(directory: Path, *, hash_files: bool = True) -> Manifes
     )
 
 
+def manifest_from_sdk(data: Mapping) -> Manifest:
+    """Adapt a manifest written by ``crowdio-export`` (SDK catalogue format v1).
+
+    The SDK numbers only the encoder atoms 0..A-1 and gives the embedding and the head no atom range.
+    Here the embedding is atom 0, encoder atom ``i`` is ``i + 1`` and the head is atom ``A + 1``, so
+    the planner sees one contiguous run of atoms. The embedding and the head are never merged with
+    encoder ranges (``pinned``); the ``full`` shard covers every atom by itself.
+    """
+    atom_map = sorted(data["atom_map"], key=lambda a: a["atom"])
+    n_enc = len(atom_map)
+    atoms = [AtomSpec(atom_index=0, name="embed")]
+    atoms += [AtomSpec(atom_index=a["atom"] + 1, name=f"L{a['start_layer']}-{a['end_layer']}",
+                       layers=list(range(a["start_layer"], a["end_layer"] + 1))) for a in atom_map]
+    atoms.append(AtomSpec(atom_index=n_enc + 1, name="head"))
+    ref_seq = max(1, int((data.get("flops_estimation") or {}).get("reference_seq_len") or 1))
+    method = str((data.get("flops_estimation") or {}).get("method") or "sdk_export")
+    shards: List[ShardSpec] = []
+    for raw in data["shards"]:
+        role = ShardRole(raw["role"])
+        if role is ShardRole.EMBED:
+            start = end = 0
+        elif role is ShardRole.HEAD:
+            start = end = n_enc + 1
+        elif role is ShardRole.FULL:
+            start, end = 0, n_enc + 1
+        else:
+            start, end = raw["start_atom"] + 1, raw["end_atom"] + 1
+        tensors = raw["tensors"]
+        per_sequence = float(raw.get("out_act_bytes_per_sequence") or 0)
+        out_per_token = float(raw["out_act_bytes_per_token"]) or per_sequence / ref_seq
+        shards.append(ShardSpec(
+            shard_id=raw["shard_id"], model_id=raw["model_id"], role=role, start_atom=start, end_atom=end,
+            start_layer=raw.get("start_layer"), end_layer=raw.get("end_layer"),
+            pinned=bool(raw.get("pinned")), bytes=int(raw["bytes"]),
+            flops=float(raw["flops"]) / ref_seq, flops_method=method,
+            in_act_bytes_per_token=float(raw["in_act_bytes_per_token"]), out_act_bytes_per_token=out_per_token,
+            tensor_contract=TensorContract(
+                inputs=[TensorSpec(**t) for t in tensors["inputs"]],
+                outputs=[TensorSpec(**t) for t in tensors["outputs"]]),
+            sha256=raw["sha256"], precision=raw.get("precision", "fp32"),
+            runtime_format=raw.get("runtime_format", "onnx"),
+            external_data_files=[f["path"] if isinstance(f, Mapping) else str(f)
+                                 for f in raw.get("external_data_files", [])],
+            exporter_version=raw.get("exporter_version") or data.get("exporter_version") or "unknown",
+            file_name=raw["file"]))
+    # The composition a fixed pipeline uses: embed, the widest encoder range(s), head.
+    by_start: Dict[int, ShardSpec] = {}
+    for shard in shards:
+        if shard.role is ShardRole.ENCODER and (shard.start_atom not in by_start
+                                                or shard.end_atom > by_start[shard.start_atom].end_atom):
+            by_start[shard.start_atom] = shard
+    composition = [next(s.shard_id for s in shards if s.role is ShardRole.EMBED)]
+    cursor = 1
+    while cursor <= n_enc:
+        composition.append(by_start[cursor].shard_id)
+        cursor = by_start[cursor].end_atom + 1
+    composition.append(next(s.shard_id for s in shards if s.role is ShardRole.HEAD))
+    return Manifest(model_id=data["model_id"], cut_grid=int(data["cut_grid"]), atoms=atoms, shards=shards,
+                    default_composition=composition)
+
+
 def load_manifest(path: Path, *, hash_files: bool = True) -> Tuple[Manifest, Path]:
-    """Load ``manifest.json`` (new format) or adapt ``partition_metadata.json``."""
+    """Load ``manifest.json`` (Foreman or SDK format) or adapt ``partition_metadata.json``."""
     path = Path(path)
     directory = path if path.is_dir() else path.parent
     candidate = directory / "manifest.json" if path.is_dir() else path
     if candidate.name == "manifest.json" and candidate.exists():
-        return Manifest.model_validate_json(candidate.read_text(encoding="utf-8")), directory
+        text = candidate.read_text(encoding="utf-8")
+        data = json.loads(text)
+        if "atom_map" in data:  # written by crowdio-export (SDK)
+            return manifest_from_sdk(data), directory
+        return Manifest.model_validate_json(text), directory
     return manifest_from_legacy(directory, hash_files=hash_files), directory
 
 
